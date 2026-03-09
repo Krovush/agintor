@@ -38,7 +38,7 @@ The design is constrained by four goals:
 | $u_{x,r}(A)$ | Utility of one task-seed run after cost, latency, and fault penalties. |
 | $s_x(A), \rho_x(A), \chi_x(A)$ | Primary score, shrinkage-robust score, and tail-risk diagnostic for task $x$. |
 | $\mathcal{F}_{\mathrm{obj}}$ | Archive objective set. |
-| $S$ | Mutation scope, a non-empty subset of $\set{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}}$. |
+| $S$ | Mutation scope, a non-empty subset of $\left\{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}\right\}$. |
 | $I_f$ | Archive island associated with objective $f$. |
 | $z_t$ | Runtime state at inner-loop step $t$. |
 
@@ -49,7 +49,7 @@ The design is constrained by four goals:
 A candidate runtime is
 
 $$
-A = \paren{g^{\mathrm{top}}, g^{\mathrm{mem}}, g^{\mathrm{tool}}, g^{\mathrm{ctl}}}.
+A = \left(g^{\mathrm{top}}, g^{\mathrm{mem}}, g^{\mathrm{tool}}, g^{\mathrm{ctl}}\right).
 $$
 
 *Variables.* $g^{\mathrm{top}}$ selects and orchestrates agents; $g^{\mathrm{mem}}$ governs short-term and long-term memory; $g^{\mathrm{tool}}$ governs discovery, synthesis, validation, and dispatch of tools; $g^{\mathrm{ctl}}$ governs model allocation, verification, stopping, and mutation-surface scoring.
@@ -117,7 +117,7 @@ The following invariants are mandatory:
 A task-time run of runtime $A$ on task $x$ with seed $r$ is a state machine
 
 $$
-z_{t+1} = T_A\paren{z_t, x, \omega_t}.
+z_{t+1} = T_A\left(z_t, x, \omega_t\right).
 $$
 
 *Variables.* $z_t$ is runtime state at step $t$; $T_A$ is the transition rule induced by runtime $A$; $x$ is the current task; $\omega_t$ collects admissible stochasticity such as model sampling under the fixed seed.
@@ -176,7 +176,7 @@ A separate validation set $X_{\mathrm{val}}$ is used only to choose leaders and 
 For task $x$ and seed $r$, the benchmark-specific verifier returns
 
 $$
-V_{x,r}(A) = V_x\paren{y_{x,r}(A), \tau_{x,r}(A)} \in [0,1].
+V_{x,r}(A) = V_x\left(y_{x,r}(A), \tau_{x,r}(A)\right) \in [0,1].
 $$
 
 *Variables.* $V_x(\cdot)$ is the task-specific verifier; $y_{x,r}(A)$ is the final artifact; $\tau_{x,r}(A)$ is the full execution trace.
@@ -187,8 +187,8 @@ Reference cost and latency scales are task-specific. Define $C_{0,x}$ and $L_{0,
 
 $$
 \begin{align}
-C_{0,x} &= \max\set{1,\ \median_r\, C_{x,r}(A_0)}, \\
-L_{0,x} &= \max\set{1,\ \median_r\, L_{x,r}(A_0)}.
+C_{0,x} &= \max\left\{1,\ \text{median}_r\, C_{x,r}(A_0)\right\}, \\
+L_{0,x} &= \max\left\{1,\ \text{median}_r\, L_{x,r}(A_0)\right\}.
 \end{align}
 $$
 
@@ -199,8 +199,8 @@ Per-seed utility is
 $$
 \begin{aligned}
 u_{x,r}(A) =\;& V_{x,r}(A)
-- \lambda_C \log\!\paren{1+\frac{C_{x,r}(A)}{C_{0,x}}}
-- \lambda_L \log\!\paren{1+\frac{L_{x,r}(A)}{L_{0,x}}} \\
+{} - \lambda_C \log\!\left(1+\frac{C_{x,r}(A)}{C_{0,x}}\right)
+{} - \lambda_L \log\!\left(1+\frac{L_{x,r}(A)}{L_{0,x}}\right) \\
 &\; - \lambda_H H_{x,r}(A).
 \end{aligned}
 $$
@@ -220,11 +220,7 @@ $$
 With low seed count, raw sample variance is noisy. Agintor therefore uses shrinkage:
 
 $$
-\hat{\sigma}_x^2(A)
-=
-(1-\eta_{\sigma})\, \Var_r\paren{u_{x,r}(A)}
-+
-\eta_{\sigma}\, \sigma^2_{f(x),\mathrm{prior}}.
+\hat{\sigma}_x^2(A) = (1-\eta_{\sigma})\, \text{Var}_r\left(u_{x,r}(A)\right) + \eta_{\sigma}\, \sigma^2_{f(x),\mathrm{prior}}.
 $$
 
 *Variables.* $\hat{\sigma}_x^2(A)$ is the shrinkage variance estimate of task utility; $\eta_{\sigma}$ controls shrinkage strength; $\sigma^2_{f(x),\mathrm{prior}}$ is the prior variance for the family containing task $x$.
@@ -232,13 +228,7 @@ $$
 The robustness-adjusted task score is
 
 $$
-\rho_x(A)
-=
-s_x(A)
--
-\kappa_b \hat{\sigma}_x(A)
--
-\kappa_u \frac{\hat{\sigma}_x(A)}{\sqrt{R}}.
+\rho_x(A) = s_x(A) - \kappa_b \hat{\sigma}_x(A) - \kappa_u \frac{\hat{\sigma}_x(A)}{\sqrt{R}}.
 $$
 
 *Variables.* $\rho_x(A)$ is the search-time robustness score. $\kappa_b$ penalizes brittleness and $\kappa_u$ penalizes statistical uncertainty from low seed count.
@@ -246,15 +236,15 @@ $$
 In addition, the runtime tracks a tail-risk diagnostic
 
 $$
-\chi_x(A)=\cvar_{\alpha}\!\paren{\set{u_{x,r}(A)}_{r=1}^{R}},
+\chi_x(A)=\text{CVaR}_{\alpha}\!\left(\left\{u_{x,r}(A)\right\}_{r=1}^{R}\right),
 $$
 
 *Variables.* $\chi_x(A)$ is the lower-tail conditional value at risk of task utility. It is used for validation and final champion selection, not for archive insertion. $\alpha$ is the tail fraction.
 
-For finite $R$, if $u_{x,(1)}\le \dots \le u_{x,(R)}$ are the sorted utilities and $k=\max\set{1,\lceil \alpha R\rceil}$, then
+For finite $R$, if $u_{x,(1)}\le \dots \le u_{x,(R)}$ are the sorted utilities and $k=\max\left\{1,\lceil \alpha R\rceil\right\}$, then
 
 $$
-\cvar_{\alpha} = \frac{1}{k}\sum_{i=1}^{k} u_{x,(i)}.
+\text{CVaR}_{\alpha} = \frac{1}{k}\sum_{i=1}^{k} u_{x,(i)}.
 $$
 
 *Variables.* $u_{x,(i)}$ is the $i$th order statistic after sorting utilities in ascending order. $k$ is the number of worst-seed utilities averaged into the tail statistic.
@@ -264,9 +254,7 @@ $$
 Family averages are
 
 $$
-\bar{s}_f(A)=\frac{1}{|X_f|}\sum_{x\in X_f} s_x(A),
-\qquad
-\bar{\rho}_f(A)=\frac{1}{|X_f|}\sum_{x\in X_f} \rho_x(A).
+\bar{s}_f(A)=\frac{1}{|X_f|}\sum_{x\in X_f} s_x(A), \qquad \bar{\rho}_f(A)=\frac{1}{|X_f|}\sum_{x\in X_f} \rho_x(A).
 $$
 
 *Variables.* $X_f$ is the set of training tasks in family $f$. $\bar{s}_f(A)$ and $\bar{\rho}_f(A)$ are family means of primary and robustness-adjusted scores.
@@ -274,9 +262,7 @@ $$
 Global means are hierarchically weighted by family:
 
 $$
-\bar{s}(A)=\sum_{f}\omega_f \bar{s}_f(A),
-\qquad
-\bar{\rho}(A)=\sum_{f}\omega_f \bar{\rho}_f(A).
+\bar{s}(A)=\sum_{f}\omega_f \bar{s}_f(A), \qquad \bar{\rho}(A)=\sum_{f}\omega_f \bar{\rho}_f(A).
 $$
 
 *Variables.* $\omega_f$ is the family weight; by default the four major families receive equal weight so larger families do not dominate search solely by cardinality.
@@ -284,11 +270,7 @@ $$
 The archive objective set is
 
 $$
-\mathcal{F}_{\mathrm{obj}}
-=
-\set{s_x : x\in X_{\mathrm{train}}}
-\cup
-\set{\bar{s}_{\mathrm{top}}, \bar{s}_{\mathrm{mem}}, \bar{s}_{\mathrm{tool}}, \bar{s}_{\mathrm{e2e}}, \bar{\rho}_{\mathrm{top}}, \bar{\rho}_{\mathrm{mem}}, \bar{\rho}_{\mathrm{tool}}, \bar{\rho}_{\mathrm{e2e}}, \bar{s}, \bar{\rho}}.
+\mathcal{F}_{\mathrm{obj}} = \left\{s_x : x\in X_{\mathrm{train}}\right\} \cup \left\{\bar{s}_{\mathrm{top}}, \bar{s}_{\mathrm{mem}}, \bar{s}_{\mathrm{tool}}, \bar{s}_{\mathrm{e2e}}, \bar{\rho}_{\mathrm{top}}, \bar{\rho}_{\mathrm{mem}}, \bar{\rho}_{\mathrm{tool}}, \bar{\rho}_{\mathrm{e2e}}, \bar{s}, \bar{\rho}\right\}.
 $$
 
 *Variables.* $\mathcal{F}_{\mathrm{obj}}$ contains single-task specialists, family generalists, family-robust variants, and global objectives.
@@ -304,7 +286,7 @@ Every hatted quantity belongs to one of three predictor types and is implemented
 For decision family $d$ and candidate action $a$ in runtime state $s$, define a deterministic feature map
 
 $$
-\phi_d(s,a)\in \R^{m_d}.
+\phi_d(s,a)\in \mathbb{R}^{m_d}.
 $$
 
 *Variables.* $d$ indexes a decision family such as mode selection, child spawning, compaction, retrieval, tool reuse, tool creation, model choice, or stopping. $m_d$ is the feature dimension for family $d$.
@@ -312,7 +294,7 @@ $$
 Probability predictors use logistic regression with isotonic calibration:
 
 $$
-\hat{p}_d(s,a)=\clip\paren{\mathrm{Iso}\paren{\sigmoid\paren{w_d^{\top}\phi_d(s,a)}},\ p_{\min},\ p_{\max}}.
+\hat{p}_d(s,a)=\text{clip}\left(\mathrm{Iso}\left(\sigma\left(w_d^{\top}\phi_d(s,a)\right)\right),\ p_{\min},\ p_{\max}\right).
 $$
 
 *Variables.* $\hat{p}_d$ is the calibrated probability estimate for family $d$. $\mathrm{Iso}(\cdot)$ is the isotonic calibration map. $p_{\min}$ and $p_{\max}$ clip pathological probabilities away from exactly $0$ and $1$.
@@ -320,7 +302,7 @@ $$
 Positive scalar predictors use log-linear Huber regression:
 
 $$
-\hat{q}_d(s,a)=\exp\paren{u_d^{\top}\phi_d(s,a)}.
+\hat{q}_d(s,a)=\exp\left(u_d^{\top}\phi_d(s,a)\right).
 $$
 
 *Variables.* $\hat{q}_d$ is a positive-valued prediction such as cost, latency, or compaction time. $u_d$ is the regression parameter vector for family $d$.
@@ -341,14 +323,14 @@ $$
 \begin{aligned}
 U_d(a\mid s)=\;&
 \mu[\hat{p}_d]
--
-\lambda_T^{(d)} \log\!\paren{1+\frac{\mu[\hat{T}_d]}{T_0^{(d)}}}
--
-\lambda_L^{(d)} \log\!\paren{1+\frac{\mu[\hat{L}_d]}{L_0^{(d)}}} \\
+{} -
+\lambda_T^{(d)} \log\!\left(1+\frac{\mu[\hat{T}_d]}{T_0^{(d)}}\right)
+{} -
+\lambda_L^{(d)} \log\!\left(1+\frac{\mu[\hat{L}_d]}{L_0^{(d)}}\right) \\
 &\;
--
+{} -
 \lambda_F^{(d)} \mu[\hat{F}_d]
-+
+{} +
 \lambda_Q^{(d)} \mu[\hat{Q}_d].
 \end{aligned}
 $$
@@ -358,9 +340,7 @@ $$
 Conservative and optimistic utilities are
 
 $$
-U_d^{-}(a\mid s)=U_d(a\mid s)-\beta_d \sigma\bracks{U_d(a\mid s)},
-\qquad
-U_d^{+}(a\mid s)=U_d(a\mid s)+\beta_d \sigma\bracks{U_d(a\mid s)}.
+U_d^{-}(a\mid s)=U_d(a\mid s)-\beta_d \sigma\left[U_d(a\mid s)\right], \qquad U_d^{+}(a\mid s)=U_d(a\mid s)+\beta_d \sigma\left[U_d(a\mid s)\right].
 $$
 
 *Variables.* $U_d^{-}$ is the conservative utility used for irreversible actions and hard gating. $U_d^{+}$ is the optimistic utility used for exploration actions such as tool creation or ensemble widening. $\beta_d$ is the uncertainty multiplier for family $d$.
@@ -380,7 +360,7 @@ Predictors are retrained whenever 50 fully evaluated children or 10 accepted eli
 Agintor uses an objective-conditioned quality-diversity archive. Each cell key is
 
 $$
-k(A,f)=\paren{f,\ q(A),\ b(A),\ S_{\mathrm{last}}(A),\ c_{\mathrm{bin}}(A)}.
+k(A,f)=\left(f,\ q(A),\ b(A),\ S_{\mathrm{last}}(A),\ c_{\mathrm{bin}}(A)\right).
 $$
 
 *Variables.* $k(A,f)$ is the archive cell key for runtime $A$ under objective $f$. $q(A)$ is the interface-difference bitmask relative to baseline, $b(A)$ is the behavior descriptor, $S_{\mathrm{last}}(A)$ is the scope of the last accepted mutation, and $c_{\mathrm{bin}}(A)$ is the complexity bucket.
@@ -388,10 +368,10 @@ $$
 The behavior descriptor is
 
 $$
-b(A)=\paren{d_{\mathrm{mode}}, d_{\mathrm{tool}}, d_{\mathrm{mem}}, d_{\mathrm{ver}}}.
+b(A)=\left(d_{\mathrm{mode}}, d_{\mathrm{tool}}, d_{\mathrm{mem}}, d_{\mathrm{ver}}\right).
 $$
 
-*Variables.* $d_{\mathrm{mode}}$ is the dominant solve mode in $\set{\mathrm{single},\mathrm{vertical},\mathrm{horizontal},\mathrm{mixed}}$. $d_{\mathrm{tool}}$, $d_{\mathrm{mem}}$, and $d_{\mathrm{ver}}$ are trinary bins for created-tool rate, promotion density, and checks-per-task.
+*Variables.* $d_{\mathrm{mode}}$ is the dominant solve mode in $\left\{\mathrm{single},\mathrm{vertical},\mathrm{horizontal},\mathrm{mixed}\right\}$. $d_{\mathrm{tool}}$, $d_{\mathrm{mem}}$, and $d_{\mathrm{ver}}$ are trinary bins for created-tool rate, promotion density, and checks-per-task.
 
 The complexity bucket is the insertion-time quartile of mutable AST-node count relative to the current archive; mutable changed LOC is retained as a deterministic tie-breaker.
 
@@ -408,7 +388,7 @@ $$
 Parent selection uses inverse temperature $\beta_{\mathrm{sel}}$:
 
 $$
-P(A\mid f)=\frac{\exp\paren{\beta_{\mathrm{sel}}\tilde{f}(A)}}{\sum_{B\in I_f}\exp\paren{\beta_{\mathrm{sel}}\tilde{f}(B)}}.
+P(A\mid f)=\frac{\exp\left(\beta_{\mathrm{sel}}\tilde{f}(A)\right)}{\sum_{B\in I_f}\exp\left(\beta_{\mathrm{sel}}\tilde{f}(B)\right)}.
 $$
 
 *Variables.* $P(A\mid f)$ is the probability of selecting runtime $A$ from island $I_f$ under objective $f$. Larger $\beta_{\mathrm{sel}}$ sharpens selection.
@@ -416,11 +396,7 @@ $$
 Within a cell, child $A'$ replaces elite $A$ under objective $f$ iff
 
 $$
-A' \succ_f A
-\iff
-\paren{f(A')>f(A)+\delta_f}
-\;\vee\;
-\paren{|f(A')-f(A)|\le \delta_f\ \land\ \ell(A')<\ell(A)}.
+A' \succ_f A \iff \left(f(A')>f(A)+\delta_f\right) \;\vee\; \left(|f(A')-f(A)|\le \delta_f\ \land\ \ell(A')<\ell(A)\right).
 $$
 
 *Variables.* $\delta_f$ is the score tolerance for objective $f$. $\ell(A)$ measures mutable-code complexity using edited AST nodes, with changed LOC as the secondary tie-breaker.
@@ -445,14 +421,7 @@ $$
 Scope utility for objective $f$ is
 
 $$
-u_t(S\mid f)
-=
-\omega_1 c_t(S)
-+\omega_2 c_{f,t}(S)
-+\omega_3 \mathrm{stagn}_t(S)
-+\omega_4 \mathrm{need}_t(S)
--\omega_5 \mathrm{hardfail}_t(S)
--\omega_6 |S|.
+u_t(S\mid f) = \omega_1 c_t(S) +\omega_2 c_{f,t}(S) +\omega_3 \mathrm{stagn}_t(S) +\omega_4 \mathrm{need}_t(S) -\omega_5 \mathrm{hardfail}_t(S) -\omega_6 |S|.
 $$
 
 *Variables.* $u_t(S\mid f)$ is the scope utility for scope $S$ when optimizing objective $f$. $\omega_i$ are scheduler weights.
@@ -460,7 +429,7 @@ $$
 Scopes are sampled by softmax:
 
 $$
-P(S_t=S)=\frac{\exp\paren{\beta_{\mathrm{scope}} u_t(S\mid f)}}{\sum_{S'\in \mathcal{S}_t}\exp\paren{\beta_{\mathrm{scope}} u_t(S'\mid f)}}.
+P(S_t=S)=\frac{\exp\left(\beta_{\mathrm{scope}} u_t(S\mid f)\right)}{\sum_{S'\in \mathcal{S}_t}\exp\left(\beta_{\mathrm{scope}} u_t(S'\mid f)\right)}.
 $$
 
 *Variables.* $S_t$ is the mutation scope selected at outer step $t$. $\beta_{\mathrm{scope}}$ is the scope-selection inverse temperature.
@@ -468,9 +437,7 @@ $$
 Credit is updated for every fully evaluated child, whether or not it enters the archive. For child $A'_t$ derived from parent $A_t$ with exact touched scope $S$,
 
 $$
-\Delta_f(A'_t,A_t)
-=
-\frac{\sum_{x\in X_{\mathrm{train}}} w_x \paren{s_x(A'_t)-s_x(A_t)}}{\max\paren{1,|S|}}.
+\Delta_f(A'_t,A_t) = \frac{\sum_{x\in X_{\mathrm{train}}} w_x \left(s_x(A'_t)-s_x(A_t)\right)}{\max\left(1,|S|\right)}.
 $$
 
 *Variables.* $\Delta_f(A'_t,A_t)$ is the objective-conditioned credit signal assigned to scope $S$. $w_x$ are task weights, uniform within family by default.
@@ -478,7 +445,7 @@ $$
 Then
 
 $$
-c_{f,t+1}(S)=(1-\xi_f)c_{f,t}(S)+\xi_f \Delta_f(A'_t,A_t)\,\ind\bracks{S=\mathrm{touch}(A_t,A'_t)}.
+c_{f,t+1}(S)=(1-\xi_f)c_{f,t}(S)+\xi_f \Delta_f(A'_t,A_t)\,\mathbf{1}\left[S=\mathrm{touch}(A_t,A'_t)\right].
 $$
 
 *Variables.* $\xi_f$ is the exponential-moving-average update rate for objective-conditioned scope credit. $\mathrm{touch}(A_t,A'_t)$ is the exact mutated interface set.
@@ -537,13 +504,13 @@ $$
 \begin{aligned}
 r_A(a\mid x)=\;&
 \alpha_1 \mathrm{sim}(d_a,q_x)
-+\alpha_2 \mathrm{overlap}(T_a,T_x)
-+\alpha_3 J(\Gamma_a,\Gamma_x)
-+\alpha_4 \mathrm{succ}(a,f(x)) \\
+{} +\alpha_2 \mathrm{overlap}(T_a,T_x)
+{} +\alpha_3 J(\Gamma_a,\Gamma_x)
+{} +\alpha_4 \mathrm{succ}(a,f(x)) \\
 &\; + \alpha_5 \mathrm{reusefit}(a,x)
--\alpha_6 \mathrm{ctx}(a)
--\alpha_7 \mathrm{stale}(a)
--\alpha_8 \mathrm{permgap}(a,x).
+{} -\alpha_6 \mathrm{ctx}(a)
+{} -\alpha_7 \mathrm{stale}(a)
+{} -\alpha_8 \mathrm{permgap}(a,x).
 \end{aligned}
 $$
 
@@ -552,9 +519,7 @@ $$
 Create a new child only when
 
 $$
-\max_a r_A(a\mid x)<\theta_{\mathrm{create}}
-\quad\text{or}\quad
-\mathrm{capgap}(x,a^*)>\eta_{\mathrm{gap}},
+\max_a r_A(a\mid x)<\theta_{\mathrm{create}} \quad\text{or}\quad \mathrm{capgap}(x,a^*)>\eta_{\mathrm{gap}},
 $$
 
 *Variables.* $\theta_{\mathrm{create}}$ is the reuse-versus-create threshold. $\mathrm{capgap}(x,a^*)$ is the uncovered capability mass of the best reusable agent $a^*$.
@@ -564,8 +529,7 @@ $$
 Given runtime state $z_t$ and task $x$, choose
 
 $$
-c_t^*(x)=\argmax_{c\in\set{\mathrm{single},\mathrm{vertical},\mathrm{horizontal}}}
-\bracks{\hat{p}_{\mathrm{solve}}(c\mid z_t,x)-\lambda_C \hat{C}(c\mid z_t,x)-\lambda_L \hat{L}(c\mid z_t,x)-\lambda_Q \hat{Q}(c\mid z_t,x)}.
+c_t^*(x)=\operatorname*{argmax}_{c\in\left\{\mathrm{single},\mathrm{vertical},\mathrm{horizontal}\right\}} \left[\hat{p}_{\mathrm{solve}}(c\mid z_t,x)-\lambda_C \hat{C}(c\mid z_t,x)-\lambda_L \hat{L}(c\mid z_t,x)-\lambda_Q \hat{Q}(c\mid z_t,x)\right].
 $$
 
 *Variables.* $c_t^*(x)$ is the selected topology mode. $\hat{p}_{\mathrm{solve}}$, $\hat{C}$, $\hat{L}$, and $\hat{Q}$ predict solve probability, cost, latency, and coordination risk.
@@ -573,17 +537,7 @@ $$
 For candidate child specification $z_j$,
 
 $$
-\Delta_j(x)
-=
-\hat{p}_{\mathrm{solve}}(z_j\mid x,z_t)
--
-\hat{p}_{\mathrm{solve}}(\varnothing\mid x,z_t)
--
-\lambda_{\mathrm{spawn}}
--
-\lambda_{\mathrm{coord}}\, \mathrm{fanout}(z_j)
--
-\lambda_{\mathrm{dep}}\, \mathrm{unmet}(z_j).
+\Delta_j(x) = \hat{p}_{\mathrm{solve}}(z_j\mid x,z_t) - \hat{p}_{\mathrm{solve}}(\varnothing\mid x,z_t) - \lambda_{\mathrm{spawn}} - \lambda_{\mathrm{coord}}\, \mathrm{fanout}(z_j) - \lambda_{\mathrm{dep}}\, \mathrm{unmet}(z_j).
 $$
 
 *Variables.* $\Delta_j(x)$ is the marginal value of spawning child $j$. $\varnothing$ denotes not spawning any extra child. $\mathrm{fanout}(z_j)$ is the coordination burden and $\mathrm{unmet}(z_j)$ is the number or weighted mass of unresolved dependencies.
@@ -595,18 +549,7 @@ Spawn the child only if $\Delta_j(x)>0$. Children are ordered. Each child receiv
 Let $R^{\mathrm{cand}}_j$ be the candidate tools for child $j$, after category-first discovery. The selected scope is
 
 $$
-T_j^*
-=
-\argmax_{T\subseteq R^{\mathrm{cand}}_j,\ |T|\le 12}
-\bracks{
-\mathrm{cov}(T,z_j)
--
-\lambda_{\mathrm{size}} |T|
--
-\lambda_{\mathrm{cf}} \mathrm{conflict}(T)
--
-\lambda_{\mathrm{cold}} \sum_{\tau\in T}\mathrm{coldstart}(\tau)
-}.
+T_j^* = \operatorname*{argmax}_{T\subseteq R^{\mathrm{cand}}_j,\ |T|\le 12} \left[ \mathrm{cov}(T,z_j) - \lambda_{\mathrm{size}} |T| - \lambda_{\mathrm{cf}} \mathrm{conflict}(T) - \lambda_{\mathrm{cold}} \sum_{\tau\in T}\mathrm{coldstart}(\tau) \right].
 $$
 
 *Variables.* $T_j^*$ is the assigned tool scope for child $j$. $\mathrm{cov}(T,z_j)$ measures how well tool set $T$ covers child needs. $\mathrm{conflict}(T)$ penalizes overlapping or incompatible tools.
@@ -619,13 +562,13 @@ Let $W_{\mathrm{cand}}$ be the candidate workers proposed for the same task. Sel
 
 $$
 \begin{aligned}
-W^* = \argmax_{W\subseteq W_{\mathrm{cand}},\ 1\le |W|\le K_{\max}}
+W^* = \operatorname*{argmax}_{W\subseteq W_{\mathrm{cand}},\ 1\le |W|\le K_{\max}}
 \Biggl[
 &1-\prod_{j\in W}(1-\hat{p}_j)
--\lambda_D \frac{2}{\max\paren{1,|W|(|W|-1)}} \sum_{i<j,\ i,j\in W}\mathrm{sim}(p_i,p_j) \\
+{} -\lambda_D \frac{2}{\max\left(1,|W|(|W|-1)\right)} \sum_{i<j,\ i,j\in W}\mathrm{sim}(p_i,p_j) \\
 &-\lambda_K |W|
--\lambda_T \sum_{j\in W}\frac{\hat{T}_j}{T_0}
--\lambda_L \max_{j\in W}\frac{\hat{L}_j}{L_0}
+{} -\lambda_T \sum_{j\in W}\frac{\hat{T}_j}{T_0}
+{} -\lambda_L \max_{j\in W}\frac{\hat{L}_j}{L_0}
 \Biggr].
 \end{aligned}
 $$
@@ -655,20 +598,10 @@ Short-term memory is an append-only directed graph with the node and edge types 
 
 ### 8.2 Compaction as global budget control
 
-For candidate span $h_i$ and action $a\in\set{\mathrm{keep},\mathrm{summarize},\mathrm{checkpoint}}$,
+For candidate span $h_i$ and action $a\in\left\{\mathrm{keep},\mathrm{summarize},\mathrm{checkpoint}\right\}$,
 
 $$
-\mathrm{score}_{\mathrm{cmp}}(h_i,a)
-=
-\hat{R}_{\mathrm{ret}}(a\mid h_i)
-+
-\lambda_{\mathrm{tok}} \Delta \mathrm{tok}(h_i,a)
--
-\lambda_{\mathrm{loss}} \hat{L}_{\mathrm{info}}(a\mid h_i)
--
-\lambda_{\mathrm{lat}} \hat{T}_{\mathrm{cmp}}(a\mid h_i)
--
-\lambda_{\mathrm{orph}} O(h_i,a).
+\mathrm{score}_{\mathrm{cmp}}(h_i,a) = \hat{R}_{\mathrm{ret}}(a\mid h_i) + \lambda_{\mathrm{tok}} \Delta \mathrm{tok}(h_i,a) - \lambda_{\mathrm{loss}} \hat{L}_{\mathrm{info}}(a\mid h_i) - \lambda_{\mathrm{lat}} \hat{T}_{\mathrm{cmp}}(a\mid h_i) - \lambda_{\mathrm{orph}} O(h_i,a).
 $$
 
 *Variables.* $\mathrm{score}_{\mathrm{cmp}}(h_i,a)$ is the compaction score. $\Delta \mathrm{tok}(h_i,a)$ is tokens saved by action $a$ on span $h_i$. $\hat{R}_{\mathrm{ret}}$ predicts retained utility, $\hat{L}_{\mathrm{info}}$ predicts information loss, $\hat{T}_{\mathrm{cmp}}$ predicts compaction latency, and $O(h_i,a)$ penalizes orphaned raw outputs, artifact references, or async handles.
@@ -676,9 +609,7 @@ $$
 If active-history budget fraction $b_t > B_{\mathrm{hi}}$, collect all admissible $(h_i,a)$ pairs, rank them by density
 
 $$
-\mathrm{density}(h_i,a)
-=
-\frac{\mathrm{score}_{\mathrm{cmp}}(h_i,a)}{\max\paren{1,\Delta \mathrm{tok}(h_i,a)}},
+\mathrm{density}(h_i,a) = \frac{\mathrm{score}_{\mathrm{cmp}}(h_i,a)}{\max\left(1,\Delta \mathrm{tok}(h_i,a)\right)},
 $$
 
 *Variables.* $\mathrm{density}(h_i,a)$ prioritizes actions that save prompt budget efficiently while preserving downstream utility.
@@ -695,19 +626,19 @@ $$
 \begin{cases}
 \begin{aligned}
 1 &+ \lambda_{\mathrm{path}}\, \mathrm{pathbonus}(v,q_x)
-+ \lambda_{\nu}\, \mathrm{verifysupport}(v) \\
+{} + \lambda_{\nu}\, \mathrm{verifysupport}(v) \\
 &+ \lambda_{\mathrm{prov}}\, \mathrm{provenance}(v),
 \end{aligned}
 & \mathrm{exactsym}(v,q_x)=1, \\[0.35em]
 \begin{aligned}
 &\lambda_1 \tilde{f}_{\cos}
-+ \lambda_2 \tilde{f}_{\mathrm{lex}}
-+ \lambda_3 \tilde{f}_{\mathrm{type}}
-+ \lambda_4 \tilde{f}_{\mathrm{path}} \\
+{} + \lambda_2 \tilde{f}_{\mathrm{lex}}
+{} + \lambda_3 \tilde{f}_{\mathrm{type}}
+{} + \lambda_4 \tilde{f}_{\mathrm{path}} \\
 &\quad + \lambda_5 \tilde{f}_{\mathrm{rec}}
-+ \lambda_6 \tilde{f}_{\nu}
-+ \lambda_7 \tilde{f}_{\mathrm{prov}}
-- \lambda_8 \tilde{f}_{\mathrm{stale}},
+{} + \lambda_6 \tilde{f}_{\nu}
+{} + \lambda_7 \tilde{f}_{\mathrm{prov}}
+{} - \lambda_8 \tilde{f}_{\mathrm{stale}},
 \end{aligned}
 & \text{otherwise.}
 \end{cases}
@@ -728,7 +659,7 @@ For candidate memory unit $u$,
 $$
 p_{\mathrm{prom}}(u)
 =
-\sigmoid\!\left(
+\sigma\!\left(
 \begin{aligned}
 & w_1 n(u) + w_2 r(u) + w_3 c(u) + w_4 \nu(u) + w_5 t(u) \\
 & + w_6 \mathrm{comp}(u) - w_7 d(u) - w_8 w(u) - w_9 \mathrm{contrad}(u)
@@ -745,15 +676,15 @@ Deduplication is type-aware:
 $$
 \mathrm{merge}(u,v)
 =
-\ind\!\left[
+\mathbf{1}\!\left[
 \begin{aligned}
 &\mathrm{type}(u)=\mathrm{type}(v) \\
 &\land \Bigl(
 \mathrm{primarykey}(u,v)=1
 \ \vee\
-\paren{\mathrm{exactsym}(u,v)\land \mathrm{namespace\_match}(u,v)} \\
+\left(\mathrm{exactsym}(u,v)\land \mathrm{namespace\_match}(u,v)\right) \\
 &\qquad\qquad \vee\
-\paren{\cos(e_u,e_v)>\theta_e \land \mathrm{jaccard}(\mathrm{tok}(u),\mathrm{tok}(v))>\theta_{\ell}}
+\left(\cos(e_u,e_v)>\theta_e \land \mathrm{jaccard}(\mathrm{tok}(u),\mathrm{tok}(v))>\theta_{\ell}\right)
 \Bigr)
 \end{aligned}
 \right].
@@ -764,16 +695,7 @@ $$
 Given local neighborhood $N_u$, choose the write action by
 
 $$
-a^*(u)
-=
-\argmax_{a\in\set{\mathrm{merge},\mathrm{refine},\mathrm{new},\mathrm{tombstone}}}
-\bracks{
-\hat{G}(a\mid u,N_u)
--
-\lambda_E \hat{E}(a\mid u,N_u)
--
-\lambda_C \mathrm{contrad}(a\mid u,N_u)
-}.
+a^*(u) = \operatorname*{argmax}_{a\in\left\{\mathrm{merge},\mathrm{refine},\mathrm{new},\mathrm{tombstone}\right\}} \left[ \hat{G}(a\mid u,N_u) - \lambda_E \hat{E}(a\mid u,N_u) - \lambda_C \mathrm{contrad}(a\mid u,N_u) \right].
 $$
 
 *Variables.* $a^*(u)$ is the selected write action for unit $u$. $\hat{G}$ predicts utility gain, $\hat{E}$ predicts edit or maintenance cost, and $\mathrm{contrad}(a\mid u,N_u)$ measures contradiction risk in the local graph neighborhood.
@@ -788,12 +710,12 @@ $$
 \begin{aligned}
 r_c(c\mid q_x)=\;&
 \alpha_1 \mathrm{sim}(d_c,q_x)
-+\alpha_2 \mathrm{iface}(c,q_x)
-+\alpha_3 \mathrm{histpass}(c)
-+\alpha_4 \mathrm{cachehit}(c) \\
+{} +\alpha_2 \mathrm{iface}(c,q_x)
+{} +\alpha_3 \mathrm{histpass}(c)
+{} +\alpha_4 \mathrm{cachehit}(c) \\
 &\; - \alpha_5 \log(1+n_c)
--\alpha_6 \mathrm{coldstart}(c)
--\alpha_7 \mathrm{permrisk}(c).
+{} -\alpha_6 \mathrm{coldstart}(c)
+{} -\alpha_7 \mathrm{permrisk}(c).
 \end{aligned}
 $$
 
@@ -807,12 +729,12 @@ $$
 \begin{aligned}
 r_{\tau}(\tau\mid q_x)=\;&
 \beta_1 \mathrm{sim}(m_{\tau},q_x)
-+\beta_2 \mathrm{sigmatch}(\tau,q_x)
-+\beta_3 \mathrm{pass}(\tau)
-+\beta_4 \mathrm{cachehit}(\tau) \\
+{} +\beta_2 \mathrm{sigmatch}(\tau,q_x)
+{} +\beta_3 \mathrm{pass}(\tau)
+{} +\beta_4 \mathrm{cachehit}(\tau) \\
 &\; - \beta_5 \mathrm{coldstart}(\tau)
--\beta_6 \mathrm{permrisk}(\tau)
--\beta_7 \mathrm{depdepth}(\tau).
+{} -\beta_6 \mathrm{permrisk}(\tau)
+{} -\beta_7 \mathrm{depdepth}(\tau).
 \end{aligned}
 $$
 
@@ -823,21 +745,7 @@ $$
 Creation is allowed only when new-tool value exceeds the best reusable option including expected future reuse:
 
 $$
-\mathrm{create}(q_x)
-=
-\ind\!\left[
-\hat{G}^{\mathrm{curr}}_{\mathrm{new}}(q_x)
-+
-\lambda_F \hat{G}^{\mathrm{future}}_{\mathrm{new}}(q_x)
--
-\max_{\tau\in R}\hat{G}_{\mathrm{reuse}}(\tau,q_x)
->
-\lambda_B \hat{B}(q_x)
-+
-\lambda_E \hat{E}(q_x)
-+
-\lambda_S \hat{S}(q_x)
-\right].
+\mathrm{create}(q_x) = \mathbf{1}\!\left[ \hat{G}^{\mathrm{curr}}_{\mathrm{new}}(q_x) + \lambda_F \hat{G}^{\mathrm{future}}_{\mathrm{new}}(q_x) - \max_{\tau\in R}\hat{G}_{\mathrm{reuse}}(\tau,q_x) > \lambda_B \hat{B}(q_x) + \lambda_E \hat{E}(q_x) + \lambda_S \hat{S}(q_x) \right].
 $$
 
 *Variables.* $\mathrm{create}(q_x)$ is the build-versus-reuse decision for task query $q_x$. $\hat{G}^{\mathrm{curr}}_{\mathrm{new}}$ is current-task gain from a new tool, $\hat{G}^{\mathrm{future}}_{\mathrm{new}}$ is expected future reuse value, and $\hat{B}$, $\hat{E}$, and $\hat{S}$ estimate build, execution, and safety cost.
@@ -853,7 +761,7 @@ Promotion requires both quality and reuse on distinct tasks:
 $$
 \mathrm{promote}(\tau)
 =
-\ind\!\left[
+\mathbf{1}\!\left[
 \begin{aligned}
 &\mathrm{passrate}(\tau)\ge \eta_p
 \ \land\
@@ -884,7 +792,7 @@ $$
 Dispatch chooses sync versus async using
 
 $$
-\mathrm{async}(\tau,x)=\ind\bracks{\hat{L}_{\tau}(x)>t_{\mathrm{slice}} \ \vee\ \mathrm{backgroundable}(\tau)=1}.
+\mathrm{async}(\tau,x)=\mathbf{1}\left[\hat{L}_{\tau}(x)>t_{\mathrm{slice}} \ \vee\ \mathrm{backgroundable}(\tau)=1\right].
 $$
 
 *Variables.* $\mathrm{async}(\tau,x)$ is the asynchronous-dispatch predicate for tool $\tau$ on task $x$. $t_{\mathrm{slice}}$ is the synchronous time slice.
@@ -908,13 +816,7 @@ Background jobs return stable handles with mandatory fields for handle id, tool 
 The normalized budget state is
 
 $$
-b_t=
-\paren{
-\frac{\mathrm{cost}_t}{C_{\max}},
-\frac{\mathrm{lat}_t}{L_{\max}},
-\frac{\mathrm{calls}_t}{M_{\max}},
-\frac{\mathrm{checks}_t}{Q_{\max}}
-}.
+b_t= \left( \frac{\mathrm{cost}_t}{C_{\max}}, \frac{\mathrm{lat}_t}{L_{\max}}, \frac{\mathrm{calls}_t}{M_{\max}}, \frac{\mathrm{checks}_t}{Q_{\max}} \right).
 $$
 
 *Variables.* $b_t$ summarizes consumed cost, latency, model-call count, and checker count relative to hard maxima $C_{\max}$, $L_{\max}$, $M_{\max}$, and $Q_{\max}$. Remaining budget fractions are derived from the same state.
@@ -924,19 +826,7 @@ $$
 Model allocation is a control-surface decision. Topology proposes role and scope; control chooses the cheapest model class that still satisfies predicted solve requirements and remaining budget. For subgoal $g$,
 
 $$
-m^*(g)=
-\argmax_{m\in \mathcal{M}_g}
-\bracks{
-\hat{p}_{\mathrm{solve}}(m\mid g)
--
-\lambda_C \hat{C}(m\mid g)
--
-\lambda_L \hat{L}(m\mid g)
--
-\lambda_{\$} \hat{\$}(m\mid g)
--
-\lambda_F \hat{p}_{\mathrm{fail}}(m\mid g)
-}
+m^*(g)= \operatorname*{argmax}_{m\in \mathcal{M}_g} \left[ \hat{p}_{\mathrm{solve}}(m\mid g) - \lambda_C \hat{C}(m\mid g) - \lambda_L \hat{L}(m\mid g) - \lambda_{\$} \hat{\$}(m\mid g) - \lambda_F \hat{p}_{\mathrm{fail}}(m\mid g) \right]
 $$
 
 *Variables.* $m^*(g)$ is the selected model class for subgoal $g$. $\mathcal{M}_g$ is the set of admissible model classes. $\hat{C}$, $\hat{L}$, and $\hat{\$}$ predict token, latency, and monetary cost. $\hat{p}_{\mathrm{fail}}$ predicts operational failure probability.
@@ -953,16 +843,10 @@ After two consecutive negative-improvement steps on the same unresolved subgoal,
 
 ### 10.3 Verification request policy
 
-Let $\mathcal{K}=\set{\mathrm{local},\mathrm{subtree},\mathrm{repo},\mathrm{benchmark}}$ denote a checker ladder ordered from cheap to expensive. For evidence package $e$ and checker $k$,
+Let $\mathcal{K}=\left\{\mathrm{local},\mathrm{subtree},\mathrm{repo},\mathrm{benchmark}\right\}$ denote a checker ladder ordered from cheap to expensive. For evidence package $e$ and checker $k$,
 
 $$
-\mathrm{VOI}(k\mid e)
-=
-\hat{p}_{\mathrm{issue}}(k\mid e)\cdot \hat{L}_{\mathrm{miss}}(k\mid e)\cdot \hat{p}_{\mathrm{flip}}(k\mid e)
--
-\lambda_C \hat{C}_k(e)
--
-\lambda_L \hat{L}_k(e).
+\mathrm{VOI}(k\mid e) = \hat{p}_{\mathrm{issue}}(k\mid e)\cdot \hat{L}_{\mathrm{miss}}(k\mid e)\cdot \hat{p}_{\mathrm{flip}}(k\mid e) - \lambda_C \hat{C}_k(e) - \lambda_L \hat{L}_k(e).
 $$
 
 *Variables.* $\mathrm{VOI}(k\mid e)$ is the value of information of checker $k$ for evidence package $e$. $\hat{p}_{\mathrm{issue}}$ is the probability that the checker reveals a real issue, $\hat{L}_{\mathrm{miss}}$ is the loss of missing it, $\hat{p}_{\mathrm{flip}}$ is the probability that the issue changes a downstream decision, and $\hat{C}_k$, $\hat{L}_k$ are checker cost and latency.
@@ -976,20 +860,20 @@ Let $u^{\mathrm{best}}_t$ be the best optimistic next-step utility among admissi
 $$
 \mathrm{stop}_t
 =
-\ind\!\left[
+\mathbf{1}\!\left[
 \begin{aligned}
 &\mathrm{pass}_t=1
 \ \vee\
 \mathrm{budget\_exhausted}_t=1 \\
 &\vee\
-\paren{
+\left(
 u^{\mathrm{best}}_t<0
 \ \land\
 u^{\mathrm{best}}_{t-1}<0
 \ \land\
 \mathrm{unresolved}_t=0
 \ \land\
-\mathrm{verified\_terminal}_t=1}
+\mathrm{verified\_terminal}_t=1\right)
 \end{aligned}
 \right].
 $$
@@ -1027,19 +911,19 @@ Every mutation prompt must include the sampled objective, mutable files only, im
 The three curriculum phases are defined as
 
 $$
-\mathcal{S}_{\mathrm{local}} = \set{\set{\mathrm{top}}, \set{\mathrm{mem}}, \set{\mathrm{tool}}, \set{\mathrm{ctl}}},
+\mathcal{S}_{\mathrm{local}} = \left\{\left\{\mathrm{top}\right\}, \left\{\mathrm{mem}\right\}, \left\{\mathrm{tool}\right\}, \left\{\mathrm{ctl}\right\}\right\},
 $$
 
 *Variables.* $\mathcal{S}_{\mathrm{local}}$ contains all singleton mutation scopes.
 
 $$
-\mathcal{S}_{\mathrm{pair}} = \set{S\subseteq \set{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}} : |S|=2},
+\mathcal{S}_{\mathrm{pair}} = \left\{S\subseteq \left\{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}\right\} : |S|=2\right\},
 $$
 
 *Variables.* $\mathcal{S}_{\mathrm{pair}}$ contains all six pairwise mutation scopes.
 
 $$
-\mathcal{S}_{\mathrm{joint}} = \set{S\subseteq \set{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}} : |S|\in \set{3,4}}.
+\mathcal{S}_{\mathrm{joint}} = \left\{S\subseteq \left\{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}\right\} : |S|\in \left\{3,4\right\}\right\}.
 $$
 
 *Variables.* $\mathcal{S}_{\mathrm{joint}}$ contains all joint scopes of size three or four.
@@ -1049,15 +933,7 @@ $$
 The default schedule is 1200 local mutations, 600 pairwise mutations, and 300 joint mutations. A phase can end early if the advancement trigger fires:
 
 $$
-\mathrm{advance}(t)
-=
-\ind\bracks{
-\Delta_{\mathrm{val}}^{(w)}<\epsilon_{\Delta}
-\ \land\
-\mathrm{cov}_t>\eta_{\mathrm{cov}}
-\ \land\
-\mathrm{pass}_t>\eta_{\mathrm{pass}}
-}.
+\mathrm{advance}(t) = \mathbf{1}\left[ \Delta_{\mathrm{val}}^{(w)}<\epsilon_{\Delta} \ \land\ \mathrm{cov}_t>\eta_{\mathrm{cov}} \ \land\ \mathrm{pass}_t>\eta_{\mathrm{pass}} \right].
 $$
 
 *Variables.* $\mathrm{advance}(t)$ is the curriculum-advancement predicate. $\Delta_{\mathrm{val}}^{(w)}$ is trailing-window validation improvement, $\mathrm{cov}_t$ is accepted-method coverage in the current phase, and $\mathrm{pass}_t$ is the Stage-3 to Stage-4 advancement rate.
@@ -1073,11 +949,7 @@ $$
 **Stage 2: touched-family proxies.** Run only proxy tasks relevant to the touched scopes. Advance if
 
 $$
-\mathrm{LCB}_{\mathrm{proxy}}
-=
-\Delta_{\mathrm{proxy}} - 1.0 \cdot \mathrm{SE}_{\mathrm{proxy}}
->
--\epsilon_{\mathrm{proxy}}.
+\mathrm{LCB}_{\mathrm{proxy}} = \Delta_{\mathrm{proxy}} - 1.0 \cdot \mathrm{SE}_{\mathrm{proxy}} > -\epsilon_{\mathrm{proxy}}.
 $$
 
 *Variables.* $\mathrm{LCB}_{\mathrm{proxy}}$ is the lower-confidence bound on proxy improvement. $\Delta_{\mathrm{proxy}}$ and $\mathrm{SE}_{\mathrm{proxy}}$ are the proxy-set mean improvement and its standard error.
@@ -1085,11 +957,7 @@ $$
 **Stage 3: objective-local training subset.** If the active objective is a single-task score, evaluate that task plus the two nearest same-family tasks. If the objective is a family average, evaluate four representative tasks from that family. If the objective is global, evaluate one task from each family. Advance if
 
 $$
-\mathrm{LCB}_{\mathrm{part}}
-=
-\Delta_{\mathrm{part}} - 1.0 \cdot \mathrm{SE}_{\mathrm{part}}
->
--\epsilon_{\mathrm{part}}.
+\mathrm{LCB}_{\mathrm{part}} = \Delta_{\mathrm{part}} - 1.0 \cdot \mathrm{SE}_{\mathrm{part}} > -\epsilon_{\mathrm{part}}.
 $$
 
 *Variables.* $\mathrm{LCB}_{\mathrm{part}}$ is the lower-confidence bound on the objective-local training subset. $\Delta_{\mathrm{part}}$ and $\mathrm{SE}_{\mathrm{part}}$ are the mean child-minus-parent improvement and its standard error on the subset.
@@ -1151,7 +1019,7 @@ Recommended pass-rate caps are $p_1\le 0.35$, $p_2\le 0.15$, and $p_3\le 0.05$. 
 | Core evaluation | $R_{\mathrm{proxy}}=1$, $R_{\mathrm{full}}=3$, $R_{\mathrm{val}}=5$, $R_{\mathrm{test}}=7$; $\beta_{\mathrm{sel}}=2.5$; $\delta_f=0.002$; $\theta_{\mathrm{create}}=0.58$; $K_{\max}=3$ |
 | Robustness | $\eta_{\sigma}=0.35$; $\alpha=\tfrac{1}{3}$; use $\rho_x$ for archive search and $\chi_x$ for validation tie-breaks |
 | Memory | $(B_{\mathrm{hi}},B_{\mathrm{lo}})=(0.75,0.55)$; $(\theta_e,\theta_{\ell})=(0.92,0.60)$ |
-| Tool promotion | $(\eta_p,\eta_r)=(0.80,\ 3\ \text{distinct tasks})$; $k_c\in\set{3,4,5}$; $t_{\mathrm{slice}}=60$ s |
+| Tool promotion | $(\eta_p,\eta_r)=(0.80,\ 3\ \text{distinct tasks})$; $k_c\in\left\{3,4,5\right\}$; $t_{\mathrm{slice}}=60$ s |
 | Mutation budget | 1--4 patch blocks per mutation; $(N_{\mathrm{local}},N_{\mathrm{pair}},N_{\mathrm{joint}})=(1200,600,300)$ |
 | Curriculum thresholds | $\epsilon_{\Delta}=0.002$; $\eta_{\mathrm{cov}}=0.60$; $\eta_{\mathrm{pass}}=0.05$ |
 | Predictors | retrain after 50 fully evaluated children or 10 accepted elites; calibrate on the most recent 200 labels per task family; bootstrap ensemble size $B=5$ |
