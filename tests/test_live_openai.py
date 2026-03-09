@@ -10,6 +10,8 @@ from agintor.schemas import ModelRequest
 
 @pytest.mark.live_openai
 def test_openai_provider_live_roundtrip_with_mock_credentials() -> None:
+    if not os.environ.get("OPENAI_API_KEY"):
+        pytest.skip("requires OPENAI_API_KEY")
     provider = OpenAIProvider(api_key=os.environ.get("OPENAI_API_KEY", "sk-mock"))
     response = provider.generate(
         ModelRequest(

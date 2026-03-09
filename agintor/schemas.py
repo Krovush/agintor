@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, PrivateAttr, validator
 
 from .utils import cheap_embedding, stable_hash
 
@@ -17,6 +17,8 @@ class AgentTemplate(BaseModel):
     success_stats: Dict[str, float]
     staleness_clock: int
     model_policy_tag: str
+    _canonical: bool = PrivateAttr(default=False)
+    _clone: bool = PrivateAttr(default=False)
 
 
 class ChildSpec(BaseModel):

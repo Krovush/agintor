@@ -23,7 +23,10 @@ def init_runtime(destination: str | Path, force: bool = False) -> Path:
         raise FileExistsError(f"destination {dest} is not empty")
     if dest.exists() and force:
         shutil.rmtree(dest)
-    shutil.copytree(baseline_template_dir(), dest)
+    ensure_directory(dest.parent)
+    template_root = resources.files("agintor").joinpath("templates", "baseline_runtime")
+    with resources.as_file(template_root) as template_dir:
+        shutil.copytree(template_dir, dest)
     return dest
 
 
@@ -38,5 +41,6 @@ def write_demo_suite(destination: str | Path) -> Path:
         "proxy": [model_dump(task) for task in suite.proxy],
     }
     path = Path(destination)
+    ensure_directory(path.parent)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path

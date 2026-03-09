@@ -140,8 +140,8 @@ class ToolRegistry:
                 backgroundable=False,
                 state_schema={},
                 source_digest=stable_hash(name, category, description, signature),
-                build_cmd="python -m py_compile tool.py",
-                run_cmd="python tool.py",
+                build_cmd=f'"{sys.executable}" -m py_compile tool.py',
+                run_cmd=f'"{sys.executable}" tool.py',
                 timeout_s=10,
                 determinism_class="stable",
             )

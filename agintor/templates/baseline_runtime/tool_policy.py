@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from typing import Any, Iterable, Sequence
 
 from agintor.schemas import ToolSpec
@@ -75,8 +76,8 @@ class ToolPolicy:
             backgroundable=False,
             state_schema={"type": "object"},
             source_digest=stable_hash(source),
-            build_cmd="python -m py_compile tool.py",
-            run_cmd="python tool.py",
+            build_cmd=f'"{sys.executable}" -m py_compile tool.py',
+            run_cmd=f'"{sys.executable}" tool.py',
             timeout_s=10,
             determinism_class="stable",
         )
