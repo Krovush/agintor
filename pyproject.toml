@@ -36,7 +36,9 @@ agintor = ["templates/baseline_runtime/*", "examples/*.json"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-q"
+addopts = "-q --basetemp=tests/_artifacts/pytest/tmp"
+testpaths = ["tests"]
+norecursedirs = ["_artifacts"]
 markers = [
   "live_openai: live OpenAI integration tests (not run offline)",
 ]

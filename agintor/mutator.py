@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import random
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -10,9 +8,7 @@ from typing import Any, Mapping, Sequence
 from .patches import build_patch, parse_patch
 from .prompt_builder import build_mutation_prompt
 from .providers import ModelProvider
-from .runtime_loader import load_runtime
 from .schemas import ModelRequest, MutationCandidate
-from .utils import read_text, stable_hash, write_text
 
 
 @dataclass
@@ -30,52 +26,94 @@ class MutationContext:
 class HeuristicPatchMutator:
     SCOPE_MUTATIONS = {
         "top": [
-            ("topology_policy.py", "    SPAWN_PENALTY = 0.06", "    SPAWN_PENALTY = 0.03"),
-            ("topology_policy.py", "    COORD_PENALTY = 0.05", "    COORD_PENALTY = 0.03"),
-            ("topology_policy.py", "    THETA_CREATE = 0.58", "    THETA_CREATE = 0.52"),
+            (
+                "topology_policy.py",
+                "                solve = 0.62 + 0.06 * min(3, op_count) + 0.04 * dependency_count + 0.05 * exact_verifier_hint",
+                "                solve = 0.66 + 0.05 * min(3, op_count) + 0.04 * dependency_count + 0.06 * exact_verifier_hint",
+            ),
+            (
+                "topology_policy.py",
+                "            delta = 0.52 + 0.10 * (op.kind in {\"generated_expression\", \"memory_lookup\"}) - self.SPAWN_PENALTY - self.COORD_PENALTY * min(2, index) - self.DEP_PENALTY * len(op.dependencies)",
+                "            delta = 0.56 + 0.10 * (op.kind in {\"generated_expression\", \"memory_lookup\"}) - self.SPAWN_PENALTY - self.COORD_PENALTY * min(2, index) - 0.03 * len(op.dependencies)",
+            ),
+            (
+                "topology_policy.py",
+                "                score = solve_term - 0.12 * diversity_penalty - 0.06 * (len(selected) + 1)",
+                "                score = solve_term - 0.10 * diversity_penalty - 0.05 * (len(selected) + 1)",
+            ),
         ],
         "mem": [
-            ("memory_policy.py", "    THETA_PROM = 0.55", "    THETA_PROM = 0.48"),
-            ("memory_policy.py", "    ETA_VERIFY = 0.50", "    ETA_VERIFY = 0.35"),
-            ("memory_policy.py", "    B_HI = 0.75", "    B_HI = 0.68"),
+            (
+                "memory_policy.py",
+                "            score = retained_utility + 0.04 * token_saving - 0.15 * info_loss - 0.05 * comp_latency - 0.20 * orphan_penalty",
+                "            score = retained_utility + 0.05 * token_saving - 0.14 * info_loss - 0.05 * comp_latency - 0.18 * orphan_penalty",
+            ),
+            (
+                "memory_policy.py",
+                "        logits = 1.2 * novelty + 0.9 * reuse + 0.8 * centrality + 1.0 * verifier + 0.5 * task_spread + 0.6 * compositional - 1.0 * duplicate - 0.4 * write_cost - 0.8 * contradiction",
+                "        logits = 1.3 * novelty + 0.9 * reuse + 0.8 * centrality + 1.1 * verifier + 0.5 * task_spread + 0.6 * compositional - 0.9 * duplicate - 0.4 * write_cost - 0.8 * contradiction",
+            ),
+            (
+                "memory_policy.py",
+                "                score = 0.30 * cos + 0.20 * lex + 0.15 * type_match + 0.10 * path_bonus + 0.10 * recency + 0.10 * verify + 0.05 * provenance - 0.05 * staleness",
+                "                score = 0.28 * cos + 0.20 * lex + 0.15 * type_match + 0.14 * path_bonus + 0.08 * recency + 0.10 * verify + 0.05 * provenance - 0.05 * staleness",
+            ),
         ],
         "tool": [
-            ("tool_policy.py", "    BUILD_WEIGHT = 0.20", "    BUILD_WEIGHT = 0.12"),
-            ("tool_policy.py", "    FUTURE_WEIGHT = 0.10", "    FUTURE_WEIGHT = 0.22"),
-            ("tool_policy.py", "    ETA_R = 3", "    ETA_R = 2"),
+            (
+                "tool_policy.py",
+                "            score = 0.30 * sim + 0.20 * sigmatch + 0.15 * tool.pass_rate + 0.10 * cachehit - 0.10 * coldstart - 0.07 * permrisk - 0.08 * depdepth",
+                "            score = 0.32 * sim + 0.22 * sigmatch + 0.15 * tool.pass_rate + 0.10 * cachehit - 0.09 * coldstart - 0.07 * permrisk - 0.07 * depdepth",
+            ),
+            (
+                "tool_policy.py",
+                "        best_reuse_gain = 0.0 if not ranked_reusable_tool_names else 0.55",
+                "        best_reuse_gain = 0.0 if not ranked_reusable_tool_names else 0.50",
+            ),
+            (
+                "tool_policy.py",
+                "        current_gain = 0.85 if operation.kind == \"generated_expression\" else 0.20",
+                "        current_gain = 0.88 if operation.kind == \"generated_expression\" else 0.20",
+            ),
         ],
         "ctl": [
-            ("control_policy.py", '        "small": {"solve": 0.60, "cost": 0.10, "latency": 0.10, "dollar": 0.10, "fail": 0.12},', '        "small": {"solve": 0.64, "cost": 0.10, "latency": 0.10, "dollar": 0.10, "fail": 0.10},'),
-            ("control_policy.py", '        "medium": {"solve": 0.74, "cost": 0.20, "latency": 0.16, "dollar": 0.18, "fail": 0.08},', '        "medium": {"solve": 0.78, "cost": 0.19, "latency": 0.15, "dollar": 0.17, "fail": 0.07},'),
+            (
+                "control_policy.py",
+                "        required = 0.60 + 0.10 * (operation.kind == \"generated_expression\") + 0.05 * bool(operation.dependencies)",
+                "        required = 0.58 + 0.10 * (operation.kind == \"generated_expression\") + 0.05 * bool(operation.dependencies)",
+            ),
+            (
+                "control_policy.py",
+                "            utility = spec[\"solve\"] - 0.20 * spec[\"cost\"] - 0.15 * spec[\"latency\"] - 0.10 * spec[\"dollar\"] - 0.20 * spec[\"fail\"]",
+                "            utility = spec[\"solve\"] - 0.18 * spec[\"cost\"] - 0.15 * spec[\"latency\"] - 0.10 * spec[\"dollar\"] - 0.18 * spec[\"fail\"]",
+            ),
         ],
     }
 
     def mutate(self, context: MutationContext) -> MutationCandidate:
         prompt = build_mutation_prompt(context.runtime_dir, context.objective, context.touched_scope, context.predictor_summaries, context.failing_train_traces, context.exemplars)
-        runtime_name = f"cand_{stable_hash(context.runtime_dir, context.objective, context.touched_scope, context.seed)[:8]}"
-        child_dir = context.workspace / runtime_name
-        shutil.copytree(context.runtime_dir, child_dir)
         rng = random.Random(context.seed)
-        blocks = []
+        blocks: list[str] = []
         selected_scopes = list(context.touched_scope)
         rng.shuffle(selected_scopes)
         for scope in selected_scopes:
-            choices = list(self.SCOPE_MUTATIONS.get(scope, []))
-            if not choices:
+            viable_choices = []
+            for file_name, search, replace in self.SCOPE_MUTATIONS.get(scope, []):
+                source = (context.runtime_dir / file_name).read_text(encoding="utf-8")
+                if search in source:
+                    viable_choices.append((search, replace))
+            if not viable_choices:
                 continue
-            file_name, search, replace = choices[rng.randrange(len(choices))]
-            path = child_dir / file_name
-            source = path.read_text(encoding="utf-8")
-            if search in source:
-                path.write_text(source.replace(search, replace, 1), encoding="utf-8")
-                blocks.append(build_patch(search, replace))
-        if not blocks:
-            file_name, search, replace = self.SCOPE_MUTATIONS[selected_scopes[0]][0]
-            path = child_dir / file_name
-            source = path.read_text(encoding="utf-8")
-            path.write_text(source.replace(search, replace, 1), encoding="utf-8")
+            search, replace = viable_choices[rng.randrange(len(viable_choices))]
             blocks.append(build_patch(search, replace))
-        return MutationCandidate(runtime_dir=str(child_dir), patch_text="\n".join(blocks), touched_scope=context.touched_scope, prompt=prompt, objective=context.objective)
+        if not blocks:
+            fallback_scope = selected_scopes[0]
+            for file_name, search, replace in self.SCOPE_MUTATIONS[fallback_scope]:
+                source = (context.runtime_dir / file_name).read_text(encoding="utf-8")
+                if search in source:
+                    blocks.append(build_patch(search, replace))
+                    break
+        return MutationCandidate(runtime_dir=str(context.runtime_dir), patch_text="\n".join(blocks), touched_scope=context.touched_scope, prompt=prompt, objective=context.objective)
 
 
 class OpenAIPatchMutator:
@@ -86,7 +124,7 @@ class OpenAIPatchMutator:
         prompt = build_mutation_prompt(context.runtime_dir, context.objective, context.touched_scope, context.predictor_summaries, context.failing_train_traces, context.exemplars)
         response = self.provider.generate(
             ModelRequest(
-                instructions="Return only exact SEARCH/REPLACE blocks for the mutable Agintor runtime files.",
+                instructions="Return only exact SEARCH/REPLACE blocks. Modify only the mutable Agintor runtime files and only the contracted methods for the touched scopes. Do not edit immutable shell files.",
                 prompt=prompt,
                 model_class="large",
                 seed=context.seed,
@@ -95,8 +133,4 @@ class OpenAIPatchMutator:
         )
         patch_text = response.text.strip()
         parse_patch(patch_text)
-        runtime_name = f"cand_{stable_hash(context.runtime_dir, context.objective, context.touched_scope, context.seed)[:8]}"
-        child_dir = context.workspace / runtime_name
-        shutil.copytree(context.runtime_dir, child_dir)
-        # patch application is handled by evaluator stage 0 to preserve exact checking.
-        return MutationCandidate(runtime_dir=str(child_dir), patch_text=patch_text, touched_scope=context.touched_scope, prompt=prompt, objective=context.objective)
+        return MutationCandidate(runtime_dir=str(context.runtime_dir), patch_text=patch_text, touched_scope=context.touched_scope, prompt=prompt, objective=context.objective)

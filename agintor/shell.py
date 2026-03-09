@@ -91,36 +91,57 @@ class AgentPool:
 
 
 class FixedShell:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, predictors: DecisionFamilyModelBank | None = None) -> None:
         self.workspace = ensure_directory(workspace)
         self.short_term = ShortTermGraph()
         self.long_term = LongTermGraph()
         self.message_board = MessageBoard()
         self.open_handles = OpenHandleTable()
-        self.predictors = DecisionFamilyModelBank()
+        self.predictors = predictors or DecisionFamilyModelBank()
+        self._shared_predictors = predictors is not None
         self.agent_pool = AgentPool()
         self.safety_guard = SafetyGuard()
         self.sandbox_manager = SandboxManager(self.workspace / "sandboxes")
         self.tool_registry = ToolRegistry(self.sandbox_manager, self.safety_guard)
         self.tool_executor = ToolExecutor(self.tool_registry, self.sandbox_manager)
         self.trace_dir = ensure_directory(self.workspace / "traces")
+        self._current_task_id: str | None = None
+        self._current_episode_id: str | None = None
+        self._memory_scope_kind: str | None = None
+        self._memory_scope_id: str | None = None
 
-    def reset_for_task(self, transfer_scored: bool = False) -> None:
+    def reset_for_task(self, task_id: str = "", transfer_scored: bool = False, episode_id: str | None = None) -> None:
         self.short_term = ShortTermGraph()
         self.message_board = MessageBoard()
         self.open_handles = OpenHandleTable()
+        if not self._shared_predictors:
+            self.predictors = DecisionFamilyModelBank()
         self.tool_registry.reset_task_local()
-        if not transfer_scored:
+        self._current_task_id = task_id
+        self._current_episode_id = episode_id
+        memory_scope_kind = "episode" if transfer_scored else "task"
+        memory_scope_id = episode_id or task_id
+        if memory_scope_kind == "task" or (self._memory_scope_kind, self._memory_scope_id) != (memory_scope_kind, memory_scope_id):
             self.long_term.reset()
+        self._memory_scope_kind = memory_scope_kind
+        self._memory_scope_id = memory_scope_id
 
     def save_trace(self, task_id: str, seed: int, trace: list[dict[str, Any]]) -> Path:
+        ensure_directory(self.trace_dir)
         path = self.trace_dir / f"{task_id.replace('/', '_')}_{seed}.json"
         path.write_text(json.dumps(trace, indent=2, sort_keys=True), encoding="utf-8")
         return path
 
     def validate_invariants(self, transfer_scored: bool = False) -> None:
         self.open_handles.validate()
-        if transfer_scored is False:
-            # In this MVP, reset_for_task clears long-term memory. A non-empty graph after reset
-            # at independent-task boundaries would indicate carryover.
-            pass
+        self.short_term.validate_hidden_reachability()
+        if transfer_scored is False and self._current_task_id is not None:
+            if self._memory_scope_kind != "task" or self._memory_scope_id != self._current_task_id:
+                raise HardInvalidation("long-term memory carries across tasks when transfer is not explicitly scored")
+            leaked = [
+                node.node_id
+                for node in self.long_term.nodes.values()
+                if node.source_task_id not in {"", self._current_task_id}
+            ]
+            if leaked:
+                raise HardInvalidation("long-term memory carries across tasks when transfer is not explicitly scored")

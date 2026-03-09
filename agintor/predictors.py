@@ -112,11 +112,19 @@ class Ensemble:
 
 
 class DecisionFamilyModelBank:
-    def __init__(self, ensemble_size: int = 5) -> None:
+    def __init__(self, ensemble_size: int = 5, max_observations_per_family: int = 200) -> None:
         self.ensemble_size = ensemble_size
+        self.max_observations_per_family = max_observations_per_family
         self._observations: Dict[str, list[dict[str, object]]] = {}
         self._models: Dict[str, Ensemble] = {}
         self._ranking_weights: Dict[str, RankingMixer] = {}
+        self._frozen = False
+
+    def freeze(self) -> None:
+        self._frozen = True
+
+    def unfreeze(self) -> None:
+        self._frozen = False
 
     def add_observation(
         self,
@@ -126,7 +134,10 @@ class DecisionFamilyModelBank:
         positive_label: float | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> None:
-        self._observations.setdefault(family, []).append(
+        if self._frozen:
+            return
+        bucket = self._observations.setdefault(family, [])
+        bucket.append(
             {
                 "x": list(map(float, features)),
                 "p": None if probability_label is None else float(probability_label),
@@ -134,6 +145,8 @@ class DecisionFamilyModelBank:
                 "metadata": dict(metadata or {}),
             }
         )
+        if len(bucket) > self.max_observations_per_family:
+            del bucket[: len(bucket) - self.max_observations_per_family]
 
     def count(self, family: str) -> int:
         return len(self._observations.get(family, []))
@@ -163,6 +176,8 @@ class DecisionFamilyModelBank:
         self._ranking_weights.setdefault(family, RankingMixer.default(xs.shape[1]))
 
     def maybe_retrain(self, fully_evaluated_children: int, accepted_elites: int) -> None:
+        if self._frozen:
+            return
         if fully_evaluated_children < 50 and accepted_elites < 10:
             return
         for family in list(self._observations):
@@ -209,6 +224,18 @@ class DecisionFamilyModelBank:
         conservative = utility - beta * sigma
         optimistic = utility + beta * sigma
         return float(utility), float(conservative), float(optimistic)
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "frozen": self._frozen,
+            "families": {
+                family: {
+                    "observations": len(observations),
+                    "trained": family in self._models,
+                }
+                for family, observations in sorted(self._observations.items())
+            },
+        }
 
 
 

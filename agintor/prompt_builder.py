@@ -5,9 +5,6 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from .runtime_loader import load_runtime
-from .schemas import ObjectiveSpec, SuiteEvaluation
-
-
 METHOD_CONTRACTS = {
     "top": ["score_agent", "select_mode", "propose_children", "select_workers", "assign_scope", "merge_ensemble", "make_checkpoint"],
     "mem": ["select_spans_for_compaction", "summarize_span", "retrieve_long_term", "score_memory_unit", "should_promote", "dedup_candidates", "upsert_memory"],
@@ -29,6 +26,7 @@ def build_mutation_prompt(
     for rel_path in runtime.manifest.mutable_files:
         files_text[rel_path] = (runtime_dir / rel_path).read_text(encoding="utf-8")
     contracts = {scope: METHOD_CONTRACTS[scope] for scope in touched_scope}
+    exemplar_rows = list(exemplars)[:6]
     payload = {
         "objective": objective,
         "touched_scope": list(touched_scope),
@@ -37,11 +35,12 @@ def build_mutation_prompt(
         "contracts": contracts,
         "predictor_summaries": predictor_summaries,
         "recent_failing_train_traces": list(failing_train_traces),
-        "high_performing_exemplars": list(exemplars),
+        "high_performing_exemplars": exemplar_rows,
         "patch_rules": {
             "format": "SEARCH/REPLACE only",
             "max_blocks": 4,
             "max_changed_lines": 60,
+            "max_search_lines": 8,
         },
     }
     return json.dumps(payload, indent=2, sort_keys=True)

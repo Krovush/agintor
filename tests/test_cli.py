@@ -25,8 +25,10 @@ def test_cli_init_solve_eval(tmp_path: Path) -> None:
     assert solve.exit_code == 0, solve.output
     solve_payload = json.loads(solve.output)
     assert solve_payload["result"]["verifier_score"] == 1.0
+    assert solve_payload["provider_usage"]["calls"] == solve_payload["result"]["model_calls"]
 
     evaluation = runner.invoke(app, ["eval", str(runtime_dir), "--suite", str(suite_path), "--partition", "train", "--seeds", "0", "--workspace", str(tmp_path / "eval_ws")])
     assert evaluation.exit_code == 0, evaluation.output
     eval_payload = json.loads(evaluation.output)
     assert eval_payload["invalid"] is False
+    assert eval_payload["provider_usage"]["calls"] == sum(run["model_calls"] for run in eval_payload["run_results"])

@@ -10,7 +10,7 @@ from typing import Any, Dict
 from .exceptions import RuntimeLoadError
 from .pydantic_compat import model_dump, model_validate
 from .schemas import RuntimeManifest
-from .utils import ast_node_count, file_digest, stable_hash
+from .utils import ast_node_count, stable_hash
 
 
 @dataclass
@@ -27,7 +27,6 @@ class LoadedRuntime:
     mutable_loc: int
 
 
-
 def _load_module(module_name: str, path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
@@ -35,7 +34,6 @@ def _load_module(module_name: str, path: Path) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
 
 
 def load_runtime(runtime_dir: str | Path) -> LoadedRuntime:

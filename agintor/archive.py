@@ -25,6 +25,11 @@ PHASE_SCOPES = {
 }
 
 
+def _ordered_scope(scope: Sequence[str]) -> tuple[str, ...]:
+    order = {name: idx for idx, name in enumerate(INTERFACES)}
+    return tuple(sorted(scope, key=lambda name: order[name]))
+
+
 
 def objective_specs_from_suite(suite, partition: str = "train") -> list[ObjectiveSpec]:
     tasks = suite.all_tasks(partition)
@@ -81,12 +86,12 @@ class ScopeScheduler:
 
     def aggregate_credit(self, scope: Sequence[str]) -> float:
         total = sum(self.a[item] for item in scope)
-        for pair in combinations(sorted(scope), 2):
+        for pair in combinations(_ordered_scope(scope), 2):
             total += self.b[pair]
         return total
 
     def utility(self, scope: Sequence[str], objective: str) -> float:
-        key = tuple(sorted(scope))
+        key = _ordered_scope(scope)
         c_obj = self.c_f.get(objective, {}).get(key, 0.0)
         w1, w2, w3, w4, w5, w6 = self.omega
         return (
@@ -114,7 +119,7 @@ class ScopeScheduler:
         return scopes[-1]
 
     def update_scope_credit(self, objective: str, scope: Sequence[str], delta: float) -> None:
-        key = tuple(sorted(scope))
+        key = _ordered_scope(scope)
         self.c_f.setdefault(objective, {})[key] = (1.0 - self.xi_f) * self.c_f.setdefault(objective, {}).get(key, 0.0) + self.xi_f * delta
         self.stagnation[key] = max(0.0, self.stagnation[key] * 0.9)
 
@@ -122,15 +127,15 @@ class ScopeScheduler:
         for item, delta in singleton.items():
             self.a[item] = (1.0 - self.xi_a) * self.a[item] + self.xi_a * delta
         for pair, delta in pairwise.items():
-            ordered = tuple(sorted(pair))
+            ordered = _ordered_scope(pair)
             self.b[ordered] = (1.0 - self.xi_b) * self.b[ordered] + self.xi_b * delta
 
     def note_hard_failure(self, scope: Sequence[str]) -> None:
-        key = tuple(sorted(scope))
+        key = _ordered_scope(scope)
         self.hardfail[key] = min(1.0, 0.8 * self.hardfail[key] + 0.2)
 
     def note_iteration(self, accepted_scopes: Iterable[Sequence[str]]) -> None:
-        accepted = {tuple(sorted(scope)) for scope in accepted_scopes}
+        accepted = {_ordered_scope(scope) for scope in accepted_scopes}
         for key in list(self.stagnation):
             if key not in accepted:
                 self.stagnation[key] += 0.05
@@ -159,35 +164,90 @@ class QualityDiversityArchive:
         return list(self.by_objective.get(objective, []))
 
     def _complexity_bucket(self, descriptor: RuntimeDescriptor) -> int:
-        locs = [d.mutable_loc for d in self.runtime_descriptors.values()]
-        if not locs:
+        counts = [d.mutable_ast_nodes for d in self.runtime_descriptors.values()]
+        if not counts:
             return 0
-        locs_sorted = sorted(locs)
-        quartiles = [locs_sorted[int((len(locs_sorted) - 1) * q)] for q in (0.25, 0.5, 0.75)]
-        if descriptor.mutable_loc <= quartiles[0]:
+        counts_sorted = sorted(counts)
+        quartiles = [counts_sorted[int((len(counts_sorted) - 1) * q)] for q in (0.25, 0.5, 0.75)]
+        if descriptor.mutable_ast_nodes <= quartiles[0]:
             return 0
-        if descriptor.mutable_loc <= quartiles[1]:
+        if descriptor.mutable_ast_nodes <= quartiles[1]:
             return 1
-        if descriptor.mutable_loc <= quartiles[2]:
+        if descriptor.mutable_ast_nodes <= quartiles[2]:
             return 2
         return 3
 
-    def descriptor(self, runtime_hash: str, code_hash: str, mutable_loc: int, evaluation: SuiteEvaluation, scope: Sequence[str]) -> RuntimeDescriptor:
-        descriptor = RuntimeDescriptor.from_runtime_hash(runtime_hash, behavior_descriptor(evaluation), "+".join(sorted(scope)) or "seed", 0, mutable_loc)
+    def descriptor(
+        self,
+        runtime_hash: str,
+        code_hash: str,
+        mutable_loc: int,
+        evaluation: SuiteEvaluation,
+        scope: Sequence[str],
+        mutable_ast_nodes: int | None = None,
+        interface_diff_mask: str | None = None,
+    ) -> RuntimeDescriptor:
+        ast_nodes = mutable_ast_nodes if mutable_ast_nodes is not None else mutable_loc
+        descriptor = RuntimeDescriptor.from_runtime_hash(
+            runtime_hash,
+            behavior_descriptor(evaluation),
+            "+".join(sorted(scope)) or "seed",
+            0,
+            mutable_loc,
+            mutable_ast_nodes=ast_nodes,
+            interface_diff_mask=interface_diff_mask or interface_bitmask(scope),
+        )
         bucket = self._complexity_bucket(descriptor)
         return model_copy(descriptor, update={"complexity_bucket": bucket, "code_hash": code_hash})
 
     def _cell_key(self, objective: str, descriptor: RuntimeDescriptor, scope: Sequence[str]) -> str:
-        return stable_hash(objective, interface_bitmask(scope), descriptor.behavior_bin, descriptor.scope_tag, descriptor.complexity_bucket)
+        return stable_hash(objective, descriptor.interface_diff_mask, descriptor.behavior_bin, descriptor.scope_tag, descriptor.complexity_bucket)
 
-    def insert(self, runtime_dir: str, runtime_hash: str, code_hash: str, mutable_loc: int, evaluation: SuiteEvaluation, scope: Sequence[str]) -> list[str]:
+    def _trace_refs_for_objective(self, objective: str, evaluation: SuiteEvaluation) -> list[str]:
+        if objective.startswith("s:"):
+            task_id = objective.split(":", 1)[1]
+            return [run.trace_path for run in evaluation.run_results if run.task_id == task_id]
+        if ":" in objective:
+            _, family = objective.split(":", 1)
+            if family in {"top", "mem", "tool", "e2e"}:
+                return [run.trace_path for run in evaluation.run_results if run.task_id.startswith(f"{family}.")]
+        return [run.trace_path for run in evaluation.run_results]
+
+    def insert(
+        self,
+        runtime_dir: str,
+        runtime_hash: str,
+        code_hash: str,
+        mutable_loc: int,
+        evaluation: SuiteEvaluation,
+        scope: Sequence[str],
+        mutable_ast_nodes: int | None = None,
+        interface_diff_mask: str | None = None,
+    ) -> list[str]:
         inserted = []
-        descriptor = self.descriptor(runtime_hash, code_hash, mutable_loc, evaluation, scope)
+        descriptor = self.descriptor(
+            runtime_hash,
+            code_hash,
+            mutable_loc,
+            evaluation,
+            scope,
+            mutable_ast_nodes=mutable_ast_nodes,
+            interface_diff_mask=interface_diff_mask,
+        )
         self.runtime_evaluations[runtime_hash] = evaluation
         self.runtime_descriptors[runtime_hash] = descriptor
         for objective, score in evaluation.objective_scores.items():
             cell_key = self._cell_key(objective, descriptor, scope)
-            entry = ArchiveEntry(code_hash=code_hash, runtime_hash=runtime_hash, scores=evaluation.objective_scores, behavior_bin=descriptor.behavior_bin, scope_tag=descriptor.scope_tag, complexity_bucket=descriptor.complexity_bucket, mutable_loc=mutable_loc, trace_refs=[run.trace_path for run in evaluation.run_results])
+            entry = ArchiveEntry(
+                code_hash=code_hash,
+                runtime_hash=runtime_hash,
+                scores=evaluation.objective_scores,
+                behavior_bin=descriptor.behavior_bin,
+                scope_tag=descriptor.scope_tag,
+                complexity_bucket=descriptor.complexity_bucket,
+                mutable_loc=mutable_loc,
+                trace_refs=self._trace_refs_for_objective(objective, evaluation),
+            )
             record = ArchiveRecord(objective=objective, key=cell_key, entry=entry, runtime_dir=runtime_dir)
             incumbent = self.cells.get((objective, cell_key))
             if incumbent is None:

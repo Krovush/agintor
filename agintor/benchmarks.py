@@ -7,11 +7,11 @@ from typing import Dict, Iterable, List, Mapping
 
 from pydantic import BaseModel
 
-from .pydantic_compat import model_validate
+from .pydantic_compat import model_copy, model_validate
 from .schemas import BenchmarkTask, OperationSpec
 
 
-@dataclass
+@dataclass(frozen=True)
 class BenchmarkSuite:
     name: str
     train: list[BenchmarkTask]
@@ -20,7 +20,7 @@ class BenchmarkSuite:
     proxy: list[BenchmarkTask]
 
     def all_tasks(self, partition: str = "train") -> list[BenchmarkTask]:
-        return list(getattr(self, partition))
+        return [model_copy(task, deep=True) for task in getattr(self, partition)]
 
     def task_family_map(self, partition: str) -> dict[str, str]:
         return {task.task_id: task.family for task in self.all_tasks(partition)}
@@ -29,11 +29,11 @@ class BenchmarkSuite:
         for partition in ("train", "val", "test", "proxy"):
             for task in getattr(self, partition):
                 if task.task_id == task_id:
-                    return task
+                    return model_copy(task, deep=True)
         raise KeyError(task_id)
 
     def representative_family_tasks(self, family: str, partition: str = "train", limit: int = 4) -> list[BenchmarkTask]:
-        return [t for t in self.all_tasks(partition) if t.family == family][:limit]
+        return [task for task in self.all_tasks(partition) if task.family == family][:limit]
 
 
 
@@ -225,6 +225,7 @@ def build_demo_suite() -> BenchmarkSuite:
             family="e2e",
             task_type="e2e_report",
             prompt="Use the exact symbol RATE and rows to produce total, rate, adjusted.",
+            symbolic_seeds=["RATE"],
             context_items=[{"symbol": "RATE", "value": 2}, {"rows": [{"amount": 2}, {"amount": 6}]}],
             operations=[
                 OperationSpec(op_id="total", kind="builtin", output_key="total", description="Sum amounts", tool_hint="data/csv/column_sum", args={"rows": [{"amount": 2}, {"amount": 6}], "column": "amount"}),
@@ -285,7 +286,85 @@ def build_demo_suite() -> BenchmarkSuite:
         ),
     ]
 
-    proxy = [top_train[0], mem_train[0], tool_train[0], e2e_train[0]]
+    proxy = [
+        top_train[0],
+        mem_train[0],
+        tool_train[0],
+        e2e_train[0],
+        BenchmarkTask(
+            task_id="proxy.top.checkpoint_trace",
+            family="top",
+            task_type="trace_proxy",
+            prompt="Verify that multi-child vertical execution emits checkpoint summaries.",
+            operations=[
+                OperationSpec(op_id="sum", kind="builtin", output_key="sum", description="Compute sum of numbers", tool_hint="math/basic/sum_numbers", args={"numbers": [2, 3, 5]}),
+                OperationSpec(op_id="product", kind="builtin", output_key="product", description="Compute product of numbers", tool_hint="math/basic/product_numbers", args={"numbers": [2, 3, 5]}),
+            ],
+            expected={"event": "child_complete", "min": 1},
+            verifier_type="trace_event_count",
+            proxy_scope_tags=["top", "ctl"],
+        ),
+        BenchmarkTask(
+            task_id="proxy.tool.generated_trace",
+            family="tool",
+            task_type="trace_proxy",
+            prompt="Verify that generated-tool paths emit tool-operation traces.",
+            operations=[
+                OperationSpec(
+                    op_id="expr",
+                    kind="generated_expression",
+                    output_key="value",
+                    description="Create or reuse a tool that computes sum(x*x for x in numbers) % modulus",
+                    expression="sum(x*x for x in numbers) % modulus",
+                    args={"numbers": [1, 2, 3, 4], "modulus": 7},
+                )
+            ],
+            expected=["tool_operation", "checks_requested"],
+            verifier_type="trace_event",
+            proxy_scope_tags=["tool", "ctl"],
+        ),
+        BenchmarkTask(
+            task_id="proxy.tool.provider_synthesis",
+            family="tool",
+            task_type="trace_proxy",
+            prompt="Verify that under-specified tool requests use provider-backed synthesis and still dispatch a tool deterministically.",
+            operations=[
+                OperationSpec(
+                    op_id="expr",
+                    kind="generated_expression",
+                    output_key="value",
+                    description="Synthesize a deterministic tool for this operation without an explicit expression.",
+                    args={"value": 7},
+                )
+            ],
+            expected=7,
+            verifier_type="number_exact",
+            proxy_scope_tags=["tool", "ctl"],
+        ),
+        BenchmarkTask(
+            task_id="proxy.mem.compaction_trace",
+            family="mem",
+            task_type="trace_proxy",
+            prompt="Verify that oversized context triggers compaction while exact symbol retrieval still succeeds.",
+            symbolic_seeds=["ALPHA_7"],
+            context_items=[
+                {"symbol": "ALPHA_7", "value": 17},
+                *[
+                    {
+                        "note": f"supporting-context-{idx}",
+                        "text": ("audit trail and raw evidence block " * 24).strip(),
+                    }
+                    for idx in range(10)
+                ],
+            ],
+            operations=[
+                OperationSpec(op_id="lookup", kind="memory_lookup", output_key="answer", description="Lookup exact symbol value", requires_exact_symbol="ALPHA_7"),
+            ],
+            expected="compaction",
+            verifier_type="trace_event",
+            proxy_scope_tags=["mem", "ctl"],
+        ),
+    ]
     return BenchmarkSuite(name="demo", train=top_train + mem_train + tool_train + e2e_train, val=val, test=test, proxy=proxy)
 
 

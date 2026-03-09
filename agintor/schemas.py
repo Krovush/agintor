@@ -178,8 +178,12 @@ class ModelRequest(BaseModel):
 class ModelResponse(BaseModel):
     text: str
     raw: Dict[str, Any] = Field(default_factory=dict)
+    model_name: Optional[str] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
     token_estimate: int = 0
     latency_s: float = 0.0
+    dollar_cost: float = 0.0
 
 
 class ToolExecutionResult(BaseModel):
@@ -222,8 +226,13 @@ class BenchmarkTask(BaseModel):
     verification_required: bool = True
     allow_best_effort: bool = False
     transfer_scored: bool = False
+    episode_id: Optional[str] = None
+    episode_order: int = 0
     proxy_scope_tags: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        allow_mutation = False
 
 
 class RunResult(BaseModel):
@@ -241,6 +250,10 @@ class RunResult(BaseModel):
     created_tools: int = 0
     promoted_nodes: int = 0
     checks_used: int = 0
+    model_calls: int = 0
+    tokens_used: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     utility: Optional[float] = None
 
 
@@ -334,17 +347,30 @@ class RuntimeDescriptor(BaseModel):
     code_hash: str
     runtime_hash: str
     behavior_bin: List[str]
+    interface_diff_mask: str = "0000"
     scope_tag: str
     complexity_bucket: int
     mutable_loc: int
+    mutable_ast_nodes: int = 0
 
     @classmethod
-    def from_runtime_hash(cls, runtime_hash: str, behavior_bin: List[str], scope_tag: str, complexity_bucket: int, mutable_loc: int) -> "RuntimeDescriptor":
+    def from_runtime_hash(
+        cls,
+        runtime_hash: str,
+        behavior_bin: List[str],
+        scope_tag: str,
+        complexity_bucket: int,
+        mutable_loc: int,
+        mutable_ast_nodes: int = 0,
+        interface_diff_mask: str = "0000",
+    ) -> "RuntimeDescriptor":
         return cls(
             code_hash=stable_hash(runtime_hash, behavior_bin, scope_tag, complexity_bucket, mutable_loc),
             runtime_hash=runtime_hash,
             behavior_bin=behavior_bin,
+            interface_diff_mask=interface_diff_mask,
             scope_tag=scope_tag,
             complexity_bucket=complexity_bucket,
             mutable_loc=mutable_loc,
+            mutable_ast_nodes=mutable_ast_nodes,
         )

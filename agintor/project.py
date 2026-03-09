@@ -26,7 +26,7 @@ def init_runtime(destination: str | Path, force: bool = False) -> Path:
     ensure_directory(dest.parent)
     template_root = resources.files("agintor").joinpath("templates", "baseline_runtime")
     with resources.as_file(template_root) as template_dir:
-        shutil.copytree(template_dir, dest)
+        shutil.copytree(template_dir, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
     return dest
 
 
