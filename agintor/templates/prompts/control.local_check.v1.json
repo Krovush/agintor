@@ -1,0 +1,15 @@
+{
+  "prompt_id": "control.local_check.v1",
+  "description": "Cheap local self-check for a candidate artifact.",
+  "instructions": "Check the artifact for obvious incompleteness, missing fields, or unsupported claims. Return only structured data.",
+  "model_class": "small",
+  "max_output_tokens": 300,
+  "allowed_tools": [],
+  "input_schema": {
+    "artifact": {}
+  },
+  "output_schema": {
+    "passed": "boolean",
+    "issues": ["string"]
+  }
+}

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+from .prompts import load_prompt_spec
 from .runtime_loader import load_runtime
 METHOD_CONTRACTS = {
     "top": ["score_agent", "select_mode", "propose_children", "select_workers", "assign_scope", "merge_ensemble", "make_checkpoint"],
@@ -22,12 +23,14 @@ def build_mutation_prompt(
     exemplars: Sequence[dict[str, object]],
 ) -> str:
     runtime = load_runtime(runtime_dir)
+    spec = load_prompt_spec("evolve.mutator_patch.v1")
     files_text = {}
     for rel_path in runtime.manifest.mutable_files:
         files_text[rel_path] = (runtime_dir / rel_path).read_text(encoding="utf-8")
     contracts = {scope: METHOD_CONTRACTS[scope] for scope in touched_scope}
     exemplar_rows = list(exemplars)[:6]
     payload = {
+        "prompt_id": spec.prompt_id,
         "objective": objective,
         "touched_scope": list(touched_scope),
         "mutable_files": files_text,

@@ -1,0 +1,26 @@
+{
+  "prompt_id": "runtime.child_checkpoint.v1",
+  "description": "Compact a child worker's output into a resumable checkpoint.",
+  "instructions": "Summarize the child run while preserving evidence, unresolved items, artifacts, open handles, and next actions. Return only structured data.",
+  "model_class": "small",
+  "max_output_tokens": 800,
+  "allowed_tools": [],
+  "input_schema": {
+    "objective": "string",
+    "evidence": ["string"],
+    "artifacts": ["string"],
+    "unresolved": ["string"],
+    "open_handles": ["string"]
+  },
+  "output_schema": {
+    "objective": "string",
+    "evidence": ["string"],
+    "artifacts": ["string"],
+    "unresolved": ["string"],
+    "open_handles": ["string"],
+    "next_actions": ["string"],
+    "symbols": ["string"],
+    "verifier_state": {},
+    "provenance": {}
+  }
+}

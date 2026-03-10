@@ -1,0 +1,17 @@
+{
+  "prompt_id": "tool.spec_repair.v1",
+  "description": "Repair a failed tool candidate while preserving determinism.",
+  "instructions": "Return only JSON with a corrected deterministic expression and a short description. Do not request extra permissions.",
+  "model_class": "medium",
+  "max_output_tokens": 600,
+  "allowed_tools": [],
+  "input_schema": {
+    "description": "string",
+    "args": {},
+    "error": "string"
+  },
+  "output_schema": {
+    "expression": "string",
+    "description": "string"
+  }
+}

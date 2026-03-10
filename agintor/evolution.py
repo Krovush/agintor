@@ -33,7 +33,7 @@ class EvolutionSummary:
 
 
 class EvolutionEngine:
-    def __init__(self, suite: BenchmarkSuite, workspace: Path, provider: ModelProvider, baseline_runtime_dir: Path, mutator_type: str = "heuristic", reference_runtime_dir: Path | None = None, budget_overrides: Dict[str, Any] | None = None) -> None:
+    def __init__(self, suite: BenchmarkSuite, workspace: Path, provider: ModelProvider, baseline_runtime_dir: Path, mutator_type: str = "heuristic", reference_runtime_dir: Path | None = None, budget_overrides: Dict[str, Any] | None = None, runtime_backend: str | None = None) -> None:
         self.suite = suite
         self.workspace = ensure_directory(workspace)
         self.provider = provider
@@ -48,6 +48,7 @@ class EvolutionEngine:
             baseline_runtime_dir=reference_runtime_dir if reference_runtime_dir is not None else baseline_runtime_dir,
             budget_overrides=budget_overrides,
             predictors=self.predictors,
+            runtime_backend=runtime_backend,
         )
         self.objectives = objective_specs_from_suite(suite, partition="train")
         self.history: list[EvolutionHistoryRow] = []

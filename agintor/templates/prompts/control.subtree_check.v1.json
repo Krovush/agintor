@@ -1,0 +1,16 @@
+{
+  "prompt_id": "control.subtree_check.v1",
+  "description": "Check whether child outputs support a merge decision.",
+  "instructions": "Inspect the child outputs and report whether the merge has enough support, which gaps remain, and what should be verified next. Return only structured data.",
+  "model_class": "small",
+  "max_output_tokens": 400,
+  "allowed_tools": [],
+  "input_schema": {
+    "children": []
+  },
+  "output_schema": {
+    "passed": "boolean",
+    "issues": ["string"],
+    "next_checks": ["string"]
+  }
+}

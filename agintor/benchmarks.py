@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from .pydantic_compat import model_copy, model_validate
 from .schemas import BenchmarkTask, OperationSpec
+from .research_runtime import build_research_task
 
 
 @dataclass(frozen=True)
@@ -368,10 +369,175 @@ def build_demo_suite() -> BenchmarkSuite:
     return BenchmarkSuite(name="demo", train=top_train + mem_train + tool_train + e2e_train, val=val, test=test, proxy=proxy)
 
 
+def _research_corpus() -> list[dict[str, object]]:
+    return [
+        {
+            "doc_id": "architecture",
+            "title": "Research Orchestrator Architecture",
+            "url": "frozen://architecture",
+            "tags": ["architecture", "orchestrator", "subagents"],
+            "content": "A deep research system should use a central orchestrator that decomposes the user question into materially different search lanes. The orchestrator delegates search subagents, gathers summaries, normalizes evidence, and synthesizes a cited final answer.",
+        },
+        {
+            "doc_id": "topology",
+            "title": "Delegation Topology",
+            "url": "frozen://topology",
+            "tags": ["topology", "delegation", "workers"],
+            "content": "The runtime should support single-agent, vertical delegation, and small horizontal ensembles. Ordered child spawning, deterministic merge order, and explicit checkpoints are required so delegated workers can resume without replaying raw transcripts.",
+        },
+        {
+            "doc_id": "memory",
+            "title": "Memory and Checkpoints",
+            "url": "frozen://memory",
+            "tags": ["memory", "checkpoint", "compaction"],
+            "content": "Short-term memory must be append-only with backlinks when compaction happens. Checkpoints should preserve evidence, artifacts, unresolved goals, verifier state, and open handles. Long-term memory stores reusable abstractions rather than raw transcripts.",
+        },
+        {
+            "doc_id": "tooling",
+            "title": "Tooling and Containers",
+            "url": "frozen://tooling",
+            "tags": ["tooling", "containers", "build-vs-reuse"],
+            "content": "Tooling should use category-first discovery, explicit build-versus-reuse logic, deterministic validation, and content-addressed sandbox environments. Container isolation matters for safety, dependency control, and reproducible tool reuse.",
+        },
+        {
+            "doc_id": "evaluation",
+            "title": "Verification and Evolution",
+            "url": "frozen://evaluation",
+            "tags": ["verification", "benchmark", "evolution"],
+            "content": "The system should evolve topology, memory, tooling, and control together under staged evaluation. Verification requests should follow value-of-information logic, and held-out validation or test traces must remain invisible to the mutator.",
+        },
+        {
+            "doc_id": "prompts",
+            "title": "Prompt Registry and Policy",
+            "url": "frozen://prompts",
+            "tags": ["prompts", "policy", "mutation"],
+            "content": "Prompts should be versioned assets with explicit schemas, model-class defaults, tool allowances, and no-leak rules. Mutation prompts must include the objective, mutable files, immutable manifest, method contracts, predictor summaries, failing train traces, and archive exemplars.",
+        },
+    ]
+
+
+def build_research_suite() -> BenchmarkSuite:
+    corpus = _research_corpus()
+    train = [
+        build_research_task(
+            "Design the delegation topology for a deep research agent that uses search subagents and a central orchestrator.",
+            task_id="top.research.delegation",
+            family="top",
+            live_web=False,
+            max_tracks=4,
+            context_items=corpus,
+            expected={
+                "required_sections": ["Architecture", "Agent Topology", "Tooling and Containers"],
+                "required_phrases": ["orchestrator", "subagent", "deterministic", "checkpoint"],
+            },
+            min_source_count=3,
+            required_citation_count=3,
+            proxy_scope_tags=["top", "ctl"],
+        ),
+        build_research_task(
+            "Explain how memory, checkpoints, compaction, and long-term storage should work in a deep research agent runtime.",
+            task_id="mem.research.memory",
+            family="mem",
+            live_web=False,
+            max_tracks=4,
+            context_items=corpus,
+            expected={
+                "required_sections": ["Memory", "Verification and Evolution"],
+                "required_phrases": ["append-only", "backlinks", "open handles", "long-term memory"],
+            },
+            min_source_count=3,
+            required_citation_count=3,
+            proxy_scope_tags=["mem", "ctl"],
+        ),
+        build_research_task(
+            "Specify the tooling, container isolation, and build-versus-reuse policy for a deep research system.",
+            task_id="tool.research.tooling",
+            family="tool",
+            live_web=False,
+            max_tracks=4,
+            context_items=corpus,
+            expected={
+                "required_sections": ["Tooling and Containers", "Prompts and Policy"],
+                "required_phrases": ["category-first", "build-versus-reuse", "validation", "container"],
+            },
+            min_source_count=3,
+            required_citation_count=3,
+            proxy_scope_tags=["tool", "ctl"],
+        ),
+        build_research_task(
+            "Create a deep research websearch agent that answers extremely complex user questions by deligating search subagents to read dozens of sources. The central researcher orchestrator agent then compiles all the retrieved site summaries, and answers the user question thoroughly.",
+            task_id="e2e.research.blueprint",
+            family="e2e",
+            live_web=False,
+            max_tracks=6,
+            context_items=corpus,
+            expected={
+                "required_sections": ["Architecture", "Agent Topology", "Memory", "Tooling and Containers", "Verification and Evolution", "Prompts and Policy"],
+                "required_phrases": ["orchestrator", "subagent", "sources", "memory", "tooling", "evaluation"],
+            },
+            min_source_count=4,
+            required_citation_count=4,
+            proxy_scope_tags=["top", "mem", "tool", "ctl"],
+        ),
+    ]
+    val = [
+        build_research_task(
+            "Summarize the prompt registry and mutation prompt requirements for a research-agent evolution system.",
+            task_id="val.research.prompts",
+            family="e2e",
+            live_web=False,
+            max_tracks=3,
+            context_items=corpus,
+            expected={
+                "required_sections": ["Prompts and Policy"],
+                "required_phrases": ["versioned", "schema", "mutation prompt", "immutable manifest"],
+            },
+            min_source_count=2,
+            required_citation_count=2,
+        )
+    ]
+    test = [
+        build_research_task(
+            "Explain how verification, benchmarks, and held-out evaluation should work for a deep research runtime.",
+            task_id="test.research.validation",
+            family="e2e",
+            live_web=False,
+            max_tracks=3,
+            context_items=corpus,
+            expected={
+                "required_sections": ["Verification and Evolution"],
+                "required_phrases": ["held-out", "validation", "mutator", "value-of-information"],
+            },
+            min_source_count=2,
+            required_citation_count=2,
+        )
+    ]
+    proxy = [
+        build_research_task(
+            "Verify that a research answer cites multiple sources and covers architecture plus tooling.",
+            task_id="proxy.research.citations",
+            family="e2e",
+            live_web=False,
+            max_tracks=3,
+            context_items=corpus,
+            expected={
+                "required_sections": ["Architecture", "Tooling and Containers"],
+                "required_phrases": ["sources", "tooling"],
+            },
+            min_source_count=2,
+            required_citation_count=2,
+            proxy_scope_tags=["top", "tool", "ctl"],
+        )
+    ]
+    return BenchmarkSuite(name="research", train=train, val=val, test=test, proxy=proxy)
+
+
 
 def load_suite(name_or_path: str) -> BenchmarkSuite:
     if name_or_path == "demo":
         return build_demo_suite()
+    if name_or_path == "research":
+        return build_research_suite()
     path = Path(name_or_path)
     data = json.loads(path.read_text(encoding="utf-8"))
     return BenchmarkSuite(

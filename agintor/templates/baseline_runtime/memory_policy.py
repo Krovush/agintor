@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Sequence
 
+from agintor.prompts import load_prompt_spec
 from agintor.schemas import MemoryNode, SummaryRecord
 from agintor.utils import cheap_embedding, clip, cosine_similarity, jaccard, lexical_overlap, sigmoid
 
@@ -54,12 +55,13 @@ class MemoryPolicy:
         return chosen
 
     def summarize_span(self, ctx, nodes: Sequence[dict[str, Any]]) -> SummaryRecord:
+        spec = load_prompt_spec("memory.span_summarize.v1")
         prompt = "\n".join(f"{node['type']}: {node['content']}" for node in nodes)
         response = ctx.provider.generate(
             type("Req", (), {
-                "instructions": "Summarize evidence while preserving unresolved handles and artifacts.",
+                "instructions": spec.instructions,
                 "prompt": prompt,
-                "model_class": "small",
+                "model_class": spec.model_class,
                 "seed": ctx.seed,
                 "metadata": {"mode": "summary"},
             })

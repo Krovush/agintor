@@ -36,9 +36,11 @@ def test_cli_research_accepts_prompt_file_and_api_key_file(tmp_path: Path, monke
     key_file.write_text("sk-test-1234567890abcdefghijklmnop", encoding="utf-8")
     output_dir = tmp_path / "research_output"
 
-    def fake_run(prompt: str, provider, workspace: Path, max_tracks: int) -> ResearchRun:
+    def fake_run(prompt: str, provider, workspace: Path, max_tracks: int, runtime_dir=None, containerized=None) -> ResearchRun:
         assert prompt == "Create a deep research websearch agent."
         assert max_tracks == 4
+        assert runtime_dir is None
+        assert containerized is True
         provider._usage["calls"] = 3
         provider._usage["input_tokens"] = 120
         provider._usage["output_tokens"] = 80

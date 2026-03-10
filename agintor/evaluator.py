@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from .archive import objective_specs_from_suite
 from .benchmarks import BenchmarkSuite
+from .container_runtime import DockerRuntimeExecutor
 from .exceptions import HardInvalidation, PatchApplyError
 from .mutator import MutationCandidate
 from .patches import parse_patch
@@ -31,12 +33,15 @@ class RuntimeEvaluator:
         baseline_runtime_dir: Path | None = None,
         budget_overrides: Mapping[str, Any] | None = None,
         predictors: DecisionFamilyModelBank | None = None,
+        runtime_backend: str | None = None,
     ) -> None:
         self.suite = suite
         self.workspace = ensure_directory(workspace)
         self.provider = provider
         self.budget_overrides = dict(budget_overrides or {})
         self.predictors = predictors or DecisionFamilyModelBank()
+        self.runtime_backend = (runtime_backend or os.environ.get("AGINTOR_RUNTIME_BACKEND", "local")).strip().lower()
+        self.container_executor = DockerRuntimeExecutor(self.workspace / ".runtime_container_cache") if self.runtime_backend == "docker" else None
         self.stage1_replays = 2
         self.epsilon_proxy = 0.01
         self.epsilon_part = 0.01
@@ -121,9 +126,26 @@ class RuntimeEvaluator:
             raise PatchApplyError("patch touched lines outside contracted mutable method boundaries")
 
     def _train_batches(self) -> list[list[Any]]:
-        tasks = list(self.suite.train)
+        units = self._evaluation_units(list(self.suite.train))
         batch_size = max(1, self.stage4_minibatch_size)
-        return [tasks[index : index + batch_size] for index in range(0, len(tasks), batch_size)]
+        batches: list[list[Any]] = []
+        current: list[Any] = []
+        current_size = 0
+        for unit in units:
+            unit_size = len(unit)
+            if current and current_size + unit_size > batch_size:
+                batches.append(current)
+                current = []
+                current_size = 0
+            current.extend(unit)
+            current_size += unit_size
+            if current_size >= batch_size:
+                batches.append(current)
+                current = []
+                current_size = 0
+        if current:
+            batches.append(current)
+        return batches
 
     def tighten_thresholds(self, stage_name: str) -> None:
         if stage_name == "stage1":
@@ -146,11 +168,23 @@ class RuntimeEvaluator:
         self.predictors.freeze()
         try:
             for seed in seeds:
-                shell = FixedShell(self.workspace / f"ev_{runtime.runtime_hash[:8]}_{partition[:1]}_{seed}", predictors=self.predictors)
-                runner = TaskRuntime(runtime, shell, self.provider, budget_overrides=self.budget_overrides)
-                for unit in units:
-                    for task in unit:
-                        run_results.append(runner.run_task(task, int(seed)))
+                if self.runtime_backend == "docker" and self.container_executor is not None:
+                    for unit in units:
+                        run_results.extend(
+                            self.container_executor.run_unit(
+                                runtime_dir,
+                                list(unit),
+                                int(seed),
+                                provider_name=self._provider_name(),
+                                api_key_file=self._provider_api_key_file(),
+                            )
+                        )
+                else:
+                    shell = FixedShell(self.workspace / f"ev_{runtime.runtime_hash[:8]}_{partition[:1]}_{seed}", predictors=self.predictors)
+                    runner = TaskRuntime(runtime, shell, self.provider, budget_overrides=self.budget_overrides)
+                    for unit in units:
+                        for task in unit:
+                            run_results.append(runner.run_task(task, int(seed)))
         finally:
             self.predictors.unfreeze()
         task_family_map = {task.task_id: task.family for task in tasks}
@@ -158,6 +192,12 @@ class RuntimeEvaluator:
         if use_cache:
             self.cache[cache_key] = evaluation
         return evaluation
+
+    def _provider_name(self) -> str:
+        return "openai" if self.provider.__class__.__name__ == "OpenAIProvider" else "local"
+
+    def _provider_api_key_file(self) -> str | None:
+        return str(getattr(self.provider, "api_key_file", "") or "") or None
 
     def _apply_patch_uniquely(self, parent_dir: Path, candidate: MutationCandidate) -> Path:
         runtime = load_runtime(parent_dir)

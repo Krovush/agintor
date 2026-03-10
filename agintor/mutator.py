@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .patches import build_patch, parse_patch
+from .prompts import load_prompt_spec
 from .prompt_builder import build_mutation_prompt
 from .providers import ModelProvider
 from .schemas import ModelRequest, MutationCandidate
@@ -122,11 +123,12 @@ class OpenAIPatchMutator:
 
     def mutate(self, context: MutationContext) -> MutationCandidate:
         prompt = build_mutation_prompt(context.runtime_dir, context.objective, context.touched_scope, context.predictor_summaries, context.failing_train_traces, context.exemplars)
+        spec = load_prompt_spec("evolve.mutator_patch.v1")
         response = self.provider.generate(
             ModelRequest(
-                instructions="Return only exact SEARCH/REPLACE blocks. Modify only the mutable Agintor runtime files and only the contracted methods for the touched scopes. Do not edit immutable shell files.",
+                instructions=spec.instructions,
                 prompt=prompt,
-                model_class="large",
+                model_class=spec.model_class,
                 seed=context.seed,
                 metadata={"mode": "patch"},
             )

@@ -6,6 +6,7 @@ import math
 import sys
 from typing import Any, Iterable, Sequence
 
+from agintor.prompts import load_prompt_spec
 from agintor.schemas import ToolSpec
 from agintor.tool_runtime import RegisteredTool, validate_expression_tool, validate_tool_candidate
 from agintor.utils import lexical_overlap, stable_hash
@@ -121,14 +122,15 @@ class ToolPolicy:
         candidate_expressions = [operation.expression or fallback_expression]
         if not operation.expression:
             default_expression = self._fallback_expression(operation, tool_args)
+            spec = load_prompt_spec("tool.spec_generate.v1")
             response = ctx.provider.generate(
                 type(
                     "Req",
                     (),
                     {
-                        "instructions": "Return only JSON with keys expression and description for a deterministic Python tool.",
+                        "instructions": spec.instructions,
                         "prompt": json.dumps({"description": operation.description, "args": tool_args}, sort_keys=True),
-                        "model_class": "medium",
+                        "model_class": spec.model_class,
                         "seed": ctx.seed,
                         "metadata": {"mode": "tool_spec", "payload": {"expression": default_expression, "description": operation.description, "args": tool_args}},
                     },

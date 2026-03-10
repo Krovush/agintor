@@ -9,11 +9,13 @@ from typing import Any, Mapping, Sequence
 from .exceptions import HardInvalidation
 from .memory_graph import ShortTermGraph
 from .providers import ModelProvider
+from .research_runtime import run_runtime_research_task
 from .runtime_api import AgentFrame, PolicyContext, RuntimeBudget, RuntimeState
 from .runtime_loader import LoadedRuntime
 from .pydantic_compat import model_copy, model_dump
 from .schemas import AgentTemplate, BenchmarkTask, Checkpoint, ChildSpec, MemoryNode, RunResult
 from .shell import FixedShell
+from .tool_runtime import _signature_arg_names
 from .utils import count_tokens_rough, ensure_directory, now_ts, stable_hash
 from .verifiers import run_checker, verify_task
 
@@ -144,6 +146,11 @@ class TaskRuntime:
     ) -> tuple[Any, int, float, bool]:
         faults = 0
         artifact: Any = None
+        if task.task_type == "research":
+            artifact = run_runtime_research_task(self.runtime, context, frame)
+            verifier_score = self._maybe_verify(context, artifact, frame.metadata.get("run_node_id"))
+            verified_terminal = verifier_score >= 1.0
+            return artifact, faults, verifier_score, verified_terminal
         mode = self.runtime.topology.select_mode(context, frame, task.operations)
         context.state.mode = mode
         context.record("mode_selected", mode=mode)
@@ -595,7 +602,7 @@ class TaskRuntime:
         )
         if hinted_tool_usable:
             hint_signature = self.shell.tool_registry.get(operation.tool_hint).spec.signature
-            hinted_tool_usable = all(arg_name in hint_signature for arg_name in args)
+            hinted_tool_usable = set(args) <= set(_signature_arg_names(hint_signature))
         if hinted_tool_usable:
             tool_name = operation.tool_hint
         elif ranked_tool_names:

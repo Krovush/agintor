@@ -1,0 +1,16 @@
+{
+  "prompt_id": "control.repo_check.v1",
+  "description": "Repository-level compatibility check for externally visible artifacts.",
+  "instructions": "Assess whether the artifact is structurally compatible with the expected benchmark or repository contract. Return only structured data.",
+  "model_class": "small",
+  "max_output_tokens": 300,
+  "allowed_tools": [],
+  "input_schema": {
+    "artifact": {},
+    "expected": {}
+  },
+  "output_schema": {
+    "passed": "boolean",
+    "issues": ["string"]
+  }
+}

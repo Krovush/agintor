@@ -1,0 +1,21 @@
+{
+  "prompt_id": "evolve.mutator_patch.v1",
+  "description": "Mutation prompt for exact SEARCH/REPLACE patch generation.",
+  "instructions": "Return only exact SEARCH/REPLACE blocks. Modify only the mutable Agintor runtime files and only the contracted methods for the touched scopes. Do not edit immutable shell files. Do not include prose.",
+  "model_class": "large",
+  "allowed_tools": [],
+  "input_schema": {
+    "objective": "string",
+    "touched_scope": ["scope"],
+    "mutable_files": {"path": "source"},
+    "immutable_manifest": ["path"],
+    "contracts": {"scope": ["method"]},
+    "predictor_summaries": {},
+    "recent_failing_train_traces": [],
+    "high_performing_exemplars": [],
+    "patch_rules": {}
+  },
+  "output_schema": {
+    "patch_text": "SEARCH/REPLACE blocks only"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "prompt_id": "tool.spec_generate.v1",
+  "description": "Generate a deterministic tool expression and description.",
+  "instructions": "Return only JSON with keys expression and description for a deterministic Python tool. Favor the simplest correct expression and keep the interface explicit.",
+  "model_class": "medium",
+  "max_output_tokens": 600,
+  "allowed_tools": [],
+  "input_schema": {
+    "description": "string",
+    "args": {}
+  },
+  "output_schema": {
+    "expression": "string",
+    "description": "string"
+  }
+}

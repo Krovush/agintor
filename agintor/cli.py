@@ -76,12 +76,13 @@ def solve_cmd(
     provider: str = typer.Option("local", "--provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     workspace: str = typer.Option(".agintor_runs", "--workspace"),
+    runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
     task = benchmark.by_id(task_id)
     runtime = load_runtime(runtime_dir)
     provider_impl = _build_provider(provider, api_key_file)
-    evaluator = RuntimeEvaluator(benchmark, Path(workspace), provider_impl, baseline_runtime_dir=_reference_runtime_dir(provider, runtime_dir))
+    evaluator = RuntimeEvaluator(benchmark, Path(workspace), provider_impl, baseline_runtime_dir=_reference_runtime_dir(provider, runtime_dir), runtime_backend=runtime_backend)
     usage_before = provider_impl.usage_summary()
     evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=[seed], use_cache=False, tasks_override=[task])
     typer.echo(json.dumps({
@@ -102,10 +103,11 @@ def eval_cmd(
     provider: str = typer.Option("local", "--provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     workspace: str = typer.Option(".agintor_runs", "--workspace"),
+    runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
     provider_impl = _build_provider(provider, api_key_file)
-    evaluator = RuntimeEvaluator(benchmark, Path(workspace), provider_impl, baseline_runtime_dir=_reference_runtime_dir(provider, runtime_dir))
+    evaluator = RuntimeEvaluator(benchmark, Path(workspace), provider_impl, baseline_runtime_dir=_reference_runtime_dir(provider, runtime_dir), runtime_backend=runtime_backend)
     usage_before = provider_impl.usage_summary()
     evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=_parse_seeds(seeds), use_cache=False)
     typer.echo(json.dumps({**model_dump(evaluation), "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary())}, indent=2, sort_keys=True))
@@ -120,6 +122,7 @@ def evolve_cmd(
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     mutator: str = typer.Option("heuristic", "--mutator"),
     workspace: str = typer.Option(".agintor_evo", "--workspace"),
+    runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
     provider_impl = _build_provider(provider, api_key_file)
@@ -130,6 +133,7 @@ def evolve_cmd(
         Path(runtime_dir),
         mutator_type=mutator,
         reference_runtime_dir=_reference_runtime_dir(provider, runtime_dir),
+        runtime_backend=runtime_backend,
     )
     usage_before = provider_impl.usage_summary()
     summary = engine.run(steps=steps)
@@ -144,6 +148,8 @@ def research_cmd(
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     workspace: str = typer.Option(".agintor_research", "--workspace"),
     max_tracks: int = typer.Option(6, "--max-tracks"),
+    runtime_dir: Optional[str] = typer.Option(None, "--runtime-dir"),
+    runtime_backend: str = typer.Option("docker", "--runtime-backend"),
 ) -> None:
     prompt_text = _load_prompt_input(prompt, prompt_file)
     provider_impl = _build_provider(provider, api_key_file)
@@ -153,7 +159,14 @@ def research_cmd(
         raise typer.BadParameter("research currently requires an OpenAI provider")
     usage_before = provider_impl.usage_summary()
     try:
-        result = run_research_prompt(prompt_text, provider_impl, Path(workspace), max_tracks=max_tracks)
+        result = run_research_prompt(
+            prompt_text,
+            provider_impl,
+            Path(workspace),
+            max_tracks=max_tracks,
+            runtime_dir=runtime_dir,
+            containerized=runtime_backend == "docker",
+        )
     except AgintorError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
@@ -164,7 +177,7 @@ def research_cmd(
                 "answer_path": str(Path(result.output_dir) / "answer.md"),
                 "json_path": str(Path(result.output_dir) / "research_run.json"),
                 "source_count": len(result.unique_sources),
-                "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary()),
+                "provider_usage": result.provider_usage if getattr(result, "provider_usage", None) else _usage_delta(usage_before, provider_impl.usage_summary()),
             },
             indent=2,
             sort_keys=True,

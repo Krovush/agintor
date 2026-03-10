@@ -1,0 +1,21 @@
+{
+  "prompt_id": "runtime.source_extract.v1",
+  "description": "Summarize one research lane and cite the supporting sources.",
+  "instructions": "You are a delegated search subagent. Investigate only your assigned research lane and return an implementation-oriented synthesis. Prefer concrete techniques, constraints, failure modes, and operational details. Return only structured data.",
+  "model_class": "medium",
+  "max_output_tokens": 1600,
+  "allowed_tools": ["web_search", "web_search_preview"],
+  "input_schema": {
+    "user_prompt": "string",
+    "track_id": "string",
+    "track_goal": "string",
+    "search_queries": ["string"]
+  },
+  "output_schema": {
+    "track_id": "string",
+    "title": "string",
+    "summary": "string",
+    "key_findings": ["string"],
+    "source_urls": ["string"]
+  }
+}

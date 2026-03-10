@@ -1,0 +1,16 @@
+{
+  "prompt_id": "memory.unit_classify.v1",
+  "description": "Classify whether a memory candidate is reusable and what abstraction it represents.",
+  "instructions": "Classify the memory candidate, estimate reuse value, and identify the best long-term abstraction type. Return only structured data.",
+  "model_class": "small",
+  "max_output_tokens": 400,
+  "allowed_tools": [],
+  "input_schema": {
+    "candidate": {}
+  },
+  "output_schema": {
+    "type": "string",
+    "reuse_value": "number",
+    "claim_like": "boolean"
+  }
+}

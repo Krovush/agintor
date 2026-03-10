@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import json
 import math
 import shutil
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -342,11 +345,21 @@ class _AsyncProcessRecord:
         return self.process.wait()
 
 
+@dataclass
+class _AsyncExecutorRecord:
+    thread: threading.Thread
+    done: threading.Event
+    stdout_path: Path
+    stderr_path: Path
+    result_path: Path
+    state: dict[str, Any]
+
+
 class ToolExecutor:
     def __init__(self, registry: ToolRegistry, sandbox_manager: SandboxManager) -> None:
         self.registry = registry
         self.sandbox_manager = sandbox_manager
-        self._async_processes: dict[str, _AsyncProcessRecord] = {}
+        self._async_processes: dict[str, _AsyncProcessRecord | _AsyncExecutorRecord] = {}
         self._async_launch_counter = 0
 
     def run_tool(self, tool_name: str, args: Mapping[str, Any], task_id: str) -> ToolExecutionResult:
@@ -381,29 +394,75 @@ class ToolExecutor:
         tool.distinct_tasks.add(task_id)
         sandbox_dir = self.sandbox_manager.ensure_environment(tool.spec)
         tool_file = sandbox_dir / _tool_filename(tool.spec)
-        if not tool_file.exists():
-            raise FileNotFoundError(f"tool source missing for {tool.spec.name}")
         ensure_directory(workspace)
         self._async_launch_counter += 1
         handle_id = stable_hash(tool_name, args, self._async_launch_counter)[:16]
         artifact_stem = _async_artifact_stem(tool_name, handle_id)
         stdout_path = workspace / f"{artifact_stem}.stdout"
         stderr_path = workspace / f"{artifact_stem}.stderr"
-        args_path = workspace / f"{artifact_stem}.args.json"
-        args_path.write_text(json.dumps(args), encoding="utf-8")
-        program = textwrap.dedent(
-            f"""
-            import json
-            namespace = {{}}
-            exec(open({repr(str(tool_file))}, 'r', encoding='utf-8').read(), namespace, namespace)
-            args = json.load(open({repr(str(args_path))}, 'r', encoding='utf-8'))
-            output = namespace['run'](**args)
-            print(json.dumps(output))
-            """
-        )
-        stdout_handle = open(stdout_path, "w", encoding="utf-8")
-        stderr_handle = open(stderr_path, "w", encoding="utf-8")
-        process = subprocess.Popen([sys.executable, "-c", program], cwd=str(tool_file.parent), stdout=stdout_handle, stderr=stderr_handle)
+        process_pid: int | None = None
+        if not tool_file.exists() and tool.executor is not None:
+            result_path = workspace / f"{artifact_stem}.result.json"
+            done = threading.Event()
+            state: dict[str, Any] = {"completed": False}
+
+            def _run_executor_async() -> None:
+                stdout_buffer = io.StringIO()
+                stderr_buffer = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
+                        output = tool.executor(**dict(args))
+                    stdout_text = stdout_buffer.getvalue()
+                    stderr_text = stderr_buffer.getvalue()
+                    if stdout_text:
+                        stdout_path.write_text(stdout_text, encoding="utf-8")
+                    else:
+                        stdout_path.write_text(json.dumps(output), encoding="utf-8")
+                    stderr_path.write_text(stderr_text, encoding="utf-8")
+                    result_path.write_text(json.dumps(output), encoding="utf-8")
+                    state["completed"] = True
+                except Exception as exc:
+                    stdout_path.write_text(stdout_buffer.getvalue(), encoding="utf-8")
+                    stderr_text = f"{stderr_buffer.getvalue()}\n{exc}".strip()
+                    stderr_path.write_text(stderr_text, encoding="utf-8")
+                    state["completed"] = False
+                finally:
+                    done.set()
+
+            thread = threading.Thread(target=_run_executor_async, name=f"agintor-{handle_id}", daemon=True)
+            thread.start()
+            self._async_processes[handle_id] = _AsyncExecutorRecord(
+                thread=thread,
+                done=done,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                result_path=result_path,
+                state=state,
+            )
+        else:
+            if not tool_file.exists():
+                raise FileNotFoundError(f"tool source missing for {tool.spec.name}")
+            args_path = workspace / f"{artifact_stem}.args.json"
+            args_path.write_text(json.dumps(args), encoding="utf-8")
+            program = textwrap.dedent(
+                f"""
+                import json
+                namespace = {{}}
+                exec(open({repr(str(tool_file))}, 'r', encoding='utf-8').read(), namespace, namespace)
+                args = json.load(open({repr(str(args_path))}, 'r', encoding='utf-8'))
+                output = namespace['run'](**args)
+                print(json.dumps(output))
+                """
+            )
+            stdout_handle = open(stdout_path, "w", encoding="utf-8")
+            stderr_handle = open(stderr_path, "w", encoding="utf-8")
+            process = subprocess.Popen([sys.executable, "-c", program], cwd=str(tool_file.parent), stdout=stdout_handle, stderr=stderr_handle)
+            process_pid = process.pid
+            self._async_processes[handle_id] = _AsyncProcessRecord(
+                process=process,
+                stdout_handle=stdout_handle,
+                stderr_handle=stderr_handle,
+            )
         handle = AsyncHandle(
             handle_id=handle_id,
             tool_name=tool_name,
@@ -415,12 +474,7 @@ class ToolExecutor:
             stderr_path=str(stderr_path),
             state="running",
             artifact_refs=[],
-            process_pid=process.pid,
-        )
-        self._async_processes[handle_id] = _AsyncProcessRecord(
-            process=process,
-            stdout_handle=stdout_handle,
-            stderr_handle=stderr_handle,
+            process_pid=process_pid,
         )
         return handle
 
@@ -436,26 +490,43 @@ class ToolExecutor:
                 success=False,
                 async_handle_id=handle.handle_id,
             )
-        process = record.process
-        try:
-            while process.poll() is None:
-                if time.perf_counter() - start > handle.timeout:
-                    process.kill()
-                    process.wait()
-                    return ToolExecutionResult(
-                        tool_name=handle.tool_name,
-                        output=None,
-                        stderr=f"async tool timed out after {handle.timeout}s",
-                        latency_s=time.perf_counter() - start,
-                        success=False,
-                        async_handle_id=handle.handle_id,
-                    )
-                time.sleep(poll_interval_s)
-        finally:
-            self._async_processes.pop(handle.handle_id, None)
-            record.stdout_handle.close()
-            record.stderr_handle.close()
-        return_code = process.returncode
+        return_code = 0
+        if isinstance(record, _AsyncProcessRecord):
+            process = record.process
+            try:
+                while process.poll() is None:
+                    if time.perf_counter() - start > handle.timeout:
+                        process.kill()
+                        process.wait()
+                        return ToolExecutionResult(
+                            tool_name=handle.tool_name,
+                            output=None,
+                            stderr=f"async tool timed out after {handle.timeout}s",
+                            latency_s=time.perf_counter() - start,
+                            success=False,
+                            async_handle_id=handle.handle_id,
+                        )
+                    time.sleep(poll_interval_s)
+            finally:
+                self._async_processes.pop(handle.handle_id, None)
+                record.stdout_handle.close()
+                record.stderr_handle.close()
+            return_code = process.returncode
+        else:
+            try:
+                while not record.done.is_set():
+                    if time.perf_counter() - start > handle.timeout:
+                        return ToolExecutionResult(
+                            tool_name=handle.tool_name,
+                            output=None,
+                            stderr=f"async tool timed out after {handle.timeout}s",
+                            latency_s=time.perf_counter() - start,
+                            success=False,
+                            async_handle_id=handle.handle_id,
+                        )
+                    time.sleep(poll_interval_s)
+            finally:
+                self._async_processes.pop(handle.handle_id, None)
         stdout = Path(handle.stdout_path).read_text(encoding="utf-8") if Path(handle.stdout_path).exists() else ""
         stderr = Path(handle.stderr_path).read_text(encoding="utf-8") if Path(handle.stderr_path).exists() else ""
         try:

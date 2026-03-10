@@ -1,51 +1,30 @@
 from __future__ import annotations
 
 import json
-import re
+import os
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import BaseModel, Field
-
+from .container_runtime import DockerRuntimeExecutor
 from .exceptions import AgintorError
+from .project import baseline_template_dir
 from .providers import OpenAIProvider
 from .pydantic_compat import model_dump
+from .research_models import (
+    ExpandedQueries,
+    ResearchArtifact,
+    ResearchPlan,
+    ResearchRun,
+    ResearchSourceRecord,
+    ResearchTrackPlan,
+    ResearchTrackReport,
+)
+from .research_runtime import build_research_task
+from .runner import TaskRuntime
+from .runtime_loader import load_runtime
+from .shell import FixedShell
 from .utils import ensure_directory, stable_hash
-
-
-_CITATION_PATTERN = re.compile(r"\[(S\d+)\]")
-
-
-class ResearchTrackPlan(BaseModel):
-    track_id: str
-    goal: str
-    queries: list[str] = Field(default_factory=list)
-
-
-class ResearchPlan(BaseModel):
-    objective: str
-    answer_outline: list[str] = Field(default_factory=list)
-    tracks: list[ResearchTrackPlan] = Field(default_factory=list)
-
-
-class ResearchTrackReport(BaseModel):
-    track_id: str
-    title: str
-    summary: str
-    key_findings: list[str] = Field(default_factory=list)
-    source_urls: list[str] = Field(default_factory=list)
-
-
-class ResearchRun(BaseModel):
-    prompt: str
-    plan: ResearchPlan
-    subagents: list[ResearchTrackReport]
-    unique_sources: list[str]
-    answer_markdown: str
-    provider_usage: dict[str, Any]
-    output_dir: str
 
 
 class DeepResearchAgent:
@@ -54,10 +33,15 @@ class DeepResearchAgent:
         provider: OpenAIProvider,
         workspace: str | Path,
         max_tracks: int = 6,
+        runtime_dir: str | Path | None = None,
+        containerized: bool | None = None,
     ) -> None:
         self.provider = provider
         self.workspace = ensure_directory(Path(workspace))
         self.max_tracks = max(2, min(int(max_tracks), 8))
+        self.runtime_dir = Path(runtime_dir) if runtime_dir is not None else baseline_template_dir()
+        self.containerized = (os.environ.get("AGINTOR_RESEARCH_CONTAINER", "1") != "0") if containerized is None else bool(containerized)
+        self.container_executor = DockerRuntimeExecutor(self.workspace / ".container_cache")
 
     def run(self, prompt: str) -> ResearchRun:
         clean_prompt = prompt.strip()
@@ -66,210 +50,62 @@ class DeepResearchAgent:
         run_dir = ensure_directory(
             self.workspace / f"research_{int(time.time())}_{stable_hash(clean_prompt)[:8]}"
         )
-        plan = self._plan(clean_prompt)
-        reports = [self._research_track(clean_prompt, track) for track in plan.tracks[: self.max_tracks]]
-        source_registry = self._build_source_registry(reports)
-        answer_markdown = self._synthesize(clean_prompt, plan, reports, source_registry)
-        cited_registry = self._filter_cited_sources(answer_markdown, source_registry)
-        if cited_registry:
-            source_registry = cited_registry
-        payload = ResearchRun(
-            prompt=clean_prompt,
-            plan=plan,
-            subagents=reports,
-            unique_sources=[row["url"] for row in source_registry],
-            answer_markdown=answer_markdown,
-            provider_usage=self.provider.usage_summary(),
-            output_dir=str(run_dir),
+        task = build_research_task(
+            clean_prompt,
+            task_id=f"research.live.{stable_hash(clean_prompt)[:10]}",
+            family="e2e",
+            live_web=True,
+            max_tracks=self.max_tracks,
+            min_source_count=8,
+            required_citation_count=8,
+            allow_best_effort=True,
+            metadata={"research": {"max_tracks": self.max_tracks, "mode": "live"}},
         )
-        self._write_outputs(run_dir, payload, source_registry)
+        runtime = load_runtime(self.runtime_dir)
+        if self.containerized:
+            runtime_result = self.container_executor.run_task(
+                self.runtime_dir,
+                task,
+                0,
+                provider_name="openai",
+                api_key_file=self.provider.api_key_file,
+            )
+        else:
+            shell = FixedShell(run_dir / "runtime")
+            runner = TaskRuntime(runtime, shell, self.provider)
+            runtime_result = runner.run_task(task, 0)
+        if runtime_result.hard_invalid:
+            raise AgintorError(runtime_result.invalid_reason or "runtime-backed research run invalid")
+        artifact_payload = runtime_result.artifact
+        if not isinstance(artifact_payload, dict):
+            raise AgintorError("runtime-backed research returned an invalid artifact payload")
+        artifact = ResearchArtifact.parse_obj(artifact_payload)
+        provider_usage = self.provider.usage_summary()
+        if self.containerized:
+            provider_usage = {
+                "calls": int(runtime_result.model_calls),
+                "input_tokens": int(runtime_result.input_tokens),
+                "output_tokens": int(runtime_result.output_tokens),
+                "total_tokens": int(runtime_result.tokens_used),
+                "dollar_cost": float(runtime_result.cost),
+            }
+        payload = ResearchRun(
+            prompt=artifact.prompt,
+            plan=artifact.plan,
+            subagents=artifact.subagents,
+            sources=artifact.sources,
+            unique_sources=[source.url for source in artifact.sources],
+            answer_markdown=artifact.answer_markdown,
+            provider_usage=provider_usage,
+            output_dir=str(run_dir),
+            runtime_result=model_dump(runtime_result),
+        )
+        self._write_outputs(run_dir, payload)
         return payload
 
-    def _plan(self, prompt: str) -> ResearchPlan:
-        instructions = (
-            "You are Agintor's research planner. Break the user's request into focused research lanes "
-            "that can be handled by independent search subagents. Prefer implementation-relevant lanes "
-            "covering architecture, prompt design, tool stack, memory, safety/policy, containers/runtime "
-            "isolation, evaluation, and deployment concerns."
-        )
-        response = self.provider.parse_response(
-            text_format=ResearchPlan,
-            model_class="large",
-            instructions=instructions,
-            input=json.dumps(
-                {
-                    "user_prompt": prompt,
-                    "max_tracks": self.max_tracks,
-                    "requirements": [
-                        "Each track must be materially different.",
-                        "Each track must contain 2-4 concrete web search queries.",
-                        "Answer outline should be implementation-oriented.",
-                    ],
-                },
-                indent=2,
-            ),
-            max_output_tokens=1800,
-        )
-        parsed = getattr(response, "output_parsed", None)
-        if not isinstance(parsed, ResearchPlan):
-            raise AgintorError("planner did not return a valid research plan")
-        tracks: list[ResearchTrackPlan] = []
-        for index, track in enumerate(parsed.tracks[: self.max_tracks]):
-            queries = [query.strip() for query in track.queries if query.strip()]
-            if not queries:
-                queries = [track.goal]
-            tracks.append(
-                ResearchTrackPlan(
-                    track_id=track.track_id or f"track_{index + 1}",
-                    goal=track.goal.strip() or f"Research track {index + 1}",
-                    queries=queries[:4],
-                )
-            )
-        if not tracks:
-            raise AgintorError("planner returned no research tracks")
-        return ResearchPlan(
-            objective=parsed.objective.strip() or prompt,
-            answer_outline=[item.strip() for item in parsed.answer_outline if item.strip()],
-            tracks=tracks,
-        )
-
-    def _research_track(self, prompt: str, track: ResearchTrackPlan) -> ResearchTrackReport:
-        instructions = (
-            "You are a delegated search subagent. Use web search to investigate only your assigned lane. "
-            "Return a concise synthesis of what matters for implementing the user's requested system. "
-            "Prefer practical architectural details, concrete techniques, and operational constraints."
-        )
-        search_input = {
-            "user_prompt": prompt,
-            "track_id": track.track_id,
-            "track_goal": track.goal,
-            "search_queries": track.queries,
-            "required_shape": {
-                "title": "short descriptive title",
-                "summary": "one concise paragraph",
-                "key_findings": ["4-8 implementation-relevant findings"],
-                "source_urls": ["URLs only"],
-            },
-        }
-        response = self._parse_with_web_search(
-            text_format=ResearchTrackReport,
-            model_class="medium",
-            instructions=instructions,
-            input=json.dumps(search_input, indent=2),
-            max_output_tokens=1600,
-        )
-        parsed = getattr(response, "output_parsed", None)
-        if not isinstance(parsed, ResearchTrackReport):
-            raise AgintorError(f"research subagent {track.track_id} did not return a valid report")
-        extracted_urls = self._extract_source_urls(response)
-        merged_urls = self._dedupe_urls([*parsed.source_urls, *extracted_urls])
-        return ResearchTrackReport(
-            track_id=track.track_id,
-            title=parsed.title.strip() or track.goal,
-            summary=parsed.summary.strip(),
-            key_findings=[item.strip() for item in parsed.key_findings if item.strip()],
-            source_urls=merged_urls,
-        )
-
-    def _parse_with_web_search(
-        self,
-        *,
-        text_format: type[BaseModel],
-        model_class: str,
-        instructions: str,
-        input: str,
-        max_output_tokens: int,
-    ) -> Any:
-        errors: list[str] = []
-        for tool_type in ("web_search", "web_search_preview"):
-            try:
-                return self.provider.parse_response(
-                    text_format=text_format,
-                    model_class=model_class,
-                    instructions=instructions,
-                    input=input,
-                    tools=[self._web_search_tool(tool_type)],
-                    tool_choice={"type": tool_type},
-                    include=["web_search_call.action.sources"],
-                    max_tool_calls=8,
-                    parallel_tool_calls=True,
-                    max_output_tokens=max_output_tokens,
-                )
-            except Exception as exc:
-                errors.append(f"{tool_type}: {exc}")
-        raise AgintorError("web research request failed: " + " | ".join(errors))
-
-    def _synthesize(
-        self,
-        prompt: str,
-        plan: ResearchPlan,
-        reports: list[ResearchTrackReport],
-        source_registry: list[dict[str, str]],
-    ) -> str:
-        source_lookup = {row["url"]: row["id"] for row in source_registry}
-        synthesis_input = {
-            "user_prompt": prompt,
-            "answer_outline": plan.answer_outline,
-            "subagent_reports": [
-                {
-                    "track_id": report.track_id,
-                    "title": report.title,
-                    "summary": report.summary,
-                    "key_findings": report.key_findings,
-                    "source_ids": [source_lookup[url] for url in report.source_urls if url in source_lookup],
-                }
-                for report in reports
-            ],
-            "source_registry": source_registry,
-        }
-        instructions = (
-            "You are the central research orchestrator. Combine the subagent findings into a thorough, "
-            "implementation-oriented answer to the user's prompt. Write in Markdown. Cite concrete claims "
-            "inline with the provided source ids like [S1]. Do not cite ids that are not in the source registry. "
-            "If the user asks to create a system, provide an actionable design and missing implementation pieces."
-        )
-        response = self.provider.create_response(
-            model_class="large",
-            instructions=instructions,
-            input=json.dumps(synthesis_input, indent=2),
-            max_output_tokens=3200,
-        )
-        answer = str(getattr(response, "output_text", "") or "").strip()
-        if not answer:
-            raise AgintorError("final synthesis returned no answer text")
-        return answer
-
-    def _build_source_registry(self, reports: list[ResearchTrackReport]) -> list[dict[str, str]]:
-        urls = self._dedupe_urls(url for report in reports for url in report.source_urls)
-        return [{"id": f"S{index + 1}", "url": url} for index, url in enumerate(urls)]
-
-    def _filter_cited_sources(self, answer_markdown: str, source_registry: list[dict[str, str]]) -> list[dict[str, str]]:
-        cited_ids = {match.group(1) for match in _CITATION_PATTERN.finditer(answer_markdown)}
-        if not cited_ids:
-            return source_registry[:40]
-        return [row for row in source_registry if row["id"] in cited_ids]
-
-    def _extract_source_urls(self, response: Any) -> list[str]:
-        urls: list[str] = []
-        for item in getattr(response, "output", []) or []:
-            if getattr(item, "type", None) != "web_search_call":
-                continue
-            action = getattr(item, "action", None)
-            sources = getattr(action, "sources", None) or []
-            for source in sources:
-                url = getattr(source, "url", None)
-                if isinstance(url, str) and url.strip():
-                    urls.append(url.strip())
-        return self._dedupe_urls(urls)
-
-    def _write_outputs(
-        self,
-        run_dir: Path,
-        payload: ResearchRun,
-        source_registry: list[dict[str, str]],
-    ) -> None:
+    def _write_outputs(self, run_dir: Path, payload: ResearchRun) -> None:
         answer_path = run_dir / "answer.md"
-        sources_block = "\n".join(f"- {row['id']}: {row['url']}" for row in source_registry)
+        sources_block = "\n".join(f"- {row.source_id}: {row.url}" for row in payload.sources)
         answer_path.write_text(
             payload.answer_markdown.rstrip()
             + ("\n\n## Sources\n" + sources_block if sources_block else ""),
@@ -280,55 +116,9 @@ class DeepResearchAgent:
             encoding="utf-8",
         )
         (run_dir / "source_registry.json").write_text(
-            json.dumps(source_registry, indent=2, sort_keys=True),
+            json.dumps([model_dump(source) for source in payload.sources], indent=2, sort_keys=True),
             encoding="utf-8",
         )
-
-    def _web_search_tool(self, tool_type: str) -> dict[str, Any]:
-        return {
-            "type": tool_type,
-            "search_context_size": "high",
-            "user_location": {
-                "type": "approximate",
-                "country": "US",
-                "timezone": "America/New_York",
-            },
-        }
-
-    def _dedupe_urls(self, urls: Any) -> list[str]:
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for raw_url in urls:
-            url = self._normalize_url(str(raw_url or "").strip())
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            ordered.append(url)
-        return ordered
-
-    def _normalize_url(self, url: str) -> str:
-        if not url:
-            return ""
-        try:
-            parts = urlsplit(url)
-        except Exception:
-            return url
-        filtered_query = [
-            (key, value)
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if not key.lower().startswith("utm_") and key.lower() not in {"fbclid", "gclid"}
-        ]
-        path = parts.path[:-1] if parts.path.endswith("/") and parts.path != "/" else parts.path
-        normalized = urlunsplit(
-            (
-                parts.scheme.lower(),
-                parts.netloc.lower(),
-                path,
-                urlencode(filtered_query, doseq=True),
-                "",
-            )
-        )
-        return normalized or url
 
 
 def run_research_prompt(
@@ -336,5 +126,26 @@ def run_research_prompt(
     provider: OpenAIProvider,
     workspace: str | Path,
     max_tracks: int = 6,
+    runtime_dir: str | Path | None = None,
+    containerized: bool | None = None,
 ) -> ResearchRun:
-    return DeepResearchAgent(provider=provider, workspace=workspace, max_tracks=max_tracks).run(prompt)
+    return DeepResearchAgent(
+        provider=provider,
+        workspace=workspace,
+        max_tracks=max_tracks,
+        runtime_dir=runtime_dir,
+        containerized=containerized,
+    ).run(prompt)
+
+
+__all__ = [
+    "DeepResearchAgent",
+    "ExpandedQueries",
+    "ResearchArtifact",
+    "ResearchPlan",
+    "ResearchRun",
+    "ResearchSourceRecord",
+    "ResearchTrackPlan",
+    "ResearchTrackReport",
+    "run_research_prompt",
+]

@@ -32,7 +32,7 @@ where = ["."]
 include = ["agintor*"]
 
 [tool.setuptools.package-data]
-agintor = ["templates/baseline_runtime/*", "examples/*.json"]
+agintor = ["templates/baseline_runtime/*", "templates/prompts/*.json", "examples/*.json"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
