@@ -39,7 +39,7 @@ def test_evolution_engine_runs_smoke(tmp_path: Path) -> None:
     assert len(engine.history) == 2
 
 
-def test_stage4_full_scores_valid_children_even_when_mean_delta_is_negative(tmp_path: Path) -> None:
+def test_stage4_full_rejects_children_when_mean_delta_is_negative(tmp_path: Path) -> None:
     suite = build_demo_suite()
     parent_dir = init_runtime(tmp_path / "parent")
     child_dir = init_runtime(tmp_path / "child")
@@ -73,7 +73,7 @@ def test_stage4_full_scores_valid_children_even_when_mean_delta_is_negative(tmp_
 
     evaluator.evaluate_runtime = fake_evaluate_runtime  # type: ignore[method-assign]
     stage4 = evaluator.stage4_full(parent_dir, child_dir)
-    assert stage4.passed is True
+    assert stage4.passed is False
     assert stage4.suite_evaluation is not None
     assert stage4.metrics["delta"] < 0.0
 
@@ -230,6 +230,76 @@ def test_evolution_updates_predictors_after_full_evaluation(tmp_path: Path) -> N
     engine.run(steps=1)
 
     assert engine.predictors.summary()["families"]
+
+
+def test_evolution_counts_archive_insertions_as_accepted_progress(tmp_path: Path) -> None:
+    suite = build_demo_suite()
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    engine = EvolutionEngine(suite, tmp_path / "evo", LocalDeterministicProvider(), runtime_dir, mutator_type="heuristic")
+    objective = ObjectiveSpec(name="sbar:tool", kind=ObjectiveKind.FAMILY, family="tool")
+    scope = ["tool"]
+    parent_eval = SuiteEvaluation(
+        runtime_hash="parent",
+        objective_scores={"sbar:tool": 0.50, "sbar:global": 0.50},
+        task_scores={},
+        family_scores={},
+        run_results=[_run_result("tool.generated_sum_squares_mod", 1.0)],
+        invalid=False,
+    )
+    parent_record = ArchiveRecord(
+        objective=objective.name,
+        key="parent-cell",
+        entry=ArchiveEntry(
+            code_hash="parent-code",
+            runtime_hash="parent",
+            scores=parent_eval.objective_scores,
+            behavior_bin=["single", "low", "low", "low"],
+            scope_tag="seed",
+            complexity_bucket=0,
+            mutable_loc=10,
+            trace_refs=[],
+        ),
+        runtime_dir=str(runtime_dir),
+    )
+    child_eval = SuiteEvaluation(
+        runtime_hash="child",
+        objective_scores={"sbar:tool": 0.50, "sbar:global": 0.60},
+        task_scores={},
+        family_scores={},
+        run_results=[_run_result("tool.generated_sum_squares_mod", 1.0)],
+        invalid=False,
+    )
+    counterfactual_updates: list[tuple[tuple[str, ...], dict[str, float], dict[tuple[str, str], float]]] = []
+    engine.seed_archive = lambda: None  # type: ignore[method-assign]
+    engine._select_objective = lambda seed: objective  # type: ignore[method-assign]
+    engine.scheduler.sample_scope = lambda objective_name, seed: list(scope)  # type: ignore[method-assign]
+    engine.archive.select_parent = lambda objective_name, seed: parent_record  # type: ignore[method-assign]
+    engine.archive.runtime_evaluations[parent_record.entry.runtime_hash] = parent_eval
+    engine.mutator.mutate = lambda context: MutationCandidate(  # type: ignore[method-assign]
+        runtime_dir=str(runtime_dir),
+        patch_text="",
+        touched_scope=list(scope),
+        prompt="",
+        objective=objective.name,
+    )
+    engine.evaluator.staged_evaluate = lambda parent_dir, candidate, objective_spec: (  # type: ignore[method-assign]
+        [
+            EvaluationStageResult(stage=0, passed=True, reason="ok"),
+            EvaluationStageResult(stage=1, passed=True, reason="ok"),
+            EvaluationStageResult(stage=2, passed=True, reason="ok"),
+            EvaluationStageResult(stage=3, passed=True, reason="ok"),
+            EvaluationStageResult(stage=4, passed=True, reason="full", suite_evaluation=child_eval),
+        ],
+        runtime_dir,
+    )
+    engine.archive.insert = lambda *args, **kwargs: ["new-cell"]  # type: ignore[method-assign]
+    engine.scheduler.update_counterfactuals = lambda stage_scope, singleton, pairwise: counterfactual_updates.append((tuple(stage_scope), dict(singleton), dict(pairwise)))  # type: ignore[method-assign]
+    engine._counterfactual_contributions = lambda *args, **kwargs: ({"tool": 0.1}, {})  # type: ignore[method-assign]
+
+    engine.run(steps=1)
+
+    assert engine.history[0].accepted is True
+    assert counterfactual_updates == [(tuple(scope), {"tool": 0.1}, {})]
 
 
 def test_evolution_counts_stage0_failures_as_hard_failures(tmp_path: Path) -> None:

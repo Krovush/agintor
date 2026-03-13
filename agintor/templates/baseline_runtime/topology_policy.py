@@ -29,6 +29,7 @@ class TopologyPolicy:
         return 0.35 * lexical_overlap(description, task_repr) + 0.15 * tool_overlap + 0.20 * cap_overlap + 0.15 * historical_success + 0.15 * reusefit - ctx_overhead - staleness - permission_gap
 
     def select_mode(self, ctx, frame, operations: Sequence[Any]) -> str:
+        config = ctx.profile.topology
         op_count = len(operations)
         dependency_count = sum(len(op.dependencies) for op in operations)
         generated_count = sum(1 for op in operations if op.kind == "generated_expression")
@@ -47,8 +48,8 @@ class TopologyPolicy:
                 latency = 0.16 + 0.04 * op_count
                 coordination = 0.03 * op_count + 0.03 * context_saturation
             else:
-                solve = 0.45 + 0.10 * min(self.K_MAX, op_count)
-                cost = 0.25 + 0.08 * min(self.K_MAX, op_count)
+                solve = 0.45 + 0.10 * min(config.k_max, op_count)
+                cost = 0.25 + 0.08 * min(config.k_max, op_count)
                 latency = 0.20 + 0.03 * op_count
                 coordination = 0.06 * op_count + 0.06 * generated_count
             candidate_utilities[mode] = solve - 0.25 * cost - 0.18 * latency - 0.18 * coordination
@@ -57,9 +58,16 @@ class TopologyPolicy:
         return max(candidate_utilities, key=candidate_utilities.get)
 
     def propose_children(self, ctx, frame, operations: Sequence[Any]) -> list[ChildSpec]:
+        config = ctx.profile.topology
         children = []
         for index, op in enumerate(operations):
-            delta = 0.52 + 0.10 * (op.kind in {"generated_expression", "memory_lookup"}) - self.SPAWN_PENALTY - self.COORD_PENALTY * min(2, index) - self.DEP_PENALTY * len(op.dependencies)
+            delta = (
+                0.52
+                + 0.10 * (op.kind in {"generated_expression", "memory_lookup"})
+                - config.spawn_penalty
+                - config.coord_penalty * min(2, index)
+                - config.dep_penalty * len(op.dependencies)
+            )
             if delta <= 0:
                 continue
             child_id = f"child_{index}_{op.op_id}"
@@ -86,6 +94,7 @@ class TopologyPolicy:
         return children
 
     def select_workers(self, ctx, frame, operations: Sequence[Any]) -> list[dict[str, Any]]:
+        config = ctx.profile.topology
         op_ids = [op.op_id for op in operations]
         candidates = [
             {"worker_id": "w0", "instruction": "Sequential canonical plan", "op_ids": op_ids, "predicted_solve": 0.62, "tool_scope": ctx.state.visible_tool_names, "agent_id": "root"},
@@ -94,7 +103,7 @@ class TopologyPolicy:
         ]
         selected = []
         selected_ids = set()
-        while len(selected) < min(self.K_MAX, len(candidates)):
+        while len(selected) < min(config.k_max, len(candidates)):
             best = None
             best_score = -1e9
             for worker in candidates:
@@ -116,6 +125,7 @@ class TopologyPolicy:
         return selected or [candidates[0]]
 
     def assign_scope(self, ctx, child_spec: ChildSpec, candidate_tool_names: Sequence[str]) -> list[str]:
+        config = ctx.profile.topology
         if not candidate_tool_names:
             return child_spec.tool_scope
         scored = []
@@ -123,7 +133,7 @@ class TopologyPolicy:
             coverage = 1.0 if name in child_spec.tool_scope or any(token in name for token in child_spec.required_capabilities) else lexical_overlap(name, child_spec.instruction)
             conflict = 1.0 if name in scored else 0.0
             coldstart = 0.2 if name.startswith("generated/") else 0.05
-            score = coverage - self.SIZE_PENALTY - self.CONFLICT_PENALTY * conflict - self.COLDSTART_PENALTY * coldstart
+            score = coverage - config.size_penalty - config.conflict_penalty * conflict - config.coldstart_penalty * coldstart
             scored.append((score, name))
         ordered = [name for _, name in sorted(scored, key=lambda item: (-item[0], item[1]))]
         return ordered[:12]

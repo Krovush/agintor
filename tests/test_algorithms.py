@@ -17,6 +17,7 @@ from agintor.prompt_builder import build_mutation_prompt
 from agintor.project import init_runtime
 from agintor.providers import LocalDeterministicProvider
 from agintor.runtime_api import AgentFrame, PolicyContext, RuntimeBudget, RuntimeState
+from agintor.runtime_profile import load_runtime_profile
 from agintor.runtime_loader import load_runtime
 from agintor.runner import TaskRuntime
 from agintor.scoring import ScoreCalculator, estimate_reference_scales, mean_improvement
@@ -71,11 +72,13 @@ def _suite_evaluation(runtime_hash: str, objective_scores: dict[str, float], run
 def _make_context(runtime_dir: Path, tmp_path: Path, task: BenchmarkTask, *, provider: LocalDeterministicProvider | None = None) -> tuple[Any, FixedShell, PolicyContext]:
     runtime = load_runtime(runtime_dir)
     shell = FixedShell(tmp_path / task.task_id.replace("/", "_"))
+    profile = load_runtime_profile(runtime.runtime_dir)
     context = PolicyContext(
         runtime_dir=runtime.runtime_dir,
         shell=shell,
         task=task,
         provider=provider or LocalDeterministicProvider(),
+        profile=profile,
         seed=0,
         state=RuntimeState(visible_tool_names=sorted(shell.tool_registry.tools)),
         budget=RuntimeBudget(),
@@ -286,12 +289,10 @@ def test_stage0_rejects_changes_outside_mutable_method_contracts(runtime_dir: Pa
 def test_stage0_rejects_replacements_that_escape_allowed_method(runtime_dir: Path, tmp_path: Path) -> None:
     evaluator = RuntimeEvaluator(build_demo_suite(), tmp_path / "eval_escape", LocalDeterministicProvider(), baseline_runtime_dir=None)
     search = (
-        "            score = 0.30 * sim + 0.20 * sigmatch + 0.15 * tool.pass_rate + 0.10 * cachehit - 0.10 * coldstart - 0.07 * permrisk - 0.08 * depdepth\n"
         "            scored.append((score, tool.spec.name))\n"
         "        return [name for _, name in sorted(scored, key=lambda item: (-item[0], item[1]))]"
     )
     replace = (
-        "            score = 0.30 * sim + 0.20 * sigmatch + 0.15 * tool.pass_rate + 0.10 * cachehit - 0.10 * coldstart - 0.07 * permrisk - 0.08 * depdepth\n"
         "            scored.append((score, tool.spec.name))\n"
         "        return [name for _, name in sorted(scored, key=lambda item: (-item[0], item[1]))]\n"
         "\n"
@@ -399,19 +400,21 @@ def test_control_policy_assign_model_prefers_lowest_cost_qualifying_and_affordab
     suite = build_demo_suite()
     runtime, shell, context = _make_context(runtime_dir, tmp_path, suite.by_id("top.sum_product"))
     frame = AgentFrame(agent=shell.agent_pool.clone("root"), objective=context.task.prompt, operation_ids=["sum"], depth=0)
-    runtime.control.MODEL_SPECS = {
+    context.profile.control.model_specs = {
         "cheap": {"solve": 1.0, "cost": 0.05, "latency": 0.10, "dollar": 0.10, "fail": 0.10},
         "mid": {"solve": 1.0, "cost": 0.10, "latency": 0.05, "dollar": 0.05, "fail": 0.05},
         "expensive": {"solve": 1.0, "cost": 0.20, "latency": 0.01, "dollar": 0.01, "fail": 0.01},
     }
+    context.profile.control.model_order = ["cheap", "mid", "expensive"]
     chosen = runtime.control.assign_model(context, context.task.operations[0], frame)
-    assert chosen == "cheap"
+    assert chosen == "mid"
 
     context.budget.cost = 95.0
-    runtime.control.MODEL_SPECS = {
+    context.profile.control.model_specs = {
         "over_budget": {"solve": 1.0, "cost": 0.20, "latency": 0.01, "dollar": 0.01, "fail": 0.01},
         "fits_budget": {"solve": 1.0, "cost": 0.05, "latency": 0.20, "dollar": 0.05, "fail": 0.05},
     }
+    context.profile.control.model_order = ["over_budget", "fits_budget"]
     assert runtime.control.assign_model(context, context.task.operations[0], frame) == "fits_budget"
 
 
@@ -606,7 +609,7 @@ def test_tool_policy_build_expression_tool_falls_back_to_valid_candidate(runtime
 
 
 def test_tool_policy_promote_tool_requires_thresholds(runtime_dir: Path, tmp_path: Path) -> None:
-    runtime, _, _ = _make_context(runtime_dir, tmp_path, build_demo_suite().by_id("tool.generated_sum_squares_mod"))
+    runtime, _, context = _make_context(runtime_dir, tmp_path, build_demo_suite().by_id("tool.generated_sum_squares_mod"))
     stable_spec = ToolSpec(
         name="generated/local/promote",
         category_path=["generated", "local"],
@@ -627,9 +630,9 @@ def test_tool_policy_promote_tool_requires_thresholds(runtime_dir: Path, tmp_pat
     promotable = RegisteredTool(spec=stable_spec, historical_passes=4, historical_runs=5, distinct_tasks={"a", "b", "c"}, safety_validated=True)
     unstable = RegisteredTool(spec=stable_spec.copy(update={"determinism_class": "unstable"}), historical_passes=4, historical_runs=5, distinct_tasks={"a", "b", "c"}, safety_validated=True)
     low_reuse = RegisteredTool(spec=stable_spec, historical_passes=4, historical_runs=5, distinct_tasks={"a", "b"}, safety_validated=True)
-    assert runtime.tooling.promote_tool(None, promotable) is True
-    assert runtime.tooling.promote_tool(None, unstable) is False
-    assert runtime.tooling.promote_tool(None, low_reuse) is False
+    assert runtime.tooling.promote_tool(context, promotable) is True
+    assert runtime.tooling.promote_tool(context, unstable) is False
+    assert runtime.tooling.promote_tool(context, low_reuse) is False
 
 
 def test_runner_inspects_only_top_k_categories(runtime_dir: Path, tmp_path: Path) -> None:
@@ -643,18 +646,58 @@ def test_runner_inspects_only_top_k_categories(runtime_dir: Path, tmp_path: Path
         inspected.append(category_key)
         return original_tools_in_category(category_key)
 
-    runtime.tooling.K_C = 2
+    context.profile.tooling.k_c = 2
     runtime.tooling.rank_categories = lambda ctx, operation, summaries: ["data/csv", "math/basic", "generated/local", "overflow/category"]  # type: ignore[method-assign]
     runtime.tooling.rank_tools = lambda ctx, operation, candidate_tools: []  # type: ignore[method-assign]
     shell.tool_registry.tools_in_category = recording_tools_in_category  # type: ignore[method-assign]
+    frame = AgentFrame(agent=shell.agent_pool.clone("root"), objective=context.task.prompt, operation_ids=["sum"], depth=0, tool_scope=context.state.visible_tool_names)
 
-    output, tool_name, created_tool, faults = runner._execute_tool_operation(context, suite.by_id("top.sum_product").operations[0], {"numbers": [2, 3, 5]}, None)
+    output, tool_name, created_tool, faults = runner._execute_tool_operation(context, frame, suite.by_id("top.sum_product").operations[0], {"numbers": [2, 3, 5]}, None)
     assert inspected[-2:] == ["data/csv", "math/basic"]
     assert "overflow/category" not in inspected
     assert output == 10
     assert tool_name == "math/basic/sum_numbers"
     assert created_tool is False
     assert faults == 0
+
+
+def test_root_tool_scope_filters_after_category_first_discovery(runtime_dir: Path, tmp_path: Path) -> None:
+    suite = build_demo_suite()
+    task = suite.by_id("tool.csv_stats").copy(deep=True)
+    task.operations[0].tool_hint = None
+    runtime, shell, context = _make_context(runtime_dir, tmp_path, task)
+    runner = TaskRuntime(runtime, shell, LocalDeterministicProvider())
+    seen_candidate_names: list[str] = []
+
+    def capture_rank_tools(ctx, operation, candidate_tools):
+        seen_candidate_names[:] = sorted(tool.spec.name for tool in candidate_tools)
+        return ["data/csv/column_sum"]
+
+    runtime.tooling.rank_categories = lambda ctx, operation, summaries: ["data/csv"]  # type: ignore[method-assign]
+    runtime.tooling.rank_tools = capture_rank_tools  # type: ignore[method-assign]
+    frame = AgentFrame(
+        agent=shell.agent_pool.clone("root"),
+        objective=context.task.prompt,
+        operation_ids=[task.operations[0].op_id],
+        depth=0,
+        tool_scope=context.state.visible_tool_names,
+    )
+
+    output, tool_name, created_tool, faults = runner._execute_tool_operation(
+        context,
+        frame,
+        task.operations[0],
+        {"rows": [{"sales": 5, "region_id": 1}, {"sales": 8, "region_id": 3}], "column": "sales"},
+        None,
+    )
+
+    assert output == 13.0
+    assert tool_name == "data/csv/column_sum"
+    assert created_tool is False
+    assert faults == 0
+    assert seen_candidate_names
+    assert all(name.startswith("data/csv/") for name in seen_candidate_names)
+    assert "math/basic/sum_numbers" not in seen_candidate_names
 
 
 def test_tool_hint_cannot_bypass_category_first_discovery(runtime_dir: Path, tmp_path: Path) -> None:
@@ -665,9 +708,11 @@ def test_tool_hint_cannot_bypass_category_first_discovery(runtime_dir: Path, tmp
     runner = TaskRuntime(runtime, shell, LocalDeterministicProvider())
     runtime.tooling.rank_categories = lambda ctx, operation, summaries: ["data/csv", "math/basic"]  # type: ignore[method-assign]
     runtime.tooling.rank_tools = lambda ctx, operation, candidate_tools: ["data/csv/column_sum", "math/basic/sum_numbers"]  # type: ignore[method-assign]
+    frame = AgentFrame(agent=shell.agent_pool.clone("root"), objective=context.task.prompt, operation_ids=[task.operations[0].op_id], depth=0, tool_scope=context.state.visible_tool_names)
 
     output, tool_name, created_tool, faults = runner._execute_tool_operation(
         context,
+        frame,
         task.operations[0],
         {"rows": [{"sales": 5, "region_id": 1}, {"sales": 8, "region_id": 3}], "column": "sales"},
         None,
@@ -874,6 +919,7 @@ def test_memory_compaction_respects_high_watermark_and_shell_resets_long_term_by
         shell=FixedShell(tmp_path / "shell_compaction"),
         task=task,
         provider=LocalDeterministicProvider(),
+        profile=load_runtime_profile(runtime.runtime_dir),
         seed=0,
         state=RuntimeState(visible_tool_names=[]),
         budget=RuntimeBudget(),
@@ -1000,6 +1046,7 @@ def test_runner_falls_back_to_reusable_tool_when_synthesis_fails(runtime_dir: Pa
     shell.tool_registry._category_summaries["generated/local"] = fallback_spec.description
     runtime.tooling.rank_categories = lambda ctx, operation, summaries: ["generated/local"]  # type: ignore[method-assign]
     runtime.tooling.rank_tools = lambda ctx, operation, candidate_tools: [fallback_spec.name]  # type: ignore[method-assign]
+    frame = AgentFrame(agent=shell.agent_pool.clone("root"), objective=context.task.prompt, operation_ids=[task.operations[0].op_id], depth=0, tool_scope=context.state.visible_tool_names)
 
     def fail_propose_tool_spec(ctx, operation, resolved_args=None):
         raise ValidationError("synthetic failure")
@@ -1008,6 +1055,7 @@ def test_runner_falls_back_to_reusable_tool_when_synthesis_fails(runtime_dir: Pa
 
     output, tool_name, created_tool, faults = runner._execute_tool_operation(
         context,
+        frame,
         task.operations[0],
         {"numbers": [1, 2, 3, 4], "modulus": 7},
         None,

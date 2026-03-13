@@ -21,7 +21,7 @@ def test_openai_provider_live_roundtrip_with_mock_credentials() -> None:
         ModelRequest(
             instructions="Respond with the word pong.",
             prompt="ping",
-            model_class=os.environ.get("AGINTOR_OPENAI_SMALL_MODEL", "gpt-5-mini"),
+            model_class="small",
             seed=0,
             metadata={"mode": "text"},
         )

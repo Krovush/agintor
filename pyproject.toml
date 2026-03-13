@@ -18,7 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-openai = ["openai>=1.0.0"]
+hosted = ["openai>=2,<3", "anthropic>=0.84.0"]
+openai = ["openai>=2,<3"]
+minimax = ["anthropic>=0.84.0"]
 dev = ["pytest>=8", "pytest-cov>=4"]
 
 [project.scripts]

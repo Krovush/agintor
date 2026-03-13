@@ -18,7 +18,9 @@ class MemoryPolicy:
     TOKEN_WINDOW = 512.0
 
     def select_spans_for_compaction(self, ctx, span_ids: Sequence[str], active_fraction: float) -> list[list[str]]:
-        if active_fraction <= self.B_HI:
+        profile = ctx.profile.memory
+        weights = profile.compaction_weights
+        if active_fraction <= profile.b_hi:
             return []
         candidates: list[tuple[float, list[str], int]] = []
         windows: list[list[str]] = [[node_id] for node_id in span_ids]
@@ -27,7 +29,11 @@ class MemoryPolicy:
         for node_group in windows:
             nodes = [ctx.shell.short_term.nodes[node_id] for node_id in node_group]
             token_saving = sum(max(1, len(str(node["content"]))) for node in nodes)
-            retained_utility = 0.55 + 0.10 * any(node["type"] == "Event" for node in nodes) + 0.05 * any(node["type"] == "VerifierEvidence" for node in nodes)
+            retained_utility = (
+                weights["retained_utility"]
+                + weights["event_bonus"] * any(node["type"] == "Event" for node in nodes)
+                + weights["verifier_bonus"] * any(node["type"] == "VerifierEvidence" for node in nodes)
+            )
             info_loss = 0.10 + 0.06 * any(node["type"] == "Event" for node in nodes) + 0.04 * any(node["type"] == "Artifact" for node in nodes)
             comp_latency = 0.03 * len(node_group)
             orphan_penalty = 0.15 * sum(
@@ -35,14 +41,20 @@ class MemoryPolicy:
                 for node in nodes
                 if node["metadata"].get("artifact_ref") or node["type"] in {"OpenHandle", "Artifact", "VerifierEvidence"}
             )
-            score = retained_utility + 0.04 * token_saving - 0.15 * info_loss - 0.05 * comp_latency - 0.20 * orphan_penalty
+            score = (
+                retained_utility
+                + weights["token_saving"] * token_saving
+                - weights["info_loss"] * info_loss
+                - weights["latency"] * comp_latency
+                - weights["orphan"] * orphan_penalty
+            )
             density = score / max(1, token_saving)
             if density > 0:
                 candidates.append((density, list(node_group), token_saving))
         chosen = []
         claimed = set()
         remaining_fraction = active_fraction
-        token_window = max(1.0, float(getattr(ctx.budget, "context_window_tokens", self.TOKEN_WINDOW)))
+        token_window = max(1.0, float(getattr(ctx.budget, "context_window_tokens", profile.token_window)))
         for _, node_group, token_saving in sorted(candidates, key=lambda item: (-item[0], item[1][0])):
             if any(node_id in claimed for node_id in node_group):
                 continue
@@ -50,12 +62,12 @@ class MemoryPolicy:
             claimed.update(node_group)
             estimated_saved_fraction = max(0.05, 0.80 * (token_saving / token_window))
             remaining_fraction -= estimated_saved_fraction
-            if remaining_fraction <= self.B_LO or len(chosen) >= self.MAX_SUMMARIES_PER_PASS:
+            if remaining_fraction <= profile.b_lo or len(chosen) >= profile.max_summaries_per_pass:
                 break
         return chosen
 
     def summarize_span(self, ctx, nodes: Sequence[dict[str, Any]]) -> SummaryRecord:
-        spec = load_prompt_spec("memory.span_summarize.v1")
+        spec = load_prompt_spec(ctx.profile.prompts.memory_summary)
         prompt = "\n".join(f"{node['type']}: {node['content']}" for node in nodes)
         response = ctx.provider.generate(
             type("Req", (), {
@@ -107,11 +119,17 @@ class MemoryPolicy:
         )
 
     def retrieve_long_term(self, ctx, query: str, exact_symbols: Sequence[str], file_paths: Sequence[str], candidates: Sequence[MemoryNode]) -> list[MemoryNode]:
+        weights = ctx.profile.memory.retrieval_weights
         scored = []
         for node in candidates:
             exact = bool(set(exact_symbols) & set(node.symbol_set)) or bool(set(file_paths) & set(node.file_paths))
             if exact:
-                score = 1.0 + 0.25 * bool(set(file_paths) & set(node.file_paths)) + 0.20 * node.verifier_support + (0.10 if node.provenance.get("source") == "task_context" else 0.0)
+                score = (
+                    1.0
+                    + weights["exact_path_bonus"] * bool(set(file_paths) & set(node.file_paths))
+                    + weights["exact_verify_bonus"] * node.verifier_support
+                    + (weights["exact_task_context_bonus"] if node.provenance.get("source") == "task_context" else 0.0)
+                )
             else:
                 cos = cosine_similarity(node.embedding, cheap_embedding(query))
                 lex = lexical_overlap(node.label + " " + node.content, query)
@@ -121,11 +139,21 @@ class MemoryPolicy:
                 verify = node.verifier_support
                 provenance = 1.0 if node.provenance.get("source") == "task_context" else 0.5
                 staleness = max(0.0, float(node.provenance.get("staleness", 0.0)))
-                score = 0.30 * cos + 0.20 * lex + 0.15 * type_match + 0.10 * path_bonus + 0.10 * recency + 0.10 * verify + 0.05 * provenance - 0.05 * staleness
+                score = (
+                    weights["cos"] * cos
+                    + weights["lex"] * lex
+                    + weights["type"] * type_match
+                    + weights["path"] * path_bonus
+                    + weights["recency"] * recency
+                    + weights["verify"] * verify
+                    + weights["provenance"] * provenance
+                    - weights["staleness"] * staleness
+                )
             scored.append((score, node))
         return [node for _, node in sorted(scored, key=lambda item: (-item[0], item[1].node_id))]
 
     def score_memory_unit(self, ctx, unit: MemoryNode, existing_nodes: Sequence[MemoryNode]) -> float:
+        weights = ctx.profile.memory.promotion_weights
         novelty = 1.0 - max((jaccard(unit.symbol_set, node.symbol_set) for node in existing_nodes), default=0.0)
         reuse = 1.0 if unit.type in {"Symbol", "File"} else 0.5
         centrality = 0.8 if unit.type in {"Symbol", "File"} else 0.4
@@ -135,15 +163,27 @@ class MemoryPolicy:
         duplicate = max((lexical_overlap(unit.content, node.content) for node in existing_nodes), default=0.0)
         write_cost = 0.1
         contradiction = 0.0
-        logits = 1.2 * novelty + 0.9 * reuse + 0.8 * centrality + 1.0 * verifier + 0.5 * task_spread + 0.6 * compositional - 1.0 * duplicate - 0.4 * write_cost - 0.8 * contradiction
+        logits = (
+            weights["novelty"] * novelty
+            + weights["reuse"] * reuse
+            + weights["centrality"] * centrality
+            + weights["verifier"] * verifier
+            + weights["task_spread"] * task_spread
+            + weights["compositional"] * compositional
+            - weights["duplicate"] * duplicate
+            - weights["write_cost"] * write_cost
+            - weights["contradiction"] * contradiction
+        )
         return sigmoid(logits)
 
     def should_promote(self, ctx, unit: MemoryNode, score: float) -> bool:
+        profile = ctx.profile.memory
         if unit.type in {"Symbol", "File"}:
-            return score >= self.THETA_PROM and unit.verifier_support >= self.ETA_VERIFY
-        return score >= self.THETA_PROM
+            return score >= profile.theta_prom and unit.verifier_support >= profile.eta_verify
+        return score >= profile.theta_prom
 
     def dedup_candidates(self, ctx, unit: MemoryNode, existing_nodes: Sequence[MemoryNode]) -> tuple[str, str | None]:
+        profile = ctx.profile.memory
         for node in existing_nodes:
             same_type = unit.type == node.type
             primary = bool(set(unit.file_paths) & set(node.file_paths))
@@ -151,7 +191,7 @@ class MemoryPolicy:
             namespace = bool(set(unit.file_paths) & set(node.file_paths)) or bool(set(unit.symbol_set) & set(node.symbol_set))
             emb = cosine_similarity(unit.embedding, node.embedding)
             lex = lexical_overlap(unit.content, node.content)
-            if same_type and (primary or (exactsym and namespace) or (emb > self.THETA_E and lex > self.THETA_L)):
+            if same_type and (primary or (exactsym and namespace) or (emb > profile.theta_e and lex > profile.theta_l)):
                 return ("merge", node.node_id)
         return ("new", None)
 

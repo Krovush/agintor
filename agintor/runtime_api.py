@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from .benchmarks import BenchmarkTask
 from .providers import ModelProvider
+from .runtime_profile import RuntimeProfile, default_runtime_profile
 from .schemas import AgentTemplate, Checkpoint, ModelResponse
 
 
@@ -101,6 +102,11 @@ class PolicyContext:
     budget: RuntimeBudget
     trace: list[dict[str, Any]]
     objective: str
+    profile: RuntimeProfile | None = None
+
+    def __post_init__(self) -> None:
+        if self.profile is None:
+            self.profile = default_runtime_profile()
 
     def record(self, event: str, **payload: Any) -> None:
         self.trace.append({"event": event, **payload})

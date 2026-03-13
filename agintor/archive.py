@@ -157,6 +157,7 @@ class QualityDiversityArchive:
         self.delta_f = delta_f
         self.cells: dict[tuple[str, str], ArchiveRecord] = {}
         self.by_objective: dict[str, list[ArchiveRecord]] = defaultdict(list)
+        self.runtime_dirs: dict[str, str] = {}
         self.runtime_evaluations: dict[str, SuiteEvaluation] = {}
         self.runtime_descriptors: dict[str, RuntimeDescriptor] = {}
 
@@ -234,6 +235,7 @@ class QualityDiversityArchive:
             mutable_ast_nodes=mutable_ast_nodes,
             interface_diff_mask=interface_diff_mask,
         )
+        self.runtime_dirs[runtime_hash] = runtime_dir
         self.runtime_evaluations[runtime_hash] = evaluation
         self.runtime_descriptors[runtime_hash] = descriptor
         for objective, score in evaluation.objective_scores.items():

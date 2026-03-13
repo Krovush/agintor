@@ -228,10 +228,6 @@ class BenchmarkTask(BaseModel):
     transfer_scored: bool = False
     episode_id: Optional[str] = None
     episode_order: int = 0
-    min_source_count: int = 0
-    required_citation_count: int = 0
-    live_web: bool = False
-    frozen_corpus_id: Optional[str] = None
     proxy_scope_tags: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

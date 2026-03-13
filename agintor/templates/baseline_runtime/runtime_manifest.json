@@ -21,7 +21,8 @@
     "agintor/mutator.py",
     "agintor/tool_runtime.py",
     "agintor/memory_graph.py",
-    "agintor/verifiers.py"
+    "agintor/verifiers.py",
+    "runtime_profile.json"
   ],
   "metadata": {
     "template": "baseline_runtime"

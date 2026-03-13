@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Optional
@@ -12,8 +13,9 @@ from .evaluator import RuntimeEvaluator
 from .evolution import EvolutionEngine
 from .project import init_runtime as init_runtime_dir, write_demo_suite
 from .pydantic_compat import model_dump
-from .providers import OpenAIProvider, build_provider
-from .research import run_research_prompt
+from .providers import build_provider
+from .runtime_builder import build_runtime_from_goal
+from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile
 from .runtime_loader import load_runtime
 
 
@@ -43,9 +45,37 @@ def _usage_delta(before: dict[str, float | int], after: dict[str, float | int]) 
     return delta
 
 
-def _build_provider(provider: str, api_key_file: Optional[str]) -> object:
-    kwargs = {"api_key_file": api_key_file} if api_key_file else {}
-    return build_provider(provider, **kwargs)
+def _supported_kwargs(callable_obj: object, **kwargs: object) -> dict[str, object]:
+    try:
+        params = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {key: value for key, value in kwargs.items() if key in params}
+
+
+def _build_provider(
+    provider: Optional[str],
+    api_key_file: Optional[str],
+    runtime_profile: Optional[RuntimeProfile],
+    *,
+    default_to_runtime_profile: bool = False,
+) -> object:
+    if provider is None:
+        if default_to_runtime_profile and runtime_profile is not None:
+            return build_provider(
+                runtime_profile.runtime_provider.name,
+                provider_profile=runtime_profile.runtime_provider,
+                api_key_file=api_key_file,
+            )
+        provider = "local"
+    provider_profile = None
+    if (
+        default_to_runtime_profile
+        and runtime_profile is not None
+        and runtime_profile.runtime_provider.name == provider
+    ):
+        provider_profile = runtime_profile.runtime_provider
+    return build_provider(provider, provider_profile=provider_profile, api_key_file=api_key_file)
 
 
 def _load_prompt_input(prompt: Optional[str], prompt_file: Optional[str]) -> str:
@@ -59,7 +89,7 @@ def _load_prompt_input(prompt: Optional[str], prompt_file: Optional[str]) -> str
 @app.command("init-runtime")
 def init_runtime_cmd(destination: str, force: bool = typer.Option(False, "--force"), write_suite: Optional[str] = typer.Option(None, "--write-demo-suite")) -> None:
     path = init_runtime_dir(destination, force=force)
-    payload = {"runtime_dir": str(path)}
+    payload = {"runtime_dir": str(path), "profile_path": str(path / RUNTIME_PROFILE_FILE)}
     if write_suite is not None:
         suite_path = write_demo_suite(write_suite)
         payload["suite_path"] = str(suite_path)
@@ -73,16 +103,26 @@ def solve_cmd(
     suite: str = typer.Option("demo", "--suite"),
     partition: str = typer.Option("train", "--partition"),
     seed: int = typer.Option(0, "--seed"),
-    provider: str = typer.Option("local", "--provider"),
+    provider: Optional[str] = typer.Option(None, "--provider", "--runtime-provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
+    profile: Optional[str] = typer.Option(None, "--profile"),
     workspace: str = typer.Option(".agintor_runs", "--workspace"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
     task = benchmark.by_id(task_id)
-    runtime = load_runtime(runtime_dir)
-    provider_impl = _build_provider(provider, api_key_file)
-    evaluator = RuntimeEvaluator(benchmark, Path(workspace), provider_impl, baseline_runtime_dir=_reference_runtime_dir(provider, runtime_dir), runtime_backend=runtime_backend)
+    runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
+    runtime = load_runtime(runtime_dir, runtime_profile=runtime_profile)
+    provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
+    effective_provider = provider or runtime_profile.runtime_provider.name
+    evaluator = RuntimeEvaluator(
+        benchmark,
+        Path(workspace),
+        provider_impl,
+        baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
+        runtime_backend=runtime_backend,
+        **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
+    )
     usage_before = provider_impl.usage_summary()
     evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=[seed], use_cache=False, tasks_override=[task])
     typer.echo(json.dumps({
@@ -100,14 +140,24 @@ def eval_cmd(
     suite: str = typer.Option("demo", "--suite"),
     partition: str = typer.Option("train", "--partition"),
     seeds: str = typer.Option("0,1,2", "--seeds"),
-    provider: str = typer.Option("local", "--provider"),
+    provider: Optional[str] = typer.Option(None, "--provider", "--runtime-provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
+    profile: Optional[str] = typer.Option(None, "--profile"),
     workspace: str = typer.Option(".agintor_runs", "--workspace"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
-    provider_impl = _build_provider(provider, api_key_file)
-    evaluator = RuntimeEvaluator(benchmark, Path(workspace), provider_impl, baseline_runtime_dir=_reference_runtime_dir(provider, runtime_dir), runtime_backend=runtime_backend)
+    runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
+    provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
+    effective_provider = provider or runtime_profile.runtime_provider.name
+    evaluator = RuntimeEvaluator(
+        benchmark,
+        Path(workspace),
+        provider_impl,
+        baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
+        runtime_backend=runtime_backend,
+        **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
+    )
     usage_before = provider_impl.usage_summary()
     evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=_parse_seeds(seeds), use_cache=False)
     typer.echo(json.dumps({**model_dump(evaluation), "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary())}, indent=2, sort_keys=True))
@@ -118,14 +168,16 @@ def evolve_cmd(
     runtime_dir: str,
     suite: str = typer.Option("demo", "--suite"),
     steps: int = typer.Option(10, "--steps"),
-    provider: str = typer.Option("local", "--provider"),
+    provider: str = typer.Option("local", "--provider", "--agintor-provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
+    profile: Optional[str] = typer.Option(None, "--profile"),
     mutator: str = typer.Option("heuristic", "--mutator"),
     workspace: str = typer.Option(".agintor_evo", "--workspace"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
-    provider_impl = _build_provider(provider, api_key_file)
+    runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
+    provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=False)
     engine = EvolutionEngine(
         benchmark,
         Path(workspace),
@@ -134,55 +186,45 @@ def evolve_cmd(
         mutator_type=mutator,
         reference_runtime_dir=_reference_runtime_dir(provider, runtime_dir),
         runtime_backend=runtime_backend,
+        **_supported_kwargs(EvolutionEngine, runtime_profile=runtime_profile, profile_path=profile),
     )
     usage_before = provider_impl.usage_summary()
     summary = engine.run(steps=steps)
     typer.echo(json.dumps({**summary.__dict__, "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary())}, indent=2, sort_keys=True))
 
 
-@app.command("research")
-def research_cmd(
+@app.command("build-runtime")
+def build_runtime_cmd(
     prompt: Optional[str] = typer.Argument(None),
+    destination: str = typer.Option(..., "--destination"),
     prompt_file: Optional[str] = typer.Option(None, "--prompt-file"),
-    provider: str = typer.Option("openai", "--provider"),
+    steps: int = typer.Option(10, "--steps"),
+    provider: str = typer.Option("local", "--provider", "--agintor-provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
-    workspace: str = typer.Option(".agintor_research", "--workspace"),
-    max_tracks: int = typer.Option(6, "--max-tracks"),
-    runtime_dir: Optional[str] = typer.Option(None, "--runtime-dir"),
+    profile: Optional[str] = typer.Option(None, "--profile"),
+    mutator: str = typer.Option("heuristic", "--mutator"),
+    workspace: str = typer.Option(".agintor_build", "--workspace"),
     runtime_backend: str = typer.Option("docker", "--runtime-backend"),
+    force: bool = typer.Option(False, "--force"),
 ) -> None:
     prompt_text = _load_prompt_input(prompt, prompt_file)
-    provider_impl = _build_provider(provider, api_key_file)
-    if provider != "openai":
-        raise typer.BadParameter("research currently requires --provider openai")
-    if not isinstance(provider_impl, OpenAIProvider):
-        raise typer.BadParameter("research currently requires an OpenAI provider")
-    usage_before = provider_impl.usage_summary()
+    provider_impl = _build_provider(provider, api_key_file, None, default_to_runtime_profile=False)
     try:
-        result = run_research_prompt(
+        result = build_runtime_from_goal(
             prompt_text,
-            provider_impl,
-            Path(workspace),
-            max_tracks=max_tracks,
-            runtime_dir=runtime_dir,
-            containerized=runtime_backend == "docker",
+            destination=destination,
+            workspace=workspace,
+            provider=provider_impl,
+            steps=steps,
+            mutator_type=mutator,
+            profile_path=profile,
+            runtime_backend=runtime_backend,
+            force=force,
         )
-    except AgintorError as exc:
+    except (AgintorError, RuntimeError, ValueError, FileExistsError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(
-        json.dumps(
-            {
-                "output_dir": result.output_dir,
-                "answer_path": str(Path(result.output_dir) / "answer.md"),
-                "json_path": str(Path(result.output_dir) / "research_run.json"),
-                "source_count": len(result.unique_sources),
-                "provider_usage": result.provider_usage if getattr(result, "provider_usage", None) else _usage_delta(usage_before, provider_impl.usage_summary()),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    typer.echo(json.dumps(result.__dict__, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -17,7 +17,9 @@ from .predictors import DecisionFamilyModelBank
 from .prompt_builder import METHOD_CONTRACTS
 from .providers import ModelProvider
 from .runtime_loader import load_runtime
+from .runtime_profile import RuntimeProfile, resolve_runtime_profile
 from .runner import TaskRuntime
+from .pydantic_compat import model_dump
 from .scoring import ScoreCalculator, estimate_reference_scales, mean_improvement
 from .schemas import EvaluationStageResult, ObjectiveKind, ObjectiveSpec, SuiteEvaluation
 from .shell import FixedShell
@@ -34,28 +36,60 @@ class RuntimeEvaluator:
         budget_overrides: Mapping[str, Any] | None = None,
         predictors: DecisionFamilyModelBank | None = None,
         runtime_backend: str | None = None,
+        runtime_profile: RuntimeProfile | None = None,
+        profile_path: Path | None = None,
     ) -> None:
         self.suite = suite
         self.workspace = ensure_directory(workspace)
         self.provider = provider
         self.budget_overrides = dict(budget_overrides or {})
         self.predictors = predictors or DecisionFamilyModelBank()
+        self.profile_path = Path(profile_path) if profile_path is not None else None
+        self.reference_profile = runtime_profile or resolve_runtime_profile(
+            baseline_runtime_dir,
+            profile_path=self.profile_path,
+        )
         self.runtime_backend = (runtime_backend or os.environ.get("AGINTOR_RUNTIME_BACKEND", "local")).strip().lower()
         self.container_executor = DockerRuntimeExecutor(self.workspace / ".runtime_container_cache") if self.runtime_backend == "docker" else None
-        self.stage1_replays = 2
-        self.epsilon_proxy = 0.01
-        self.epsilon_part = 0.01
-        self.stage4_minibatch_size = 4
-        self.delta_rej = 0.01
-        self.cache: dict[tuple[str, str, tuple[int, ...]], SuiteEvaluation] = {}
+        self.stage1_replays = self.reference_profile.evaluation.stage1_replays
+        self.epsilon_proxy = self.reference_profile.evaluation.epsilon_proxy
+        self.epsilon_part = self.reference_profile.evaluation.epsilon_part
+        self.epsilon_full = self.reference_profile.evaluation.epsilon_full
+        self.stage4_minibatch_size = self.reference_profile.evaluation.stage4_minibatch_size
+        self.delta_rej = self.reference_profile.evaluation.delta_rej
+        self.cache: dict[tuple[str, str, tuple[int, ...], tuple[str, ...]], SuiteEvaluation] = {}
         self.reference_scales = ({}, {})
         if baseline_runtime_dir is not None:
-            baseline_eval = self.evaluate_runtime(baseline_runtime_dir, partition="train", seeds=[0], use_cache=False)
+            baseline_eval = self.evaluate_runtime(
+                baseline_runtime_dir,
+                partition="train",
+                seeds=self.reference_profile.evaluation.reference_scale_seeds,
+                use_cache=False,
+            )
             self.reference_scales = estimate_reference_scales(baseline_eval.run_results)
 
     def _score_calculator(self) -> ScoreCalculator:
         costs, latencies = self.reference_scales
-        return ScoreCalculator(baseline_costs=costs, baseline_latencies=latencies)
+        return ScoreCalculator(
+            baseline_costs=costs,
+            baseline_latencies=latencies,
+            family_weights=self.reference_profile.evaluation.family_weights,
+            lambdas=self.reference_profile.evaluation.lambdas,
+            robustness=self.reference_profile.evaluation.robustness,
+        )
+
+    def _effective_runtime_profile(self, runtime_dir: str | Path) -> RuntimeProfile:
+        return resolve_runtime_profile(
+            runtime_dir,
+            fallback_profile=self.reference_profile,
+            profile_path=self.profile_path,
+        )
+
+    def _load_runtime(self, runtime_dir: str | Path, *, runtime_profile: RuntimeProfile | None = None):
+        return load_runtime(
+            runtime_dir,
+            runtime_profile=runtime_profile or self._effective_runtime_profile(runtime_dir),
+        )
 
     def _evaluation_units(self, tasks: Sequence[Any]) -> list[list[Any]]:
         units: list[list[Any]] = []
@@ -158,8 +192,12 @@ class RuntimeEvaluator:
             self.epsilon_part = max(0.0, self.epsilon_part - 0.0025)
 
     def evaluate_runtime(self, runtime_dir: str | Path, partition: str = "train", seeds: Sequence[int] = (0, 1, 2), use_cache: bool = True, tasks_override: Sequence[Any] | None = None) -> SuiteEvaluation:
-        runtime = load_runtime(runtime_dir)
-        cache_key = (runtime.runtime_hash, partition, tuple(seeds), tuple(task.task_id for task in tasks_override) if tasks_override is not None else ())
+        runtime_profile = self._effective_runtime_profile(runtime_dir)
+        runtime = self._load_runtime(runtime_dir, runtime_profile=runtime_profile)
+        task_key = ()
+        if tasks_override is not None:
+            task_key = tuple(stable_hash(model_dump(task)) for task in tasks_override)
+        cache_key = (runtime.runtime_hash, partition, tuple(seeds), task_key)
         if use_cache and cache_key in self.cache:
             return self.cache[cache_key]
         tasks = list(tasks_override) if tasks_override is not None else self.suite.all_tasks(partition)
@@ -177,11 +215,18 @@ class RuntimeEvaluator:
                                 int(seed),
                                 provider_name=self._provider_name(),
                                 api_key_file=self._provider_api_key_file(),
+                                runtime_profile=runtime_profile,
                             )
                         )
                 else:
                     shell = FixedShell(self.workspace / f"ev_{runtime.runtime_hash[:8]}_{partition[:1]}_{seed}", predictors=self.predictors)
-                    runner = TaskRuntime(runtime, shell, self.provider, budget_overrides=self.budget_overrides)
+                    runner = TaskRuntime(
+                        runtime,
+                        shell,
+                        self.provider,
+                        budget_overrides=self.budget_overrides,
+                        runtime_profile=runtime_profile,
+                    )
                     for unit in units:
                         for task in unit:
                             run_results.append(runner.run_task(task, int(seed)))
@@ -194,13 +239,13 @@ class RuntimeEvaluator:
         return evaluation
 
     def _provider_name(self) -> str:
-        return "openai" if self.provider.__class__.__name__ == "OpenAIProvider" else "local"
+        return str(getattr(self.provider, "provider_name", "local")).strip().lower() or "local"
 
     def _provider_api_key_file(self) -> str | None:
         return str(getattr(self.provider, "api_key_file", "") or "") or None
 
     def _apply_patch_uniquely(self, parent_dir: Path, candidate: MutationCandidate) -> Path:
-        runtime = load_runtime(parent_dir)
+        runtime = self._load_runtime(parent_dir)
         child_dir = ensure_directory(self.workspace / f"patched_{stable_hash(parent_dir, candidate.patch_text)[:10]}")
         if child_dir.exists():
             shutil.rmtree(child_dir)
@@ -293,8 +338,8 @@ class RuntimeEvaluator:
             if any(len(block.search.splitlines()) > 8 for block in parse_patch(candidate.patch_text)):
                 raise PatchApplyError("SEARCH block exceeded max 8 lines")
             child_dir = self._apply_patch_uniquely(parent_dir, candidate)
-            runtime = load_runtime(child_dir)
-            parent_runtime = load_runtime(parent_dir)
+            runtime = self._load_runtime(child_dir)
+            parent_runtime = self._load_runtime(parent_dir)
             allowed_methods_by_file = self._allowed_methods_by_file(parent_runtime, candidate.touched_scope)
             for rel_path in runtime.manifest.mutable_files:
                 parent_source = (parent_dir / rel_path).read_text(encoding="utf-8")
@@ -338,11 +383,12 @@ class RuntimeEvaluator:
 
     def stage2_proxy(self, parent_dir: Path, child_dir: Path, scope: Sequence[str], epsilon_proxy: float | None = None) -> EvaluationStageResult:
         epsilon_proxy = self.epsilon_proxy if epsilon_proxy is None else epsilon_proxy
+        seeds = self.reference_profile.evaluation.proxy_seeds
         proxy_tasks = [task for task in self.suite.proxy if set(task.proxy_scope_tags) & set(scope)]
         if not proxy_tasks:
             proxy_tasks = self.suite.proxy[:1]
-        parent_eval = self.evaluate_runtime(parent_dir, partition="proxy", seeds=[0], tasks_override=proxy_tasks)
-        child_eval = self.evaluate_runtime(child_dir, partition="proxy", seeds=[0], tasks_override=proxy_tasks)
+        parent_eval = self.evaluate_runtime(parent_dir, partition="proxy", seeds=seeds, tasks_override=proxy_tasks)
+        child_eval = self.evaluate_runtime(child_dir, partition="proxy", seeds=seeds, tasks_override=proxy_tasks)
         parent_scores = [parent_eval.objective_scores.get(f"s:{task.task_id}", 0.0) for task in proxy_tasks]
         child_scores = [child_eval.objective_scores.get(f"s:{task.task_id}", 0.0) for task in proxy_tasks]
         avg, se, lcb = mean_improvement(child_scores, parent_scores)
@@ -361,23 +407,26 @@ class RuntimeEvaluator:
 
     def stage3_local_subset(self, parent_dir: Path, child_dir: Path, objective: ObjectiveSpec, epsilon_part: float | None = None) -> EvaluationStageResult:
         epsilon_part = self.epsilon_part if epsilon_part is None else epsilon_part
+        seeds = self.reference_profile.evaluation.subset_seeds
         subset = self._objective_subset(objective)
-        parent_eval = self.evaluate_runtime(parent_dir, partition="train", seeds=[0], tasks_override=subset)
-        child_eval = self.evaluate_runtime(child_dir, partition="train", seeds=[0], tasks_override=subset)
+        parent_eval = self.evaluate_runtime(parent_dir, partition="train", seeds=seeds, tasks_override=subset)
+        child_eval = self.evaluate_runtime(child_dir, partition="train", seeds=seeds, tasks_override=subset)
         parent_scores = [parent_eval.objective_scores.get(f"s:{task.task_id}", 0.0) for task in subset]
         child_scores = [child_eval.objective_scores.get(f"s:{task.task_id}", 0.0) for task in subset]
         avg, se, lcb = mean_improvement(child_scores, parent_scores)
         passed = lcb > -epsilon_part and not child_eval.invalid
         return EvaluationStageResult(stage=3, passed=passed, reason="local subset LCB gate", metrics={"delta": avg, "se": se, "lcb": lcb}, suite_evaluation=child_eval)
 
-    def stage4_full(self, parent_dir: Path, child_dir: Path, epsilon_full: float = 0.05) -> EvaluationStageResult:
-        parent_eval = self.evaluate_runtime(parent_dir, partition="train", seeds=[0, 1, 2])
+    def stage4_full(self, parent_dir: Path, child_dir: Path, epsilon_full: float | None = None) -> EvaluationStageResult:
+        epsilon_full = self.epsilon_full if epsilon_full is None else epsilon_full
+        seeds = self.reference_profile.evaluation.full_train_seeds
+        parent_eval = self.evaluate_runtime(parent_dir, partition="train", seeds=seeds)
         task_family_map = {task.task_id: task.family for task in self.suite.train}
         aggregated_runs = []
         parent_scores_accum: list[float] = []
         child_scores_accum: list[float] = []
         for batch in self._train_batches():
-            child_batch = self.evaluate_runtime(child_dir, partition="train", seeds=[0, 1, 2], use_cache=False, tasks_override=batch)
+            child_batch = self.evaluate_runtime(child_dir, partition="train", seeds=seeds, use_cache=False, tasks_override=batch)
             if child_batch.invalid:
                 return EvaluationStageResult(stage=4, passed=False, reason="full train evaluation invalid", metrics={"delta": 0.0, "se": 0.0, "epsilon_full": epsilon_full}, suite_evaluation=child_batch)
             aggregated_runs.extend(child_batch.run_results)
@@ -392,7 +441,7 @@ class RuntimeEvaluator:
                     metrics={"delta": avg_batch, "se": se_batch, "ucb": avg_batch + 1.96 * se_batch, "delta_rej": self.delta_rej},
                 )
         try:
-            runtime_hash = load_runtime(child_dir).runtime_hash
+            runtime_hash = self._load_runtime(child_dir).runtime_hash
         except Exception:
             runtime_hash = str(child_dir)
         child_eval = self._score_calculator().suite_score(runtime_hash, task_family_map, aggregated_runs)
@@ -400,12 +449,12 @@ class RuntimeEvaluator:
         parent_scores = [parent_eval.objective_scores.get(f"s:{task_id}", 0.0) for task_id in task_ids]
         child_scores = [child_eval.objective_scores.get(f"s:{task_id}", 0.0) for task_id in task_ids]
         avg, se, lcb = mean_improvement(child_scores, parent_scores)
-        passed = not child_eval.invalid
-        reason = "full train evaluation completed" if passed else "full train evaluation invalid"
+        passed = (lcb > -epsilon_full) and not child_eval.invalid
+        reason = "full train evaluation completed" if passed else "full train evaluation regressed or invalid"
         return EvaluationStageResult(stage=4, passed=passed, reason=reason, metrics={"delta": avg, "se": se, "lcb": lcb, "epsilon_full": epsilon_full}, suite_evaluation=child_eval)
 
     def evaluate_validation(self, runtime_dir: Path) -> SuiteEvaluation:
-        return self.evaluate_runtime(runtime_dir, partition="val", seeds=[0, 1, 2, 3, 4])
+        return self.evaluate_runtime(runtime_dir, partition="val", seeds=self.reference_profile.evaluation.validation_seeds)
 
     def staged_evaluate(self, parent_dir: Path, candidate: MutationCandidate, objective: ObjectiveSpec) -> tuple[list[EvaluationStageResult], Path | None]:
         results: list[EvaluationStageResult] = []

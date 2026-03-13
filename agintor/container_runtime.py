@@ -6,7 +6,13 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .providers import (
+    provider_api_key_file_env_name,
+    provider_environment_names,
+    provider_profile_for_name,
+)
 from .pydantic_compat import model_dump, model_validate
+from .runtime_profile import RuntimeProfile
 from .schemas import BenchmarkTask, RunResult
 from .utils import ensure_directory, file_digest, stable_hash
 
@@ -29,7 +35,7 @@ class DockerRuntimeExecutor:
         relevant = [self.repo_root / "pyproject.toml", self.repo_root / "README.md"]
         relevant.extend(sorted((self.repo_root / "agintor").rglob("*.py")))
         relevant.extend(sorted((self.repo_root / "agintor").rglob("*.json")))
-        parts = []
+        parts = [f"base_image::{self.base_image}"]
         for path in relevant:
             if path.exists():
                 parts.append(f"{path.relative_to(self.repo_root)}::{file_digest(path)}")
@@ -42,7 +48,7 @@ class DockerRuntimeExecutor:
                 "WORKDIR /opt/agintor",
                 "COPY pyproject.toml README.md /opt/agintor/",
                 "COPY agintor /opt/agintor/agintor",
-                "RUN pip install --no-cache-dir '.[openai]'",
+                "RUN pip install --no-cache-dir '.[hosted]'",
                 'ENTRYPOINT ["python", "-m", "agintor.container_entry"]',
             ]
         )
@@ -81,6 +87,7 @@ class DockerRuntimeExecutor:
         *,
         provider_name: str,
         api_key_file: str | Path | None = None,
+        runtime_profile: RuntimeProfile | None = None,
     ) -> RunResult:
         return self.run_unit(
             runtime_dir,
@@ -88,6 +95,7 @@ class DockerRuntimeExecutor:
             seed,
             provider_name=provider_name,
             api_key_file=api_key_file,
+            runtime_profile=runtime_profile,
         )[0]
 
     def run_unit(
@@ -98,43 +106,60 @@ class DockerRuntimeExecutor:
         *,
         provider_name: str,
         api_key_file: str | Path | None = None,
+        runtime_profile: RuntimeProfile | None = None,
     ) -> list[RunResult]:
         self.ensure_image()
         runtime_path = Path(runtime_dir).resolve()
-        task_ids = [task.task_id for task in tasks]
-        run_dir = ensure_directory(self.workspace / stable_hash(runtime_path, task_ids, seed)[:12])
+        task_payload = [model_dump(task) for task in tasks]
+        profile_payload = model_dump(runtime_profile) if runtime_profile is not None else None
+        run_dir = ensure_directory(
+            self.workspace
+            / stable_hash(runtime_path, task_payload, seed, provider_name, profile_payload, self.base_image)[:12]
+        )
         task_json = run_dir / "tasks.json"
+        profile_json = run_dir / "profile.json"
         output_json = run_dir / "run_result.json"
         workspace_dir = ensure_directory(run_dir / "workspace")
-        task_json.write_text(json.dumps([model_dump(task) for task in tasks], indent=2, sort_keys=True), encoding="utf-8")
+        task_json.write_text(json.dumps(task_payload, indent=2, sort_keys=True), encoding="utf-8")
+        if profile_payload is not None:
+            profile_json.write_text(json.dumps(profile_payload, indent=2, sort_keys=True), encoding="utf-8")
         mounts = [
             f"{runtime_path}:/mnt/runtime:ro",
             f"{task_json.resolve()}:/mnt/tasks.json:ro",
             f"{workspace_dir.resolve()}:/mnt/workspace",
             f"{output_json.parent.resolve()}:/mnt/output",
         ]
+        if profile_payload is not None:
+            mounts.append(f"{profile_json.resolve()}:/mnt/profile.json:ro")
         command = [
             "docker",
             "run",
             "--rm",
         ]
-        for env_name in (
-            "AGINTOR_OPENAI_SMALL_MODEL",
-            "AGINTOR_OPENAI_MEDIUM_MODEL",
-            "AGINTOR_OPENAI_LARGE_MODEL",
-            "AGINTOR_OPENAI_PRICING",
-            "OPENAI_BASE_URL",
-        ):
+        provider_profile = None
+        if runtime_profile is not None:
+            provider_profile = provider_profile_for_name(provider_name, runtime_profile.runtime_provider)
+        for env_name in provider_environment_names(provider_name, provider_profile=provider_profile):
             env_value = os.environ.get(env_name)
             if env_value:
                 command.extend(["-e", f"{env_name}={env_value}"])
         for mount in mounts:
             command.extend(["-v", mount])
         container_key_path: str | None = None
+        host_key_path: Path | None = None
         if api_key_file:
-            host_key = Path(api_key_file).resolve()
-            container_key_path = "/mnt/keys/openai_api_key.txt"
-            command.extend(["-v", f"{host_key}:{container_key_path}:ro"])
+            host_key_path = Path(api_key_file).resolve()
+        else:
+            api_key_file_env = provider_api_key_file_env_name(
+                provider_name,
+                provider_profile=provider_profile,
+            )
+            env_key_path = os.environ.get(api_key_file_env) if api_key_file_env else None
+            if env_key_path:
+                host_key_path = Path(env_key_path).resolve()
+        if host_key_path is not None:
+            container_key_path = "/mnt/keys/provider_api_key.txt"
+            command.extend(["-v", f"{host_key_path}:{container_key_path}:ro"])
         command.extend(
             [
                 self.image_tag,
@@ -153,6 +178,8 @@ class DockerRuntimeExecutor:
                 "/mnt/workspace",
             ]
         )
+        if profile_payload is not None:
+            command.extend(["--profile-json", "/mnt/profile.json"])
         if container_key_path:
             command.extend(["--api-key-file", container_key_path])
         completed = subprocess.run(

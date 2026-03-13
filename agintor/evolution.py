@@ -11,11 +11,12 @@ from .archive import PHASE_SCOPES, QualityDiversityArchive, ScopeScheduler, obje
 from .benchmarks import BenchmarkSuite
 from .crossover import crossover_runtime
 from .evaluator import RuntimeEvaluator
-from .mutator import HeuristicPatchMutator, MutationContext, OpenAIPatchMutator
+from .mutator import HeuristicPatchMutator, MutationContext, ProviderPatchMutator
 from .predictors import DecisionFamilyModelBank
 from .providers import ModelProvider
 from .prompt_builder import METHOD_CONTRACTS
 from .runtime_loader import load_runtime
+from .runtime_profile import RuntimeProfile, load_runtime_profile, resolve_runtime_profile
 from .pydantic_compat import model_dump
 from .schemas import EvolutionHistoryRow, ObjectiveSpec
 from .trace_labeler import extract_predictor_observations
@@ -33,11 +34,25 @@ class EvolutionSummary:
 
 
 class EvolutionEngine:
-    def __init__(self, suite: BenchmarkSuite, workspace: Path, provider: ModelProvider, baseline_runtime_dir: Path, mutator_type: str = "heuristic", reference_runtime_dir: Path | None = None, budget_overrides: Dict[str, Any] | None = None, runtime_backend: str | None = None) -> None:
+    def __init__(
+        self,
+        suite: BenchmarkSuite,
+        workspace: Path,
+        provider: ModelProvider,
+        baseline_runtime_dir: Path,
+        mutator_type: str = "heuristic",
+        reference_runtime_dir: Path | None = None,
+        budget_overrides: Dict[str, Any] | None = None,
+        runtime_backend: str | None = None,
+        runtime_profile: RuntimeProfile | None = None,
+        profile_path: Path | None = None,
+    ) -> None:
         self.suite = suite
         self.workspace = ensure_directory(workspace)
         self.provider = provider
         self.baseline_runtime_dir = baseline_runtime_dir
+        self.profile_path = Path(profile_path) if profile_path is not None else None
+        self.runtime_profile = runtime_profile or load_runtime_profile(baseline_runtime_dir, profile_path=self.profile_path)
         self.predictors = DecisionFamilyModelBank()
         self.archive = QualityDiversityArchive()
         self.scheduler = ScopeScheduler()
@@ -49,14 +64,24 @@ class EvolutionEngine:
             budget_overrides=budget_overrides,
             predictors=self.predictors,
             runtime_backend=runtime_backend,
+            runtime_profile=self.runtime_profile,
+            profile_path=self.profile_path,
         )
         self.objectives = objective_specs_from_suite(suite, partition="train")
         self.history: list[EvolutionHistoryRow] = []
-        self.mutator = HeuristicPatchMutator() if mutator_type == "heuristic" else OpenAIPatchMutator(provider)
+        normalized_mutator = mutator_type.strip().lower()
+        if normalized_mutator == "heuristic":
+            self.mutator = HeuristicPatchMutator()
+        elif normalized_mutator in {"provider", "openai"}:
+            if getattr(provider, "provider_name", "local") == "local":
+                raise ValueError("provider mutator requires a hosted provider, not the local deterministic provider")
+            self.mutator = ProviderPatchMutator(provider)
+        else:
+            raise ValueError(f"unknown mutator_type {mutator_type}")
         self.best_val_score = float("-inf")
-        self._baseline_manifest = load_runtime(self.baseline_runtime_dir).manifest
-        self.phase_remaining = {"local": 1200, "pair": 600, "joint": 300}
-        self.pass_rate_caps = {"stage1": 0.35, "stage2": 0.15, "stage3": 0.05}
+        self._baseline_manifest = self._load_runtime(self.baseline_runtime_dir).manifest
+        self.phase_remaining = dict(self.runtime_profile.evolution.phase_budgets)
+        self.pass_rate_caps = dict(self.runtime_profile.evaluation.pass_rate_caps)
         self.stage_counters = {
             "stage1": {"passed": 0, "total": 0},
             "stage2": {"passed": 0, "total": 0},
@@ -64,10 +89,18 @@ class EvolutionEngine:
         }
         self.fully_evaluated_since_retrain = 0
         self.accepted_since_retrain = 0
-        self.crossover_probability = 0.15
+        self.crossover_probability = self.runtime_profile.evolution.crossover_probability
+
+    def _load_runtime(self, runtime_dir: str | Path):
+        runtime_profile = resolve_runtime_profile(
+            runtime_dir,
+            fallback_profile=self.runtime_profile,
+            profile_path=self.profile_path,
+        )
+        return load_runtime(runtime_dir, runtime_profile=runtime_profile)
 
     def _interface_diff_mask(self, runtime_dir: Path) -> str:
-        runtime = load_runtime(runtime_dir)
+        runtime = self._load_runtime(runtime_dir)
         bits: list[str] = []
         for interface in ["top", "mem", "tool", "ctl"]:
             baseline_rel = self._baseline_manifest.policy_modules[interface].split(":", 1)[0]
@@ -91,8 +124,8 @@ class EvolutionEngine:
         if variant_dir.exists():
             shutil.rmtree(variant_dir)
         shutil.copytree(child_dir, variant_dir)
-        child_runtime = load_runtime(child_dir)
-        parent_runtime = load_runtime(parent_dir)
+        child_runtime = self._load_runtime(child_dir)
+        parent_runtime = self._load_runtime(parent_dir)
         for interface in reverted_scope:
             child_rel = child_runtime.manifest.policy_modules[interface].split(":", 1)[0]
             parent_rel = parent_runtime.manifest.policy_modules[interface].split(":", 1)[0]
@@ -102,7 +135,8 @@ class EvolutionEngine:
     def _counterfactual_contributions(self, parent_dir: Path, child_dir: Path, scope: Sequence[str]) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
         order = {name: idx for idx, name in enumerate(["top", "mem", "tool", "ctl"])}
         proxy_tasks = self._proxy_tasks_for_scope(scope)
-        child_eval = self.evaluator.evaluate_runtime(child_dir, partition="proxy", seeds=[0], use_cache=False, tasks_override=proxy_tasks)
+        seeds = self.runtime_profile.evaluation.proxy_seeds
+        child_eval = self.evaluator.evaluate_runtime(child_dir, partition="proxy", seeds=seeds, use_cache=False, tasks_override=proxy_tasks)
         child_score = self._proxy_mean_score(child_eval, proxy_tasks)
         singleton: dict[str, float] = {}
         pairwise: dict[tuple[str, str], float] = {}
@@ -110,7 +144,7 @@ class EvolutionEngine:
             revert_eval = self.evaluator.evaluate_runtime(
                 self._counterfactual_variant(parent_dir, child_dir, [interface]),
                 partition="proxy",
-                seeds=[0],
+                seeds=seeds,
                 use_cache=False,
                 tasks_override=proxy_tasks,
             )
@@ -121,7 +155,7 @@ class EvolutionEngine:
                 revert_pair_eval = self.evaluator.evaluate_runtime(
                     self._counterfactual_variant(parent_dir, child_dir, [left, right]),
                     partition="proxy",
-                    seeds=[0],
+                    seeds=seeds,
                     use_cache=False,
                     tasks_override=proxy_tasks,
                 )
@@ -130,8 +164,13 @@ class EvolutionEngine:
         return singleton, pairwise
 
     def seed_archive(self) -> None:
-        baseline_runtime = load_runtime(self.baseline_runtime_dir)
-        baseline_eval = self.evaluator.evaluate_runtime(self.baseline_runtime_dir, partition="train", seeds=[0, 1, 2], use_cache=False)
+        baseline_runtime = self._load_runtime(self.baseline_runtime_dir)
+        baseline_eval = self.evaluator.evaluate_runtime(
+            self.baseline_runtime_dir,
+            partition="train",
+            seeds=self.runtime_profile.evaluation.full_train_seeds,
+            use_cache=False,
+        )
         self.archive.insert(
             str(self.baseline_runtime_dir),
             baseline_runtime.runtime_hash,
@@ -298,12 +337,18 @@ class EvolutionEngine:
             if parent_dir == Path(parent_record.runtime_dir):
                 parent_eval = self.archive.runtime_evaluations[parent_record.entry.runtime_hash]
             else:
-                parent_eval = self.evaluator.evaluate_runtime(parent_dir, partition="train", seeds=[0, 1, 2], use_cache=False)
+                parent_eval = self.evaluator.evaluate_runtime(
+                    parent_dir,
+                    partition="train",
+                    seeds=self.runtime_profile.evaluation.full_train_seeds,
+                    use_cache=False,
+                )
             context = MutationContext(
                 objective=objective.name,
                 touched_scope=scope,
                 runtime_dir=parent_dir,
                 workspace=self.workspace / "candidates",
+                runtime_profile=self.runtime_profile,
                 predictor_summaries=self._predictor_summaries(),
                 failing_train_traces=self._failing_train_traces(parent_eval),
                 exemplars=self._exemplars(objective.name),
@@ -319,7 +364,7 @@ class EvolutionEngine:
             if child_dir is not None and stage4 is not None and stage4.suite_evaluation is not None and not stage4.suite_evaluation.invalid:
                 delta = stage4.suite_evaluation.objective_scores.get(objective.name, 0.0) - parent_eval.objective_scores.get(objective.name, 0.0)
                 self.scheduler.update_scope_credit(objective.name, scope, delta / max(1, len(scope)))
-                child_runtime = load_runtime(child_dir)
+                child_runtime = self._load_runtime(child_dir)
                 child_hash = child_runtime.runtime_hash
                 inserted_keys = self.archive.insert(
                     str(child_dir),

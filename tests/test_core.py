@@ -5,15 +5,20 @@ from pathlib import Path
 
 import pytest
 
+import agintor.container_runtime as container_runtime_module
+
 from agintor.archive import QualityDiversityArchive, ScopeScheduler
 from agintor.benchmarks import BenchmarkSuite, build_demo_suite
+from agintor.container_runtime import DockerRuntimeExecutor
 from agintor.evaluator import RuntimeEvaluator
 from agintor.exceptions import HardInvalidation, PatchApplyError, SafetyViolation, ValidationError
 from agintor.memory_graph import LongTermGraph, ShortTermGraph
 from agintor.patches import apply_patch_to_text, build_patch
-from agintor.providers import LocalDeterministicProvider, OpenAIProvider
+from agintor.providers import LocalDeterministicProvider, MiniMaxProvider, OpenAIProvider, build_provider
+from agintor.project import init_runtime
 from agintor.runtime_api import AgentFrame, PolicyContext, RuntimeBudget, RuntimeState
 from agintor.runtime_loader import load_runtime
+from agintor.runtime_profile import HostedProviderProfile
 from agintor.runner import TaskRuntime
 from agintor.schemas import (
     AgentTemplate,
@@ -548,6 +553,167 @@ def test_openai_provider_preserves_empty_string_output() -> None:
     response = provider.generate(ModelRequest(instructions="", prompt="", model_class="small", seed=0, metadata={}))
     assert response.text == ""
     assert response.output_tokens == 0
+
+
+def test_openai_provider_uses_expected_default_models_and_reasoning() -> None:
+    observed: list[dict[str, object]] = []
+
+    class FakeResponse:
+        output_text = "hi"
+        usage = None
+        id = "resp_defaults"
+        status = "completed"
+
+    class FakeResponses:
+        @staticmethod
+        def create(**kwargs):
+            observed.append(dict(kwargs))
+            return FakeResponse()
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    provider = OpenAIProvider(api_key="sk-test")
+    provider._client = FakeClient()
+
+    large = provider.generate(ModelRequest(instructions="system", prompt="hello", model_class="large", seed=0, metadata={"max_output_tokens": 5}))
+    medium = provider.generate(ModelRequest(instructions="", prompt="hello", model_class="medium", seed=0, metadata={}))
+    small = provider.generate(ModelRequest(instructions="", prompt="hello", model_class="small", seed=0, metadata={}))
+
+    assert large.text == "hi"
+    assert medium.text == "hi"
+    assert small.text == "hi"
+    assert observed[0]["model"] == "gpt-5.4"
+    assert observed[0]["reasoning"] == {"effort": "medium"}
+    assert observed[0]["max_output_tokens"] == 5
+    assert observed[1]["model"] == "gpt-5.4"
+    assert observed[1]["reasoning"] == {"effort": "none"}
+    assert observed[2]["model"] == "gpt-5-nano"
+    assert observed[2]["reasoning"] == {"effort": "none"}
+
+
+def test_build_provider_forwards_reasoning_effort_from_profile() -> None:
+    provider = build_provider(
+        "openai",
+        provider_profile=HostedProviderProfile(
+            name="openai",
+            reasoning_effort_map={"large": "none", "small": "medium"},
+        ),
+        api_key="sk-test",
+    )
+
+    assert isinstance(provider, OpenAIProvider)
+    assert provider.reasoning_effort_map["large"] == "none"
+    assert provider.reasoning_effort_map["small"] == "medium"
+
+
+def test_minimax_provider_uses_separate_runtime_environment_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGINTOR_MAS_MINIMAX_API_KEY", "sk-test")
+    provider = build_provider("minimax")
+    assert isinstance(provider, MiniMaxProvider)
+    assert provider.base_url == "https://api.minimax.io/anthropic"
+    assert provider.resolve_model("small") == "MiniMax-M2.5"
+
+
+def test_minimax_provider_uses_anthropic_messages_endpoint() -> None:
+    observed: list[dict[str, object]] = []
+
+    class FakeTextBlock:
+        type = "text"
+        text = "hi"
+
+    class FakeResponse:
+        id = "msg_1"
+        content = [FakeTextBlock()]
+        stop_reason = "end_turn"
+        usage = type("Usage", (), {"input_tokens": 7, "output_tokens": 2})()
+
+    class FakeMessages:
+        @staticmethod
+        def create(**kwargs):
+            observed.append(dict(kwargs))
+            return FakeResponse()
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    provider = MiniMaxProvider(api_key="test-key")
+    provider._client = FakeClient()
+
+    response = provider.generate(ModelRequest(instructions="system", prompt="hello", model_class="medium", seed=0, metadata={"max_output_tokens": 5}))
+
+    assert response.text == "hi"
+    assert observed[0]["model"] == "MiniMax-M2.5"
+    assert observed[0]["max_tokens"] == 5
+    assert observed[0]["system"] == "system"
+    assert observed[0]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+    ]
+    assert response.input_tokens == 7
+    assert response.output_tokens == 2
+
+
+def test_docker_executor_mounts_key_file_from_provider_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    executor = DockerRuntimeExecutor(tmp_path / "docker_ws", repo_root=Path.cwd())
+    key_file = tmp_path / "minimax.key"
+    key_file.write_text("sk-test", encoding="utf-8")
+    monkeypatch.setenv("AGINTOR_MAS_MINIMAX_KEY_FILE", str(key_file))
+    monkeypatch.setattr(DockerRuntimeExecutor, "ensure_image", lambda self: None)
+    captured_commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        captured_commands.append(list(command))
+        output_mount = None
+        for index, item in enumerate(command):
+            if item == "-v":
+                mount = str(command[index + 1])
+                if mount.endswith(":/mnt/output"):
+                    output_mount = mount.split(":/mnt/output", 1)[0]
+                    break
+        assert output_mount is not None
+        output_path = Path(output_mount) / "run_result.json"
+        output_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "top.sum_product",
+                        "seed": 0,
+                        "artifact": {"sum": 10, "product": 30},
+                        "verifier_score": 1.0,
+                        "cost": 0.0,
+                        "latency": 0.0,
+                        "faults": 0,
+                        "trace_path": str(tmp_path / "trace.json"),
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        class Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Completed()
+
+    monkeypatch.setattr(container_runtime_module.subprocess, "run", fake_run)
+
+    results = executor.run_unit(
+        runtime_dir,
+        [build_demo_suite().train[0]],
+        0,
+        provider_name="minimax",
+    )
+
+    assert results[0].task_id == "top.sum_product"
+    mounts: list[str] = []
+    for command in captured_commands:
+        for index, item in enumerate(command):
+            if item == "-v":
+                mounts.append(str(command[index + 1]))
+    assert any(str(key_file.resolve()) in mount and "/mnt/keys/provider_api_key.txt:ro" in mount for mount in mounts)
 
 
 def test_open_handle_table_rejects_incomplete_handles(tmp_path: Path) -> None:

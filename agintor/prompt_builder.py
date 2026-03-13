@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from .prompts import load_prompt_spec
+from .runtime_profile import load_runtime_profile
 from .runtime_loader import load_runtime
 METHOD_CONTRACTS = {
     "top": ["score_agent", "select_mode", "propose_children", "select_workers", "assign_scope", "merge_ensemble", "make_checkpoint"],
@@ -21,9 +22,11 @@ def build_mutation_prompt(
     predictor_summaries: Mapping[str, object],
     failing_train_traces: Sequence[dict[str, object]],
     exemplars: Sequence[dict[str, object]],
+    runtime_profile: object | None = None,
 ) -> str:
     runtime = load_runtime(runtime_dir)
-    spec = load_prompt_spec("evolve.mutator_patch.v1")
+    profile = runtime_profile or load_runtime_profile(runtime_dir)
+    spec = load_prompt_spec(profile.prompts.mutation_patch)
     files_text = {}
     for rel_path in runtime.manifest.mutable_files:
         files_text[rel_path] = (runtime_dir / rel_path).read_text(encoding="utf-8")

@@ -20,3 +20,7 @@
 /.temp-*/
 __pycache__/
 *.py[cod]
+OpenAI API Key.txt
+MiniMax API Key.txt
+/.codex_doc_build/
+/.codex_review_smoke*/

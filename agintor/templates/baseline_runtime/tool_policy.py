@@ -80,6 +80,7 @@ class ToolPolicy:
         raise ValueError(f"unable to synthesize valid tool expression: {last_error}")
 
     def rank_categories(self, ctx, operation, category_summaries: dict[str, dict[str, Any]]) -> list[str]:
+        weights = ctx.profile.tooling.category_ranking_weights
         scored = []
         for category_key, summary_meta in category_summaries.items():
             summary = str(summary_meta.get("summary", ""))
@@ -90,11 +91,20 @@ class ToolPolicy:
             permrisk = float(summary_meta.get("permission_risk", 0.0))
             iface = lexical_overlap(category_key, operation.description)
             sim = lexical_overlap(summary + " " + category_key, ctx.task.prompt)
-            score = 0.35 * sim + 0.20 * iface + 0.10 * histpass + 0.10 * cachehit - 0.08 * math.log1p(descendants) - 0.10 * coldstart - 0.07 * permrisk
+            score = (
+                weights["sim"] * sim
+                + weights["iface"] * iface
+                + weights["histpass"] * histpass
+                + weights["cachehit"] * cachehit
+                - weights["descendants"] * math.log1p(descendants)
+                - weights["coldstart"] * coldstart
+                - weights["permrisk"] * permrisk
+            )
             scored.append((score, category_key))
         return [category for _, category in sorted(scored, key=lambda item: (-item[0], item[1]))]
 
     def rank_tools(self, ctx, operation, candidate_tools: Sequence[RegisteredTool]) -> list[str]:
+        weights = ctx.profile.tooling.tool_ranking_weights
         scored = []
         for tool in candidate_tools:
             sim = lexical_overlap(tool.spec.description + " " + tool.spec.name, operation.description + " " + ctx.task.prompt)
@@ -103,18 +113,41 @@ class ToolPolicy:
             coldstart = 0.05 if tool.spec.runtime == "python" else 0.20
             permrisk = 1.0 if tool.spec.permissions else 0.0
             depdepth = len(tool.spec.deps)
-            score = 0.30 * sim + 0.20 * sigmatch + 0.15 * tool.pass_rate + 0.10 * cachehit - 0.10 * coldstart - 0.07 * permrisk - 0.08 * depdepth
+            score = (
+                weights["sim"] * sim
+                + weights["sigmatch"] * sigmatch
+                + weights["pass_rate"] * tool.pass_rate
+                + weights["cachehit"] * cachehit
+                - weights["coldstart"] * coldstart
+                - weights["permrisk"] * permrisk
+                - weights["depdepth"] * depdepth
+            )
             scored.append((score, tool.spec.name))
         return [name for _, name in sorted(scored, key=lambda item: (-item[0], item[1]))]
 
     def should_create_tool(self, ctx, operation, ranked_reusable_tool_names: Sequence[str]) -> bool:
-        best_reuse_gain = 0.0 if not ranked_reusable_tool_names else 0.55
-        current_gain = 0.85 if operation.kind == "generated_expression" else 0.20
-        future_gain = 0.60 if operation.kind == "generated_expression" else 0.10
-        build_cost = 0.35 if operation.kind == "generated_expression" else 0.10
-        exec_cost = 0.15
-        safety_cost = 0.05
-        return current_gain + self.FUTURE_WEIGHT * future_gain - best_reuse_gain > self.BUILD_WEIGHT * build_cost + self.EXEC_WEIGHT * exec_cost + self.SAFETY_WEIGHT * safety_cost
+        config = ctx.profile.tooling
+        gate = config.create_gate
+        best_reuse_gain = 0.0
+        if ranked_reusable_tool_names:
+            reuse_similarity = max(
+                lexical_overlap(tool_name.replace("/", " "), operation.description + " " + ctx.task.prompt)
+                for tool_name in ranked_reusable_tool_names[:3]
+            )
+            if getattr(operation, "tool_hint", None) and operation.tool_hint in ranked_reusable_tool_names:
+                reuse_similarity = max(reuse_similarity, 1.0)
+            best_reuse_gain = gate["reuse_base"] * reuse_similarity + gate["reuse_depth_bonus"] * min(3, len(ranked_reusable_tool_names))
+        current_gain = gate["generated_current_gain"] if operation.kind == "generated_expression" else gate["default_current_gain"]
+        if getattr(operation, "expression", None):
+            current_gain += gate["explicit_expression_bonus"]
+        future_gain = gate["generated_future_gain"] if operation.kind == "generated_expression" else gate["default_future_gain"]
+        arg_count = len(getattr(operation, "args", {}) or {})
+        build_cost = gate["build_cost_base"] + gate["build_cost_per_extra_arg"] * max(0, arg_count - 2)
+        exec_cost = gate["exec_cost"]
+        safety_cost = gate["safety_cost"]
+        lhs = current_gain + config.future_weight * future_gain
+        rhs = best_reuse_gain + config.build_weight * build_cost + config.exec_weight * exec_cost + config.safety_weight * safety_cost
+        return lhs > rhs
 
     def propose_tool_spec(self, ctx, operation, resolved_args: dict[str, Any] | None = None) -> tuple[ToolSpec, str, Any]:
         tool_args = dict(resolved_args or operation.args)
@@ -122,7 +155,7 @@ class ToolPolicy:
         candidate_expressions = [operation.expression or fallback_expression]
         if not operation.expression:
             default_expression = self._fallback_expression(operation, tool_args)
-            spec = load_prompt_spec("tool.spec_generate.v1")
+            spec = load_prompt_spec(ctx.profile.prompts.tool_spec)
             response = ctx.provider.generate(
                 type(
                     "Req",
@@ -174,13 +207,14 @@ class ToolPolicy:
 
     def promote_tool(self, ctx, tool: RegisteredTool) -> bool:
         return (
-            tool.pass_rate >= self.ETA_P
-            and len(tool.distinct_tasks) >= self.ETA_R
+            tool.pass_rate >= ctx.profile.tooling.eta_p
+            and len(tool.distinct_tasks) >= ctx.profile.tooling.eta_r
             and tool.spec.determinism_class == "stable"
             and tool.safety_validated
         )
 
     def dispatch_tool(self, ctx, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-        estimated_latency = 0.05 * max(1, len(args))
-        async_flag = estimated_latency > self.T_SLICE or bool(ctx.shell.tool_registry.get(tool_name).spec.backgroundable)
+        latency_cfg = ctx.profile.tooling.dispatch_latency
+        estimated_latency = latency_cfg["base"] + latency_cfg["per_arg"] * max(1, len(args))
+        async_flag = estimated_latency > ctx.profile.tooling.t_slice or bool(ctx.shell.tool_registry.get(tool_name).spec.backgroundable)
         return {"async": async_flag}

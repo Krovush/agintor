@@ -9,3 +9,10 @@ The canonical product and behavior contract for this repository lives in [PROJEC
 - Install: `pip install -e .[dev]`
 - Run tests: `pytest`
 - CLI entrypoint: `agintor`
+
+## Provider Boundaries
+
+- Agintor's own control-plane runs (`evolve`, `build-runtime`) use the CLI-selected Agintor provider.
+- Exported MAS runtimes carry their own runtime-provider contract in `runtime_profile.json`.
+- The baseline exported runtime now defaults to MiniMax via `AGINTOR_MAS_MINIMAX_*` env vars, while Agintor's OpenAI control-plane settings stay under `OPENAI_API_KEY` and `AGINTOR_OPENAI_*`.
+- Use `--provider local` on `solve` or `eval` when you want deterministic offline checks instead of the embedded runtime-provider contract.

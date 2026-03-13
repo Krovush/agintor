@@ -9,6 +9,7 @@ from .patches import build_patch, parse_patch
 from .prompts import load_prompt_spec
 from .prompt_builder import build_mutation_prompt
 from .providers import ModelProvider
+from .runtime_profile import load_runtime_profile
 from .schemas import ModelRequest, MutationCandidate
 
 
@@ -18,6 +19,7 @@ class MutationContext:
     touched_scope: list[str]
     runtime_dir: Path
     workspace: Path
+    runtime_profile: object | None
     predictor_summaries: dict[str, object]
     failing_train_traces: list[dict[str, object]]
     exemplars: list[dict[str, object]]
@@ -92,7 +94,15 @@ class HeuristicPatchMutator:
     }
 
     def mutate(self, context: MutationContext) -> MutationCandidate:
-        prompt = build_mutation_prompt(context.runtime_dir, context.objective, context.touched_scope, context.predictor_summaries, context.failing_train_traces, context.exemplars)
+        prompt = build_mutation_prompt(
+            context.runtime_dir,
+            context.objective,
+            context.touched_scope,
+            context.predictor_summaries,
+            context.failing_train_traces,
+            context.exemplars,
+            runtime_profile=context.runtime_profile,
+        )
         rng = random.Random(context.seed)
         blocks: list[str] = []
         selected_scopes = list(context.touched_scope)
@@ -117,13 +127,22 @@ class HeuristicPatchMutator:
         return MutationCandidate(runtime_dir=str(context.runtime_dir), patch_text="\n".join(blocks), touched_scope=context.touched_scope, prompt=prompt, objective=context.objective)
 
 
-class OpenAIPatchMutator:
+class ProviderPatchMutator:
     def __init__(self, provider: ModelProvider) -> None:
         self.provider = provider
 
     def mutate(self, context: MutationContext) -> MutationCandidate:
-        prompt = build_mutation_prompt(context.runtime_dir, context.objective, context.touched_scope, context.predictor_summaries, context.failing_train_traces, context.exemplars)
-        spec = load_prompt_spec("evolve.mutator_patch.v1")
+        prompt = build_mutation_prompt(
+            context.runtime_dir,
+            context.objective,
+            context.touched_scope,
+            context.predictor_summaries,
+            context.failing_train_traces,
+            context.exemplars,
+            runtime_profile=context.runtime_profile,
+        )
+        profile = context.runtime_profile or load_runtime_profile(context.runtime_dir)
+        spec = load_prompt_spec(profile.prompts.mutation_patch)
         response = self.provider.generate(
             ModelRequest(
                 instructions=spec.instructions,
@@ -136,3 +155,6 @@ class OpenAIPatchMutator:
         patch_text = response.text.strip()
         parse_patch(patch_text)
         return MutationCandidate(runtime_dir=str(context.runtime_dir), patch_text=patch_text, touched_scope=context.touched_scope, prompt=prompt, objective=context.objective)
+
+
+OpenAIPatchMutator = ProviderPatchMutator

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import copy
+import os
 import json
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .exceptions import HardInvalidation
 from .memory_graph import ShortTermGraph
-from .providers import ModelProvider
-from .research_runtime import run_runtime_research_task
+from .providers import ModelProvider, known_provider_environment_names, provider_environment_names, provider_environment_names_for_instance
+from .runtime_profile import RuntimeProfile, load_runtime_profile
 from .runtime_api import AgentFrame, PolicyContext, RuntimeBudget, RuntimeState
 from .runtime_loader import LoadedRuntime
 from .pydantic_compat import model_copy, model_dump
@@ -27,114 +29,151 @@ class TaskRuntime:
         shell: FixedShell,
         provider: ModelProvider,
         budget_overrides: Mapping[str, Any] | None = None,
+        runtime_profile: RuntimeProfile | None = None,
     ) -> None:
         self.runtime = runtime
         self.shell = shell
         self.provider = provider
         self.budget_overrides = dict(budget_overrides or {})
+        self.runtime_profile = runtime_profile or load_runtime_profile(runtime.runtime_dir)
 
-    def run_task(self, task: BenchmarkTask, seed: int) -> RunResult:
-        task = model_copy(task, deep=True)
-        episode_scope = None
-        if task.transfer_scored:
-            episode_scope = f"{getattr(task, 'episode_id', None) or task.task_id}::seed::{seed}"
-        self.shell.reset_for_task(
-            task.task_id,
-            transfer_scored=task.transfer_scored,
-            episode_id=episode_scope,
-        )
-        budget = RuntimeBudget(**self.budget_overrides)
-        state = RuntimeState(visible_tool_names=sorted(self.shell.tool_registry.tools))
-        trace: list[dict[str, Any]] = []
-        context = PolicyContext(
-            runtime_dir=self.runtime.runtime_dir,
-            shell=self.shell,
-            task=task,
-            provider=self.provider,
-            seed=seed,
-            state=state,
-            budget=budget,
-            trace=trace,
-            objective=task.prompt,
-        )
-        root = self.shell.agent_pool.clone("root")
-        state.queue.append(
-            AgentFrame(
-                agent=root,
-                objective=task.prompt,
-                operation_ids=[op.op_id for op in task.operations],
-                depth=0,
-                role="root",
-                tool_scope=state.visible_tool_names,
-                model_class="medium",
+    def _runtime_budget_overrides(self) -> dict[str, Any]:
+        profile = self.runtime_profile.execution
+        overrides = {
+            "C_max": profile.cost_max,
+            "L_max": profile.latency_max,
+            "M_max": profile.model_calls_max,
+            "Q_max": profile.checks_max,
+            "context_window_tokens": profile.context_window_tokens,
+        }
+        overrides.update(self.budget_overrides)
+        return overrides
+
+    @contextmanager
+    def _isolated_provider_environment(self):
+        known_envs = set(known_provider_environment_names(include_api_key_file_env=True))
+        known_envs.update(
+            provider_environment_names(
+                self.runtime_profile.runtime_provider.name,
+                provider_profile=self.runtime_profile.runtime_provider,
+                include_api_key_file_env=True,
             )
         )
-        artifact: Any = None
-        faults = 0
-        verifier_score = 0.0
-        prev_best = 0.0
-        verified_terminal = False
-        start = time.perf_counter()
-        self._ingest_context(context)
+        selected_envs = set(provider_environment_names_for_instance(self.provider))
+        removed: dict[str, str] = {}
+        for env_name in sorted(known_envs - selected_envs):
+            if env_name in os.environ:
+                removed[env_name] = os.environ.pop(env_name)
         try:
-            step = 0
-            while state.queue and step < 64:
-                step += 1
-                self.shell.validate_invariants(transfer_scored=task.transfer_scored)
-                self._compact_if_needed(context)
-                frame = state.queue.pop(0)
-                self.shell.agent_pool.assert_clone(frame.agent)
-                if frame.depth == 0 or frame.role.startswith("merge"):
-                    frame.metadata["run_node_id"] = self._start_agent_run(self.shell.short_term, frame, step, frame.checkpoint)
-                context.record("agent_start", step=step, agent_id=frame.agent.agent_id, role=frame.role, depth=frame.depth, op_ids=frame.operation_ids)
-                if frame.role == "merge_vertical":
-                    artifact = {op.output_key: state.artifacts.get(op.output_key) for op in task.operations}
-                    if self._all_outputs_present(task, state.artifacts):
+            yield
+        finally:
+            for env_name, value in removed.items():
+                os.environ[env_name] = value
+
+    def run_task(self, task: BenchmarkTask, seed: int) -> RunResult:
+        with self._isolated_provider_environment():
+            task = model_copy(task, deep=True)
+            episode_scope = None
+            if task.transfer_scored:
+                episode_scope = f"{getattr(task, 'episode_id', None) or task.task_id}::seed::{seed}"
+            self.shell.reset_for_task(
+                task.task_id,
+                transfer_scored=task.transfer_scored,
+                episode_id=episode_scope,
+            )
+            budget = RuntimeBudget(**self._runtime_budget_overrides())
+            state = RuntimeState(visible_tool_names=sorted(self.shell.tool_registry.tools))
+            trace: list[dict[str, Any]] = []
+            context = PolicyContext(
+                runtime_dir=self.runtime.runtime_dir,
+                shell=self.shell,
+                task=task,
+                provider=self.provider,
+                profile=self.runtime_profile,
+                seed=seed,
+                state=state,
+                budget=budget,
+                trace=trace,
+                objective=task.prompt,
+            )
+            root = self.shell.agent_pool.clone("root")
+            state.queue.append(
+                AgentFrame(
+                    agent=root,
+                    objective=task.prompt,
+                    operation_ids=[op.op_id for op in task.operations],
+                    depth=0,
+                    role="root",
+                    tool_scope=state.visible_tool_names,
+                    model_class="medium",
+                )
+            )
+            artifact: Any = None
+            faults = 0
+            verifier_score = 0.0
+            prev_best = 0.0
+            verified_terminal = False
+            start = time.perf_counter()
+            self._ingest_context(context)
+            try:
+                step = 0
+                while state.queue and step < self.runtime_profile.execution.max_steps:
+                    step += 1
+                    self.shell.validate_invariants(transfer_scored=task.transfer_scored)
+                    self._compact_if_needed(context)
+                    frame = state.queue.pop(0)
+                    self.shell.agent_pool.assert_clone(frame.agent)
+                    if frame.depth == 0 or frame.role.startswith("merge"):
+                        frame.metadata["run_node_id"] = self._start_agent_run(self.shell.short_term, frame, step, frame.checkpoint)
+                    context.record("agent_start", step=step, agent_id=frame.agent.agent_id, role=frame.role, depth=frame.depth, op_ids=frame.operation_ids)
+                    if frame.role == "merge_vertical":
+                        artifact = {op.output_key: state.artifacts.get(op.output_key) for op in task.operations}
+                        if self._all_outputs_present(task, state.artifacts):
+                            verifier_score = self._maybe_verify(context, artifact, frame.metadata.get("run_node_id"))
+                            verified_terminal = verifier_score >= 1.0
+                        self._record_artifact_node(self.shell.short_term, "final", artifact, frame.metadata.get("run_node_id"))
+                        context.record("merge_vertical", artifact=artifact)
+                    elif frame.role == "merge_horizontal":
+                        worker_outputs = frame.metadata.get("worker_outputs", [])
+                        artifact = self.runtime.topology.merge_ensemble(context, worker_outputs)
                         verifier_score = self._maybe_verify(context, artifact, frame.metadata.get("run_node_id"))
                         verified_terminal = verifier_score >= 1.0
-                    self._record_artifact_node(self.shell.short_term, "final", artifact, frame.metadata.get("run_node_id"))
-                    context.record("merge_vertical", artifact=artifact)
-                elif frame.role == "merge_horizontal":
-                    worker_outputs = frame.metadata.get("worker_outputs", [])
-                    artifact = self.runtime.topology.merge_ensemble(context, worker_outputs)
-                    verifier_score = self._maybe_verify(context, artifact, frame.metadata.get("run_node_id"))
+                        self._record_artifact_node(self.shell.short_term, "ensemble", artifact, frame.metadata.get("run_node_id"))
+                        context.record("merge_horizontal", artifact=artifact)
+                    elif frame.depth == 0:
+                        artifact, local_faults, verifier_score, verified_terminal = self._run_root_frame(context, frame, task, verifier_score, verified_terminal)
+                        faults += local_faults
+                    else:
+                        operations = [self._operation_by_id(task, op_id) for op_id in frame.operation_ids]
+                        output, local_faults, checkpoint = self._execute_isolated_frame(context, frame, operations)
+                        faults += local_faults
+                        self._store_output_artifacts(state, operations, output)
+                        state.checkpoints[self._checkpoint_key(frame)] = checkpoint
+                        context.record("child_complete", role=frame.role, outputs=list(state.artifacts.keys()))
+                    unresolved = [
+                        op.output_key
+                        for op in task.operations
+                        if op.output_key not in state.artifacts and not (isinstance(artifact, dict) and op.output_key in artifact)
+                    ]
+                    state.unresolved_goals = unresolved
+                    best_optimistic = self._best_next_action_utility(context, unresolved, verified_terminal)
+                    self._update_subgoal_progress(context, unresolved, best_optimistic, prev_best, verified_terminal)
+                    if self.runtime.control.stop_policy(context, best_optimistic, prev_best, len(unresolved), verified_terminal):
+                        context.record("stop", unresolved=unresolved, verified=verified_terminal, best_optimistic=best_optimistic)
+                        break
+                    prev_best = best_optimistic
+                    context.record("agent_end", step=step, unresolved=unresolved, verified=verified_terminal)
+                if artifact is None and state.artifacts:
+                    artifact = {op.output_key: state.artifacts.get(op.output_key) for op in task.operations}
+                    verifier_score = self._maybe_verify(context, artifact, None)
                     verified_terminal = verifier_score >= 1.0
-                    self._record_artifact_node(self.shell.short_term, "ensemble", artifact, frame.metadata.get("run_node_id"))
-                    context.record("merge_horizontal", artifact=artifact)
-                elif frame.depth == 0:
-                    artifact, local_faults, verifier_score, verified_terminal = self._run_root_frame(context, frame, task, verifier_score, verified_terminal)
-                    faults += local_faults
-                else:
-                    operations = [self._operation_by_id(task, op_id) for op_id in frame.operation_ids]
-                    output, local_faults, checkpoint = self._execute_isolated_frame(context, frame, operations)
-                    faults += local_faults
-                    self._store_output_artifacts(state, operations, output)
-                    state.checkpoints[self._checkpoint_key(frame)] = checkpoint
-                    context.record("child_complete", role=frame.role, outputs=list(state.artifacts.keys()))
-                unresolved = [
-                    op.output_key
-                    for op in task.operations
-                    if op.output_key not in state.artifacts and not (isinstance(artifact, dict) and op.output_key in artifact)
-                ]
-                state.unresolved_goals = unresolved
-                best_optimistic = self._best_next_action_utility(context, unresolved, verified_terminal)
-                self._update_subgoal_progress(context, unresolved, best_optimistic, prev_best, verified_terminal)
-                if self.runtime.control.stop_policy(context, best_optimistic, prev_best, len(unresolved), verified_terminal):
-                    context.record("stop", unresolved=unresolved, verified=verified_terminal, best_optimistic=best_optimistic)
-                    break
-                prev_best = best_optimistic
-                context.record("agent_end", step=step, unresolved=unresolved, verified=verified_terminal)
-            if artifact is None and state.artifacts:
-                artifact = {op.output_key: state.artifacts.get(op.output_key) for op in task.operations}
-                verifier_score = self._maybe_verify(context, artifact, None)
-                verified_terminal = verifier_score >= 1.0
-            if not verified_terminal and task.verification_required and not task.allow_best_effort:
-                artifact = {"error": "controlled_failure"}
-            elif artifact is None and not task.allow_best_effort:
-                artifact = {"error": "controlled_failure"}
-        except HardInvalidation as exc:
-            return self._build_run_result(task, seed, {"error": str(exc)}, 0.0, faults, start, budget, state, trace, True, str(exc))
-        return self._build_run_result(task, seed, artifact, verifier_score, faults, start, budget, state, trace, False, None)
+                if not verified_terminal and task.verification_required and not task.allow_best_effort:
+                    artifact = {"error": "controlled_failure"}
+                elif artifact is None and not task.allow_best_effort:
+                    artifact = {"error": "controlled_failure"}
+            except HardInvalidation as exc:
+                return self._build_run_result(task, seed, {"error": str(exc)}, 0.0, faults, start, budget, state, trace, True, str(exc))
+            return self._build_run_result(task, seed, artifact, verifier_score, faults, start, budget, state, trace, False, None)
 
     def _run_root_frame(
         self,
@@ -146,11 +185,6 @@ class TaskRuntime:
     ) -> tuple[Any, int, float, bool]:
         faults = 0
         artifact: Any = None
-        if task.task_type == "research":
-            artifact = run_runtime_research_task(self.runtime, context, frame)
-            verifier_score = self._maybe_verify(context, artifact, frame.metadata.get("run_node_id"))
-            verified_terminal = verifier_score >= 1.0
-            return artifact, faults, verifier_score, verified_terminal
         mode = self.runtime.topology.select_mode(context, frame, task.operations)
         context.state.mode = mode
         context.record("mode_selected", mode=mode)
@@ -495,7 +529,7 @@ class TaskRuntime:
         total_text = " ".join(str(node["content"]) for node in short_term.nodes.values())
         used_tokens = count_tokens_rough(total_text)
         fraction = used_tokens / max(1.0, float(context.budget.context_window_tokens))
-        if fraction <= self.runtime.memory.B_HI:
+        if fraction <= context.profile.memory.b_hi:
             return
         span_ids = [node_id for node_id, node in short_term.nodes.items() if node["type"] in {"Event", "RawBlob"}]
         if not span_ids:
@@ -514,7 +548,7 @@ class TaskRuntime:
             if score > best_score:
                 best_score = score
                 best_agent = agent
-        if best_score < getattr(self.runtime.topology, "THETA_CREATE", 0.58):
+        if best_score < context.profile.topology.theta_create:
             ephemeral = AgentTemplate(
                 agent_id=child.child_id,
                 description=child.instruction,
@@ -555,7 +589,13 @@ class TaskRuntime:
             if operation.kind == "memory_lookup":
                 output = self._execute_memory_lookup(context, operation, run_node_id)
             elif operation.kind in {"builtin", "generated_expression"}:
-                output, used_tool, created_tool, local_faults = self._execute_tool_operation(context, operation, resolved_args, run_node_id if isinstance(run_node_id, str) else None)
+                output, used_tool, created_tool, local_faults = self._execute_tool_operation(
+                    context,
+                    frame,
+                    operation,
+                    resolved_args,
+                    run_node_id if isinstance(run_node_id, str) else None,
+                )
                 faults += local_faults
                 context.record("tool_operation", op_id=operation.op_id, tool=used_tool, created=created_tool, output=output)
             else:
@@ -585,13 +625,42 @@ class TaskRuntime:
         feeds_downstream = any(operation.output_key in candidate.dependencies for candidate in context.task.operations)
         return self._coerce(node.content) if feeds_downstream else node.content
 
-    def _execute_tool_operation(self, context: PolicyContext, operation: Any, args: Mapping[str, Any], run_node_id: str | None) -> tuple[Any, str, bool, int]:
-        faults = 0
-        categories = self.runtime.tooling.rank_categories(context, operation, self.shell.tool_registry.category_summaries)
-        candidate_tools = []
-        inspected_categories = categories[: getattr(self.runtime.tooling, "K_C", 3)]
+    def _dedupe_tools(self, tools: Sequence[Any]) -> list[Any]:
+        deduped: dict[str, Any] = {}
+        for tool in tools:
+            deduped[tool.spec.name] = tool
+        return list(deduped.values())
+
+    def _discover_candidate_tools(
+        self,
+        context: PolicyContext,
+        frame: AgentFrame,
+        operation: Any,
+    ) -> list[Any]:
+        categories = self.runtime.tooling.rank_categories(
+            context,
+            operation,
+            self.shell.tool_registry.category_summaries,
+        )
+        inspected_categories = categories[: context.profile.tooling.k_c]
+        candidate_tools: list[Any] = []
         for category in inspected_categories:
             candidate_tools.extend(self.shell.tool_registry.tools_in_category(category))
+        if frame.tool_scope:
+            allowed = set(frame.tool_scope)
+            candidate_tools = [tool for tool in candidate_tools if tool.spec.name in allowed]
+        return self._dedupe_tools(candidate_tools)
+
+    def _execute_tool_operation(
+        self,
+        context: PolicyContext,
+        frame: AgentFrame,
+        operation: Any,
+        args: Mapping[str, Any],
+        run_node_id: str | None,
+    ) -> tuple[Any, str, bool, int]:
+        faults = 0
+        candidate_tools = self._discover_candidate_tools(context, frame, operation)
         ranked_tool_names = self.runtime.tooling.rank_tools(context, operation, candidate_tools)
         candidate_tool_names = {tool.spec.name for tool in candidate_tools}
         created_tool = False
