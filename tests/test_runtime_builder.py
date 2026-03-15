@@ -7,8 +7,15 @@ from types import SimpleNamespace
 import pytest
 
 import agintor.runtime_builder as runtime_builder
+from agintor.exceptions import RuntimeLoadError
 from agintor.providers import LocalDeterministicProvider
 from agintor.runtime_builder import build_goal_conditioned_suite, build_runtime_from_goal
+from agintor.runtime_loader import (
+    RUNTIME_ABI_VERSION,
+    RUNTIME_EXPORT_BUNDLE_FILE,
+    RUNTIME_PROVENANCE_BUNDLE_FILE,
+    load_runtime,
+)
 from agintor.runtime_profile import default_runtime_profile
 from agintor.schemas import ArchiveEntry, ArchiveRecord, SuiteEvaluation
 
@@ -172,8 +179,19 @@ def test_build_runtime_exports_highest_goal_score_before_validation(tmp_path: Pa
     assert payload["leader_runtime_hash"] == "high-goal"
     assert payload["best_goal_score"] == pytest.approx(0.80)
     assert payload["selection_policy"] == "goal_score_mean_then_validation"
+    assert payload["runtime_abi"] == RUNTIME_ABI_VERSION
+    assert payload["export_bundle_file"] == RUNTIME_EXPORT_BUNDLE_FILE
+    assert payload["provenance_bundle_file"] == RUNTIME_PROVENANCE_BUNDLE_FILE
     assert len(payload["goal_task_ids"]) == len(goal_score_keys)
     assert payload["runtime_provider"] == "minimax"
+    bundle = json.loads((tmp_path / "exported" / RUNTIME_EXPORT_BUNDLE_FILE).read_text(encoding="utf-8"))
+    assert bundle["runtime_abi"] == RUNTIME_ABI_VERSION
+    assert bundle["runtime_hash"]
+    provenance = json.loads((tmp_path / "exported" / RUNTIME_PROVENANCE_BUNDLE_FILE).read_text(encoding="utf-8"))
+    assert provenance["schema_version"] == "agintor.runtime.provenance.v1"
+    assert provenance["runtime_abi"] == RUNTIME_ABI_VERSION
+    assert provenance["attestation_hash"]
+    assert "marker.txt" in provenance["file_digests"]
 
 
 def test_build_runtime_uses_validation_only_to_break_goal_ties(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -440,3 +458,17 @@ def test_build_runtime_considers_archived_runtime_scores_beyond_current_goal_isl
 
     assert (tmp_path / "exported" / "marker.txt").read_text(encoding="utf-8") == "even"
     assert result.best_goal_score == pytest.approx(0.70)
+
+
+
+def test_runtime_loader_rejects_manifest_abi_mismatch(runtime_dir: Path, tmp_path: Path) -> None:
+    candidate = tmp_path / "runtime_bad_abi"
+    import shutil
+    shutil.copytree(runtime_dir, candidate)
+    manifest_path = candidate / "runtime_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.setdefault("metadata", {})["runtime_abi"] = "agintor-runtime-abi-v999"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    with pytest.raises(RuntimeLoadError):
+        load_runtime(candidate)

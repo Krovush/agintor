@@ -8,12 +8,19 @@ from pathlib import Path
 from .benchmarks import BenchmarkSuite, build_demo_suite
 from .evolution import EvolutionEngine
 from .goal_rubric import derive_goal_expectations
+from .exceptions import RuntimeLoadError
 from .project import init_runtime
 from .providers import ModelProvider
 from .pydantic_compat import model_copy
+from .runtime_loader import (
+    RUNTIME_ABI_VERSION,
+    RUNTIME_EXPORT_BUNDLE_FILE,
+    RUNTIME_PROVENANCE_BUNDLE_FILE,
+    load_runtime,
+)
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, profile_to_json
 from .schemas import ArchiveEntry, ArchiveRecord
-from .utils import ensure_directory, stable_hash
+from .utils import ensure_directory, file_digest, stable_hash
 
 
 @dataclass
@@ -94,6 +101,44 @@ def build_goal_conditioned_suite(goal_prompt: str, profile: RuntimeProfile) -> B
         proxy=list(suite.proxy),
     )
 
+
+
+
+def _runtime_file_digests(runtime_dir: Path) -> dict[str, str]:
+    digests: dict[str, str] = {}
+    for path in sorted(runtime_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(runtime_dir).as_posix()
+        digests[rel] = file_digest(path)
+    return digests
+
+
+def _write_runtime_provenance_bundle(
+    destination_path: Path,
+    *,
+    runtime_hash: str,
+    code_hash: str,
+    runtime_provider: str,
+    source_runtime_dir: str,
+    goal_prompt: str,
+) -> None:
+    file_digests = _runtime_file_digests(destination_path)
+    payload = {
+        "schema_version": "agintor.runtime.provenance.v1",
+        "runtime_abi": RUNTIME_ABI_VERSION,
+        "runtime_hash": runtime_hash,
+        "code_hash": code_hash,
+        "runtime_provider": runtime_provider,
+        "source_runtime_dir": source_runtime_dir,
+        "goal_prompt": goal_prompt,
+        "file_digests": file_digests,
+    }
+    payload["attestation_hash"] = stable_hash(payload)
+    (destination_path / RUNTIME_PROVENANCE_BUNDLE_FILE).write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 def _mean_goal_score(scores: dict[str, float], goal_keys: list[str]) -> float:
     if not goal_keys:
@@ -212,6 +257,41 @@ def build_runtime_from_goal(
         else:
             destination_path.unlink()
     shutil.copytree(Path(leader.runtime_dir), destination_path)
+    try:
+        exported_runtime = load_runtime(destination_path, runtime_profile=merged_profile)
+        runtime_hash = exported_runtime.runtime_hash
+        code_hash = exported_runtime.code_hash
+        manifest_version = exported_runtime.manifest.version
+        runtime_id = exported_runtime.manifest.runtime_id
+    except RuntimeLoadError:
+        runtime_hash = leader.entry.runtime_hash
+        code_hash = leader.entry.code_hash
+        manifest_version = "unknown"
+        runtime_id = "unknown"
+    export_bundle = {
+        "runtime_abi": RUNTIME_ABI_VERSION,
+        "runtime_hash": runtime_hash,
+        "code_hash": code_hash,
+        "manifest_version": manifest_version,
+        "runtime_id": runtime_id,
+        "runtime_provider": merged_profile.runtime_provider.name,
+        "source_runtime_dir": str(leader.runtime_dir),
+        "selection_policy": "goal_score_mean_then_validation",
+        "export_bundle_file": RUNTIME_EXPORT_BUNDLE_FILE,
+        "provenance_bundle_file": RUNTIME_PROVENANCE_BUNDLE_FILE,
+    }
+    (destination_path / RUNTIME_EXPORT_BUNDLE_FILE).write_text(
+        json.dumps(export_bundle, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    _write_runtime_provenance_bundle(
+        destination_path,
+        runtime_hash=runtime_hash,
+        code_hash=code_hash,
+        runtime_provider=merged_profile.runtime_provider.name,
+        source_runtime_dir=str(leader.runtime_dir),
+        goal_prompt=clean_goal,
+    )
     summary_path = build_root / "build_summary.json"
     payload = {
         "goal_prompt": clean_goal,
@@ -230,6 +310,9 @@ def build_runtime_from_goal(
         "leader_runtime_dir": str(leader.runtime_dir),
         "leader_runtime_hash": leader.entry.runtime_hash,
         "selection_policy": "goal_score_mean_then_validation",
+        "runtime_abi": RUNTIME_ABI_VERSION,
+        "export_bundle_file": RUNTIME_EXPORT_BUNDLE_FILE,
+        "provenance_bundle_file": RUNTIME_PROVENANCE_BUNDLE_FILE,
     }
     summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return BuiltRuntimeResult(

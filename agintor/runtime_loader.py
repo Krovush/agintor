@@ -13,6 +13,18 @@ from .schemas import RuntimeManifest
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, profile_to_json
 from .utils import ast_node_count, file_digest, stable_hash
 
+RUNTIME_ABI_VERSION = "agintor-runtime-abi-v1"
+RUNTIME_EXPORT_BUNDLE_FILE = "runtime_export_bundle.json"
+RUNTIME_PROVENANCE_BUNDLE_FILE = "runtime_provenance_bundle.json"
+
+
+def _validate_runtime_abi(runtime_path: Path, manifest: RuntimeManifest) -> None:
+    runtime_abi = str(manifest.metadata.get("runtime_abi", "")).strip() if isinstance(manifest.metadata, dict) else ""
+    if runtime_abi and runtime_abi != RUNTIME_ABI_VERSION:
+        raise RuntimeLoadError(
+            f"runtime ABI mismatch for {runtime_path}: runtime={runtime_abi} loader={RUNTIME_ABI_VERSION}"
+        )
+
 
 @dataclass
 class LoadedRuntime:
@@ -76,6 +88,7 @@ def load_runtime(
     if not manifest_path.exists():
         raise RuntimeLoadError(f"missing runtime_manifest.json in {runtime_path}")
     manifest = model_validate(RuntimeManifest, json.loads(manifest_path.read_text(encoding="utf-8")))
+    _validate_runtime_abi(runtime_path, manifest)
     policy_objects: Dict[str, Any] = {}
     mutable_fingerprints: dict[str, str] = {}
     ast_count = 0
@@ -118,3 +131,6 @@ def load_runtime(
         mutable_ast_nodes=ast_count,
         mutable_loc=mutable_loc,
     )
+
+
+__all__ = ["LoadedRuntime", "RUNTIME_ABI_VERSION", "RUNTIME_EXPORT_BUNDLE_FILE", "RUNTIME_PROVENANCE_BUNDLE_FILE", "load_runtime"]

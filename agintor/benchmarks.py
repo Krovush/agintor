@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import importlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping
+from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from pydantic import BaseModel
 
@@ -366,11 +367,27 @@ def build_demo_suite() -> BenchmarkSuite:
         ),
     ]
     return BenchmarkSuite(name="demo", train=top_train + mem_train + tool_train + e2e_train, val=val, test=test, proxy=proxy)
-def load_suite(name_or_path: str) -> BenchmarkSuite:
-    if name_or_path == "demo":
-        return build_demo_suite()
-    path = Path(name_or_path)
-    data = json.loads(path.read_text(encoding="utf-8"))
+
+
+SuiteProvider = Callable[[str], BenchmarkSuite]
+_SUITE_PROVIDERS: dict[str, SuiteProvider] = {}
+
+
+def register_suite_provider(name: str, provider: SuiteProvider) -> None:
+    key = str(name).strip().lower()
+    if not key:
+        raise ValueError("suite provider name may not be empty")
+    _SUITE_PROVIDERS[key] = provider
+
+
+def unregister_suite_provider(name: str) -> None:
+    _SUITE_PROVIDERS.pop(str(name).strip().lower(), None)
+
+
+def _suite_from_payload(data: dict[str, Any], source: str) -> BenchmarkSuite:
+    schema_version = str(data.get("schema_version", "1")).strip()
+    if schema_version not in {"1", "agintor.benchmark.v1"}:
+        raise ValueError(f"unsupported benchmark schema version {schema_version!r} from {source}")
     return BenchmarkSuite(
         name=data["name"],
         train=[model_validate(BenchmarkTask, item) for item in data["train"]],
@@ -378,3 +395,36 @@ def load_suite(name_or_path: str) -> BenchmarkSuite:
         test=[model_validate(BenchmarkTask, item) for item in data["test"]],
         proxy=[model_validate(BenchmarkTask, item) for item in data["proxy"]],
     )
+
+
+def _load_suite_plugin(spec: str) -> BenchmarkSuite:
+    plugin_spec = spec.split(":", 1)[1] if spec.startswith("plugin:") else spec
+    plugin_spec = plugin_spec.strip()
+    if ":" not in plugin_spec:
+        provider = _SUITE_PROVIDERS.get(plugin_spec.lower())
+        if provider is None:
+            raise ValueError(f"unknown benchmark suite plugin {plugin_spec!r}")
+        return provider(plugin_spec)
+    module_name, func_name = plugin_spec.split(":", 1)
+    module = importlib.import_module(module_name)
+    factory = getattr(module, func_name, None)
+    if factory is None:
+        raise ValueError(f"suite plugin function {func_name!r} not found in module {module_name!r}")
+    suite = factory()
+    if not isinstance(suite, BenchmarkSuite):
+        raise TypeError("suite plugin factory must return BenchmarkSuite")
+    return suite
+
+def load_suite(name_or_path: str) -> BenchmarkSuite:
+    if name_or_path == "demo":
+        return build_demo_suite()
+    if name_or_path.startswith("plugin:"):
+        return _load_suite_plugin(name_or_path)
+    if str(name_or_path).strip().lower() in _SUITE_PROVIDERS:
+        return _SUITE_PROVIDERS[str(name_or_path).strip().lower()](name_or_path)
+    path = Path(name_or_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return _suite_from_payload(data, str(path))
+
+
+__all__ = ["BenchmarkSuite", "build_demo_suite", "load_suite", "register_suite_provider", "unregister_suite_provider"]

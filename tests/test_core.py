@@ -734,3 +734,97 @@ def test_open_handle_table_rejects_incomplete_handles(tmp_path: Path) -> None:
     )
     with pytest.raises(HardInvalidation):
         shell.open_handles.validate()
+
+
+def test_retry_provider_retries_transient_error() -> None:
+    from agintor.providers import RetryProvider
+
+    class FlakyProvider(LocalDeterministicProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("429 rate limit")
+            return super().generate(request)
+
+    wrapped = FlakyProvider()
+    provider = RetryProvider(wrapped, max_retries=2, backoff_s=0.0)
+    response = provider.generate(ModelRequest(instructions="", prompt="ok", model_class="small", seed=0, metadata={}))
+
+    assert response.text == "ok"
+    assert wrapped.calls == 2
+    events = provider.audit_trail()
+    assert events[0]["event"] == "error"
+    assert events[1]["event"] == "success"
+
+
+def test_failover_provider_uses_secondary_provider() -> None:
+    from agintor.providers import FailoverProvider
+
+    class BrokenProvider(LocalDeterministicProvider):
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            raise RuntimeError("provider unavailable")
+
+    provider = FailoverProvider([BrokenProvider(), LocalDeterministicProvider()])
+    response = provider.generate(ModelRequest(instructions="", prompt="hello", model_class="small", seed=0, metadata={}))
+
+    assert response.text == "hello"
+    assert provider.last_failures()
+
+
+def test_replay_provider_returns_rows(tmp_path: Path) -> None:
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(
+        json.dumps(
+            [
+                {
+                    "text": "response-a",
+                    "model_name": "replay/small",
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "token_estimate": 3,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider = build_provider("replay", replay_file=str(replay_file))
+    response = provider.generate(ModelRequest(instructions="", prompt="ignored", model_class="small", seed=0, metadata={}))
+
+    assert response.text == "response-a"
+    assert response.token_estimate == 3
+
+
+def test_build_provider_supports_failover_configuration() -> None:
+    provider = build_provider("local", fallback_names=["local"])
+    response = provider.generate(ModelRequest(instructions="", prompt="fallback", model_class="small", seed=0, metadata={}))
+
+    assert response.text == "fallback"
+
+
+def test_provider_environment_names_unwrap_retry_provider() -> None:
+    from agintor.providers import RetryProvider, provider_environment_names_for_instance
+
+    provider = RetryProvider(OpenAIProvider(api_key="sk-test"), max_retries=1, backoff_s=0.0)
+    env_names = provider_environment_names_for_instance(provider, include_api_key_file_env=True)
+
+    assert "OPENAI_API_KEY" in env_names
+    assert "OPENAI_BASE_URL" in env_names
+    assert "AGINTOR_OPENAI_KEY_FILE" in env_names
+
+
+def test_provider_environment_names_unwrap_failover_provider() -> None:
+    from agintor.providers import FailoverProvider, provider_environment_names_for_instance
+
+    provider = FailoverProvider([
+        OpenAIProvider(api_key="sk-test"),
+        MiniMaxProvider(api_key="sk-test"),
+    ])
+    env_names = provider_environment_names_for_instance(provider, include_api_key_file_env=True)
+
+    assert "OPENAI_API_KEY" in env_names
+    assert "AGINTOR_MAS_MINIMAX_API_KEY" in env_names
+    assert "AGINTOR_MAS_MINIMAX_KEY_FILE" in env_names
