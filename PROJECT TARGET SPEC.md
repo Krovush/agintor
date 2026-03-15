@@ -1047,16 +1047,3 @@ The following mismatches materially change results and therefore define the non-
 ## 17. Closing Statement
 
 Agintor is a bounded evolutionary program-search method over the parts of a self-programming agent runtime that actually determine downstream behavior: which agents are created, what evidence is remembered, which tools are built or reused, which models and verifiers are invoked, and when the system stops. The method requires topology, memory, tooling, and control to be co-evolved under verifier-based selection inside an immutable shell. Anything looser is a different method.
-
-## 18. Current Implementation Issues
-
-The following issues were identified in the current uncommitted implementation and should be treated as deviations from the target behavior above.
-
-1. `agintor/evaluator.py:123-126`
-   Stage-4 minibatching splits `transfer_scored` episodes by raw train-item index and evaluates each batch in a separate `evaluate_runtime()` call. This resets the shell between batches, so any episode that crosses a batch boundary loses carried long-term state. A 5-step transfer-scored episode with minibatch size 4 can therefore cause `stage4_full(parent, parent)` to reject an otherwise identical runtime. This violates the requirement that transfer-scored behavior preserve intended cross-step memory within the scored episode.
-
-2. `agintor/runner.py:597-598`
-   Hinted-tool compatibility is currently accepted when an operation arg name appears as a substring of the hinted signature text. An operation with args like `{\"id\": ...}` can incorrectly match a hinted signature such as `(region_id) -> value`, causing the hinted tool to be selected and then hard-invalidated with `unexpected keyword argument 'id'`. Parameter compatibility must be determined by actual parameter names, not substring coincidence.
-
-3. `agintor/tool_runtime.py:382-385`
-   `launch_async()` assumes every async-capable tool has a materialized Python source file in its sandbox. For `backgroundable=True` tools registered with an in-memory `executor` instead, this raises `FileNotFoundError`. `run_task()` does not catch that exception path because it only handles `HardInvalidation`, so async dispatch can crash evaluation instead of producing a failed run result.
