@@ -283,7 +283,7 @@ class TaskRuntime:
         hard_invalid: bool,
         invalid_reason: str | None,
     ) -> RunResult:
-        trace_path = str(self.shell.save_trace(task.task_id, seed, trace))
+        trace_path = self.shell.save_trace(task.task_id, seed, trace)
         return RunResult(
             task_id=task.task_id,
             seed=seed,
@@ -292,7 +292,8 @@ class TaskRuntime:
             cost=budget.cost,
             latency=time.perf_counter() - start,
             faults=faults,
-            trace_path=trace_path,
+            trace=[dict(row) for row in trace],
+            trace_path=str(trace_path) if trace_path is not None else None,
             hard_invalid=hard_invalid,
             invalid_reason=invalid_reason,
             mode=state.mode,
@@ -705,7 +706,7 @@ class TaskRuntime:
             handle = self.shell.tool_executor.launch_async(
                 tool_name,
                 args,
-                ensure_directory(self.shell.workspace / "handles"),
+                self.shell.workspace / "handles",
                 context.task.task_id,
             )
             self.shell.open_handles.add(handle)
@@ -735,7 +736,7 @@ class TaskRuntime:
                 self.shell.open_handles.update_state(handle.handle_id, "completed")
             else:
                 self.shell.open_handles.update_state(handle.handle_id, "completed")
-                output = json.loads(Path(handle.stdout_path).read_text(encoding="utf-8") or "null")
+                output = None
         else:
             result = self.shell.tool_executor.run_tool(tool_name, args, context.task.task_id)
             context.budget.consume_tool_latency(result.latency_s)

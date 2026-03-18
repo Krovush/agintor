@@ -46,7 +46,7 @@ class OpenHandleTable:
 
     def validate(self) -> None:
         for handle in self.handles.values():
-            required = [handle.handle_id, handle.tool_name, handle.sandbox_hash, handle.working_directory, handle.stdout_path, handle.stderr_path, handle.state]
+            required = [handle.handle_id, handle.tool_name, handle.sandbox_hash, handle.working_directory, handle.state]
             if any(value in (None, "") for value in required):
                 raise HardInvalidation("open-handle table becomes inconsistent")
 
@@ -91,8 +91,15 @@ class AgentPool:
 
 
 class FixedShell:
-    def __init__(self, workspace: Path, predictors: DecisionFamilyModelBank | None = None) -> None:
-        self.workspace = ensure_directory(workspace)
+    def __init__(
+        self,
+        workspace: Path,
+        predictors: DecisionFamilyModelBank | None = None,
+        *,
+        retain_artifacts: bool = False,
+    ) -> None:
+        self.workspace = Path(workspace)
+        self.retain_artifacts = retain_artifacts
         self.short_term = ShortTermGraph()
         self.long_term = LongTermGraph()
         self.message_board = MessageBoard()
@@ -103,8 +110,8 @@ class FixedShell:
         self.safety_guard = SafetyGuard()
         self.sandbox_manager = SandboxManager(self.workspace / "sandboxes")
         self.tool_registry = ToolRegistry(self.sandbox_manager, self.safety_guard)
-        self.tool_executor = ToolExecutor(self.tool_registry, self.sandbox_manager)
-        self.trace_dir = ensure_directory(self.workspace / "traces")
+        self.tool_executor = ToolExecutor(self.tool_registry, self.sandbox_manager, persist_artifacts=retain_artifacts)
+        self.trace_dir = self.workspace / "traces"
         self._current_task_id: str | None = None
         self._current_episode_id: str | None = None
         self._memory_scope_kind: str | None = None
@@ -126,7 +133,9 @@ class FixedShell:
         self._memory_scope_kind = memory_scope_kind
         self._memory_scope_id = memory_scope_id
 
-    def save_trace(self, task_id: str, seed: int, trace: list[dict[str, Any]]) -> Path:
+    def save_trace(self, task_id: str, seed: int, trace: list[dict[str, Any]]) -> Path | None:
+        if not self.retain_artifacts:
+            return None
         ensure_directory(self.trace_dir)
         path = self.trace_dir / f"{task_id.replace('/', '_')}_{seed}.json"
         path.write_text(json.dumps(trace, indent=2, sort_keys=True), encoding="utf-8")

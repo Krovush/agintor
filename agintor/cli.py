@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +88,12 @@ def _load_prompt_input(prompt: Optional[str], prompt_file: Optional[str]) -> str
     raise typer.BadParameter("provide either a prompt argument or --prompt-file")
 
 
+def _resolve_workspace(workspace: Optional[str], prefix: str) -> tuple[Path, bool]:
+    if workspace and workspace.strip():
+        return Path(workspace), True
+    return Path(tempfile.mkdtemp(prefix=f"agintor_{prefix}_")), False
+
+
 @app.command("init-runtime")
 def init_runtime_cmd(destination: str, force: bool = typer.Option(False, "--force"), write_suite: Optional[str] = typer.Option(None, "--write-demo-suite")) -> None:
     path = init_runtime_dir(destination, force=force)
@@ -106,7 +114,7 @@ def solve_cmd(
     provider: Optional[str] = typer.Option(None, "--provider", "--runtime-provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     profile: Optional[str] = typer.Option(None, "--profile"),
-    workspace: str = typer.Option(".agintor_runs", "--workspace"),
+    workspace: Optional[str] = typer.Option(None, "--workspace"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
@@ -115,23 +123,29 @@ def solve_cmd(
     runtime = load_runtime(runtime_dir, runtime_profile=runtime_profile)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
     effective_provider = provider or runtime_profile.runtime_provider.name
-    evaluator = RuntimeEvaluator(
-        benchmark,
-        Path(workspace),
-        provider_impl,
-        baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
-        runtime_backend=runtime_backend,
-        **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
-    )
-    usage_before = provider_impl.usage_summary()
-    evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=[seed], use_cache=False, tasks_override=[task])
-    typer.echo(json.dumps({
-        "runtime_hash": runtime.runtime_hash,
-        "task_id": task_id,
-        "result": model_dump(evaluation.run_results[0]),
-        "objective_scores": evaluation.objective_scores,
-        "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary()),
-    }, indent=2, sort_keys=True))
+    workspace_path, retain_artifacts = _resolve_workspace(workspace, "runs")
+    try:
+        evaluator = RuntimeEvaluator(
+            benchmark,
+            workspace_path,
+            provider_impl,
+            baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
+            runtime_backend=runtime_backend,
+            retain_artifacts=retain_artifacts,
+            **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
+        )
+        usage_before = provider_impl.usage_summary()
+        evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=[seed], use_cache=False, tasks_override=[task])
+        typer.echo(json.dumps({
+            "runtime_hash": runtime.runtime_hash,
+            "task_id": task_id,
+            "result": model_dump(evaluation.run_results[0]),
+            "objective_scores": evaluation.objective_scores,
+            "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary()),
+        }, indent=2, sort_keys=True))
+    finally:
+        if not retain_artifacts:
+            shutil.rmtree(workspace_path, ignore_errors=True)
 
 
 @app.command("eval")
@@ -143,24 +157,30 @@ def eval_cmd(
     provider: Optional[str] = typer.Option(None, "--provider", "--runtime-provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     profile: Optional[str] = typer.Option(None, "--profile"),
-    workspace: str = typer.Option(".agintor_runs", "--workspace"),
+    workspace: Optional[str] = typer.Option(None, "--workspace"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
     effective_provider = provider or runtime_profile.runtime_provider.name
-    evaluator = RuntimeEvaluator(
-        benchmark,
-        Path(workspace),
-        provider_impl,
-        baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
-        runtime_backend=runtime_backend,
-        **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
-    )
-    usage_before = provider_impl.usage_summary()
-    evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=_parse_seeds(seeds), use_cache=False)
-    typer.echo(json.dumps({**model_dump(evaluation), "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary())}, indent=2, sort_keys=True))
+    workspace_path, retain_artifacts = _resolve_workspace(workspace, "runs")
+    try:
+        evaluator = RuntimeEvaluator(
+            benchmark,
+            workspace_path,
+            provider_impl,
+            baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
+            runtime_backend=runtime_backend,
+            retain_artifacts=retain_artifacts,
+            **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
+        )
+        usage_before = provider_impl.usage_summary()
+        evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=_parse_seeds(seeds), use_cache=False)
+        typer.echo(json.dumps({**model_dump(evaluation), "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary())}, indent=2, sort_keys=True))
+    finally:
+        if not retain_artifacts:
+            shutil.rmtree(workspace_path, ignore_errors=True)
 
 
 @app.command("evolve")
@@ -172,20 +192,22 @@ def evolve_cmd(
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     profile: Optional[str] = typer.Option(None, "--profile"),
     mutator: str = typer.Option("heuristic", "--mutator"),
-    workspace: str = typer.Option(".agintor_evo", "--workspace"),
+    workspace: Optional[str] = typer.Option(None, "--workspace"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
     benchmark = load_suite(suite)
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=False)
+    workspace_path, retain_artifacts = _resolve_workspace(workspace, "evo")
     engine = EvolutionEngine(
         benchmark,
-        Path(workspace),
+        workspace_path,
         provider_impl,
         Path(runtime_dir),
         mutator_type=mutator,
         reference_runtime_dir=_reference_runtime_dir(provider, runtime_dir),
         runtime_backend=runtime_backend,
+        retain_artifacts=retain_artifacts,
         **_supported_kwargs(EvolutionEngine, runtime_profile=runtime_profile, profile_path=profile),
     )
     usage_before = provider_impl.usage_summary()
@@ -203,23 +225,25 @@ def build_runtime_cmd(
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     profile: Optional[str] = typer.Option(None, "--profile"),
     mutator: str = typer.Option("heuristic", "--mutator"),
-    workspace: str = typer.Option(".agintor_build", "--workspace"),
+    workspace: Optional[str] = typer.Option(None, "--workspace"),
     runtime_backend: str = typer.Option("docker", "--runtime-backend"),
     force: bool = typer.Option(False, "--force"),
 ) -> None:
     prompt_text = _load_prompt_input(prompt, prompt_file)
     provider_impl = _build_provider(provider, api_key_file, None, default_to_runtime_profile=False)
+    workspace_path, retain_artifacts = _resolve_workspace(workspace, "build")
     try:
         result = build_runtime_from_goal(
             prompt_text,
             destination=destination,
-            workspace=workspace,
+            workspace=workspace_path,
             provider=provider_impl,
             steps=steps,
             mutator_type=mutator,
             profile_path=profile,
             runtime_backend=runtime_backend,
             force=force,
+            retain_artifacts=retain_artifacts,
         )
     except (AgintorError, RuntimeError, ValueError, FileExistsError) as exc:
         typer.echo(str(exc), err=True)

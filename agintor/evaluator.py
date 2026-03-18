@@ -38,10 +38,12 @@ class RuntimeEvaluator:
         runtime_backend: str | None = None,
         runtime_profile: RuntimeProfile | None = None,
         profile_path: Path | None = None,
+        retain_artifacts: bool = False,
     ) -> None:
         self.suite = suite
         self.workspace = ensure_directory(workspace)
         self.provider = provider
+        self.retain_artifacts = retain_artifacts
         self.budget_overrides = dict(budget_overrides or {})
         self.predictors = predictors or DecisionFamilyModelBank()
         self.profile_path = Path(profile_path) if profile_path is not None else None
@@ -50,7 +52,11 @@ class RuntimeEvaluator:
             profile_path=self.profile_path,
         )
         self.runtime_backend = (runtime_backend or os.environ.get("AGINTOR_RUNTIME_BACKEND", "local")).strip().lower()
-        self.container_executor = DockerRuntimeExecutor(self.workspace / ".runtime_container_cache") if self.runtime_backend == "docker" else None
+        self.container_executor = (
+            DockerRuntimeExecutor(self.workspace / ".runtime_container_cache", retain_artifacts=retain_artifacts)
+            if self.runtime_backend == "docker"
+            else None
+        )
         self.stage1_replays = self.reference_profile.evaluation.stage1_replays
         self.epsilon_proxy = self.reference_profile.evaluation.epsilon_proxy
         self.epsilon_part = self.reference_profile.evaluation.epsilon_part
@@ -133,6 +139,14 @@ class RuntimeEvaluator:
     def _normalize_trace(self, trace: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         return [self._normalize_trace_payload(event) for event in trace]
 
+    def _trace_rows(self, run) -> list[dict[str, Any]]:
+        return run.trace_rows() if hasattr(run, "trace_rows") else []
+
+    def _cleanup_path(self, path: Path | None) -> None:
+        if path is None or self.retain_artifacts or not path.exists():
+            return
+        shutil.rmtree(path, ignore_errors=True)
+
     def _file_contract_snapshot(self, source: str, allowed_methods: Sequence[str]) -> tuple[tuple[str, ...], dict[str, dict[str, str]]]:
         tree = ast.parse(source)
         top_level: list[str] = []
@@ -205,21 +219,28 @@ class RuntimeEvaluator:
         run_results = []
         self.predictors.freeze()
         try:
-            for seed in seeds:
-                if self.runtime_backend == "docker" and self.container_executor is not None:
-                    for unit in units:
-                        run_results.extend(
-                            self.container_executor.run_unit(
-                                runtime_dir,
-                                list(unit),
-                                int(seed),
-                                provider_name=self._provider_name(),
-                                api_key_file=self._provider_api_key_file(),
-                                runtime_profile=runtime_profile,
-                            )
-                        )
-                else:
-                    shell = FixedShell(self.workspace / f"ev_{runtime.runtime_hash[:8]}_{partition[:1]}_{seed}", predictors=self.predictors)
+            if self.runtime_backend == "docker" and self.container_executor is not None:
+                task_runs = [
+                    (task, int(seed))
+                    for seed in seeds
+                    for unit in units
+                    for task in unit
+                ]
+                run_results.extend(
+                    self.container_executor.run_batch(
+                        runtime_dir,
+                        task_runs,
+                        provider=self.provider,
+                        runtime_profile=runtime_profile,
+                    )
+                )
+            else:
+                for seed in seeds:
+                    shell = FixedShell(
+                        self.workspace / f"ev_{runtime.runtime_hash[:8]}_{partition[:1]}_{seed}",
+                        predictors=self.predictors,
+                        retain_artifacts=self.retain_artifacts,
+                    )
                     runner = TaskRuntime(
                         runtime,
                         shell,
@@ -237,12 +258,6 @@ class RuntimeEvaluator:
         if use_cache:
             self.cache[cache_key] = evaluation
         return evaluation
-
-    def _provider_name(self) -> str:
-        return str(getattr(self.provider, "provider_name", "local")).strip().lower() or "local"
-
-    def _provider_api_key_file(self) -> str | None:
-        return str(getattr(self.provider, "api_key_file", "") or "") or None
 
     def _apply_patch_uniquely(self, parent_dir: Path, candidate: MutationCandidate) -> Path:
         runtime = self._load_runtime(parent_dir)
@@ -360,7 +375,7 @@ class RuntimeEvaluator:
         for _ in range(max(2, self.stage1_replays)):
             evaluation = self.evaluate_runtime(child_dir, partition="proxy", seeds=[0], use_cache=False, tasks_override=[smoke_task])
             run = evaluation.run_results[0]
-            trace = self._normalize_trace(json.loads(Path(run.trace_path).read_text(encoding="utf-8")))
+            trace = self._normalize_trace(self._trace_rows(run))
             runs.append((evaluation, run, trace))
         baseline_eval, baseline_run, baseline_trace = runs[0]
         passed = True
@@ -465,15 +480,20 @@ class RuntimeEvaluator:
         stage1 = self.stage1_smoke(child_dir)
         results.append(stage1)
         if not stage1.passed:
+            self._cleanup_path(child_dir)
             return results, child_dir
         stage2 = self.stage2_proxy(parent_dir, child_dir, candidate.touched_scope, epsilon_proxy=self.epsilon_proxy)
         results.append(stage2)
         if not stage2.passed:
+            self._cleanup_path(child_dir)
             return results, child_dir
         stage3 = self.stage3_local_subset(parent_dir, child_dir, objective, epsilon_part=self.epsilon_part)
         results.append(stage3)
         if not stage3.passed:
+            self._cleanup_path(child_dir)
             return results, child_dir
         stage4 = self.stage4_full(parent_dir, child_dir)
         results.append(stage4)
+        if not stage4.passed:
+            self._cleanup_path(child_dir)
         return results, child_dir

@@ -25,6 +25,7 @@
     "runtime_profile.json"
   ],
   "metadata": {
-    "template": "baseline_runtime"
+    "template": "baseline_runtime",
+    "runtime_abi": "agintor-runtime-abi-v1"
   }
 }

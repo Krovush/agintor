@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import json
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, PrivateAttr, validator
@@ -82,8 +85,8 @@ class AsyncHandle(BaseModel):
     working_directory: str
     launch_time: float
     timeout: float
-    stdout_path: str
-    stderr_path: str
+    stdout_path: Optional[str] = None
+    stderr_path: Optional[str] = None
     state: str
     artifact_refs: List[str]
     process_pid: Optional[int] = None
@@ -243,7 +246,8 @@ class RunResult(BaseModel):
     cost: float
     latency: float
     faults: int
-    trace_path: str
+    trace: List[Dict[str, Any]] = Field(default_factory=list)
+    trace_path: Optional[str] = None
     hard_invalid: bool = False
     invalid_reason: Optional[str] = None
     mode: Optional[str] = None
@@ -255,6 +259,47 @@ class RunResult(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     utility: Optional[float] = None
+
+    @staticmethod
+    def _inline_trace_prefix() -> str:
+        return "inline-json:"
+
+    @classmethod
+    def encode_trace_ref(cls, trace: List[Dict[str, Any]]) -> str:
+        payload = json.dumps(trace, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(payload).decode("ascii")
+        return cls._inline_trace_prefix() + encoded
+
+    @classmethod
+    def decode_trace_ref(cls, trace_ref: str) -> List[Dict[str, Any]]:
+        if not trace_ref.startswith(cls._inline_trace_prefix()):
+            return []
+        encoded = trace_ref[len(cls._inline_trace_prefix()) :]
+        try:
+            payload = base64.urlsafe_b64decode(encoded.encode("ascii"))
+            trace = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return []
+        return trace if isinstance(trace, list) else []
+
+    def trace_rows(self) -> List[Dict[str, Any]]:
+        if self.trace:
+            return [dict(row) for row in self.trace]
+        if not self.trace_path:
+            return []
+        inline_trace = self.decode_trace_ref(self.trace_path)
+        if inline_trace:
+            return inline_trace
+        try:
+            payload = json.loads(Path(self.trace_path).read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        return payload if isinstance(payload, list) else []
+
+    def trace_ref(self) -> str:
+        if self.trace_path:
+            return self.trace_path
+        return self.encode_trace_ref(self.trace)
 
 
 class TaskScore(BaseModel):

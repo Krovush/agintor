@@ -20,3 +20,15 @@ class RuntimeLoadError(AgintorError):
 
 class ValidationError(AgintorError):
     """Raised when a synthesized tool or runtime does not validate."""
+
+
+class ProviderError(AgintorError):
+    """Base error for provider configuration and execution failures."""
+
+
+class ProviderConfigurationError(ProviderError):
+    """Raised when provider construction inputs are invalid."""
+
+
+class ProviderExhaustedError(ProviderError):
+    """Raised when an offline or bounded provider runs out of recorded responses."""

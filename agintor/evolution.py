@@ -46,10 +46,12 @@ class EvolutionEngine:
         runtime_backend: str | None = None,
         runtime_profile: RuntimeProfile | None = None,
         profile_path: Path | None = None,
+        retain_artifacts: bool = False,
     ) -> None:
         self.suite = suite
         self.workspace = ensure_directory(workspace)
         self.provider = provider
+        self.retain_artifacts = retain_artifacts
         self.baseline_runtime_dir = baseline_runtime_dir
         self.profile_path = Path(profile_path) if profile_path is not None else None
         self.runtime_profile = runtime_profile or load_runtime_profile(baseline_runtime_dir, profile_path=self.profile_path)
@@ -66,6 +68,7 @@ class EvolutionEngine:
             runtime_backend=runtime_backend,
             runtime_profile=self.runtime_profile,
             profile_path=self.profile_path,
+            retain_artifacts=retain_artifacts,
         )
         self.objectives = objective_specs_from_suite(suite, partition="train")
         self.history: list[EvolutionHistoryRow] = []
@@ -90,6 +93,11 @@ class EvolutionEngine:
         self.fully_evaluated_since_retrain = 0
         self.accepted_since_retrain = 0
         self.crossover_probability = self.runtime_profile.evolution.crossover_probability
+
+    def _cleanup_path(self, path: Path | None) -> None:
+        if path is None or self.retain_artifacts or not path.exists():
+            return
+        shutil.rmtree(path, ignore_errors=True)
 
     def _load_runtime(self, runtime_dir: str | Path):
         runtime_profile = resolve_runtime_profile(
@@ -141,24 +149,28 @@ class EvolutionEngine:
         singleton: dict[str, float] = {}
         pairwise: dict[tuple[str, str], float] = {}
         for interface in scope:
+            revert_path = self._counterfactual_variant(parent_dir, child_dir, [interface])
             revert_eval = self.evaluator.evaluate_runtime(
-                self._counterfactual_variant(parent_dir, child_dir, [interface]),
+                revert_path,
                 partition="proxy",
                 seeds=seeds,
                 use_cache=False,
                 tasks_override=proxy_tasks,
             )
+            self._cleanup_path(revert_path)
             singleton[interface] = child_score - self._proxy_mean_score(revert_eval, proxy_tasks)
         ordered_scope = list(scope)
         for idx, left in enumerate(ordered_scope):
             for right in ordered_scope[idx + 1 :]:
+                revert_pair_path = self._counterfactual_variant(parent_dir, child_dir, [left, right])
                 revert_pair_eval = self.evaluator.evaluate_runtime(
-                    self._counterfactual_variant(parent_dir, child_dir, [left, right]),
+                    revert_pair_path,
                     partition="proxy",
                     seeds=seeds,
                     use_cache=False,
                     tasks_override=proxy_tasks,
                 )
+                self._cleanup_path(revert_pair_path)
                 pair_key = tuple(sorted((left, right), key=lambda item: order.get(item, 99)))
                 pairwise[pair_key] = child_score - (child_score - singleton[left]) - (child_score - singleton[right]) + self._proxy_mean_score(revert_pair_eval, proxy_tasks)
         return singleton, pairwise
@@ -193,15 +205,12 @@ class EvolutionEngine:
         rows = []
         for run in evaluation.run_results:
             if run.verifier_score < 1.0:
-                trace_payload: object = []
-                try:
-                    trace_payload = json.loads(Path(run.trace_path).read_text(encoding="utf-8"))
-                except Exception:
-                    trace_payload = []
+                trace_payload: object = run.trace_rows() if hasattr(run, "trace_rows") else []
                 rows.append(
                     {
                         "task_id": run.task_id,
                         "trace_path": run.trace_path,
+                        "trace_ref": run.trace_ref() if hasattr(run, "trace_ref") else run.trace_path,
                         "trace": trace_payload,
                         "verifier_score": run.verifier_score,
                         "invalid": run.hard_invalid,
@@ -382,8 +391,12 @@ class EvolutionEngine:
                     accepted += 1
                     singleton, pairwise = self._counterfactual_contributions(parent_dir, child_dir, scope)
                     self.scheduler.update_counterfactuals(scope, singleton, pairwise)
+                else:
+                    self._cleanup_path(child_dir)
             elif self._is_hard_failure(stage_results):
                 self.scheduler.note_hard_failure(scope)
+            if parent_dir != Path(parent_record.runtime_dir):
+                self._cleanup_path(parent_dir)
             row = EvolutionHistoryRow(step=step, objective=objective.name, parent_runtime_hash=parent_record.entry.runtime_hash, child_runtime_hash=child_hash, scope=scope, stage_results=stage_results, accepted=accepted_flag, inserted_keys=inserted_keys)
             self.history.append(row)
             self.scheduler.note_iteration([row.scope] if row.accepted else [])

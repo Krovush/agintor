@@ -14,7 +14,14 @@ from agintor.evaluator import RuntimeEvaluator
 from agintor.exceptions import HardInvalidation, PatchApplyError, SafetyViolation, ValidationError
 from agintor.memory_graph import LongTermGraph, ShortTermGraph
 from agintor.patches import apply_patch_to_text, build_patch
-from agintor.providers import LocalDeterministicProvider, MiniMaxProvider, OpenAIProvider, build_provider
+from agintor.providers import (
+    LocalDeterministicProvider,
+    MiniMaxProvider,
+    OpenAIProvider,
+    build_provider,
+    build_provider_from_payload,
+    provider_payload,
+)
 from agintor.project import init_runtime
 from agintor.runtime_api import AgentFrame, PolicyContext, RuntimeBudget, RuntimeState
 from agintor.runtime_loader import load_runtime
@@ -41,7 +48,7 @@ from agintor.schemas import (
     ToolSpec,
 )
 from agintor.shell import AgentPool, FixedShell
-from agintor.tool_runtime import SafetyGuard, SandboxManager, validate_expression_tool, validate_tool_candidate
+from agintor.tool_runtime import RegisteredTool, SafetyGuard, SandboxManager, validate_expression_tool, validate_tool_candidate
 
 
 def test_patch_roundtrip_exact_replace() -> None:
@@ -152,6 +159,38 @@ def test_graph_type_contracts_match_spec() -> None:
         "EnvironmentFingerprint",
         "ArtifactSignature",
     }
+
+
+def test_run_result_inline_trace_ref_roundtrips_trace_rows() -> None:
+    trace = [{"event": "tool_operation", "tool": "math/basic/sum_numbers"}, {"event": "stop", "verified": True}]
+    run = RunResult(
+        task_id="top.sum_product",
+        seed=0,
+        artifact={"sum": 10},
+        verifier_score=1.0,
+        cost=0.0,
+        latency=0.0,
+        faults=0,
+        trace=trace,
+        trace_path=None,
+    )
+
+    trace_ref = run.trace_ref()
+    assert trace_ref.startswith("inline-json:")
+    assert RunResult.decode_trace_ref(trace_ref) == trace
+
+    ref_only = RunResult(
+        task_id="top.sum_product",
+        seed=0,
+        artifact={"sum": 10},
+        verifier_score=1.0,
+        cost=0.0,
+        latency=0.0,
+        faults=0,
+        trace=[],
+        trace_path=trace_ref,
+    )
+    assert ref_only.trace_rows() == trace
 
 def test_generated_tool_spec_uses_resolved_dependency_args(runtime_dir: Path, tmp_path: Path) -> None:
     runtime = load_runtime(runtime_dir)
@@ -299,6 +338,26 @@ def test_stage1_smoke_ignores_volatile_trace_fields(tmp_path: Path) -> None:
     assert stage1.passed is True
 
 
+def test_inline_trace_refs_roundtrip_without_persisted_trace_file() -> None:
+    run = RunResult(
+        task_id="tool.inline_trace",
+        seed=0,
+        artifact={"ok": True},
+        verifier_score=1.0,
+        cost=0.0,
+        latency=0.0,
+        faults=0,
+        trace=[{"event": "agent_start"}, {"event": "stop"}],
+        trace_path=None,
+    )
+
+    trace_ref = run.trace_ref()
+
+    assert trace_ref.startswith("inline-json:")
+    assert run.trace_rows() == [{"event": "agent_start"}, {"event": "stop"}]
+    assert RunResult.decode_trace_ref(trace_ref) == [{"event": "agent_start"}, {"event": "stop"}]
+
+
 def test_evaluator_preserves_long_term_within_ordered_episode(runtime_dir: Path, tmp_path: Path) -> None:
     first = BenchmarkTask(
         task_id="episode.first",
@@ -378,6 +437,8 @@ def test_archive_insert_and_select_parent(runtime_dir: Path, demo_suite, provide
     assert inserted
     record = archive.select_parent("sbar:global", seed=0)
     assert record.entry.runtime_hash == runtime.runtime_hash
+    assert record.entry.trace_refs
+    assert all(ref.startswith("inline-json:") for ref in record.entry.trace_refs)
 
 
 
@@ -401,11 +462,40 @@ def test_async_tool_handle_completes(runtime_dir: Path, provider_local, tmp_path
     shell.open_handles.add(handle)
     finished = shell.tool_executor.await_handle(handle.handle_id, shell.open_handles)
     assert finished["state"] == "completed"
+    assert handle.stdout_path is None
+    assert handle.stderr_path is None
     assert shell.open_handles.get(handle.handle_id).state == "completed"
     registered = shell.tool_registry.get("generated/local/async123")
     assert registered.historical_runs == 1
     assert registered.historical_passes == 1
     assert registered.distinct_tasks == {"task_async"}
+
+
+def test_executor_backed_async_tool_requires_materialized_source(tmp_path: Path) -> None:
+    shell = FixedShell(tmp_path / "shell_executor_async")
+    spec = ToolSpec(
+        name="generated/local/executor_async",
+        category_path=["generated", "local"],
+        signature="(x)->value",
+        description="executor backed async test",
+        runtime="python",
+        deps=[],
+        permissions=[],
+        tests=[],
+        backgroundable=True,
+        state_schema={},
+        source_digest="executor",
+        build_cmd="python -m py_compile tool.py",
+        run_cmd="python tool.py",
+        timeout_s=10,
+        determinism_class="stable",
+    )
+    shell.tool_registry._tools[spec.name] = RegisteredTool(spec=spec, executor=lambda x: x + 1)
+    shell.tool_registry._category_summaries.setdefault("generated/local", spec.description)
+
+    with pytest.raises(ValidationError):
+        shell.tool_executor.launch_async(spec.name, {"x": 4}, tmp_path / "handles", "task_executor_async")
+    assert (tmp_path / "handles").exists() is False
 
 
 def test_async_launches_use_distinct_files_and_accumulate_stats(tmp_path: Path) -> None:
@@ -415,8 +505,11 @@ def test_async_launches_use_distinct_files_and_accumulate_stats(tmp_path: Path) 
     shell.tool_registry.register_generated_tool(spec, source, executor=executor)
     first = shell.tool_executor.launch_async("generated/local/async_multi", {"a": 2, "b": 3}, tmp_path / "handles", "task_a")
     second = shell.tool_executor.launch_async("generated/local/async_multi", {"a": 4, "b": 5}, tmp_path / "handles", "task_b")
-    assert first.stdout_path != second.stdout_path
-    assert first.stderr_path != second.stderr_path
+    assert first.handle_id != second.handle_id
+    assert first.stdout_path is None
+    assert second.stdout_path is None
+    assert first.stderr_path is None
+    assert second.stderr_path is None
     shell.open_handles.add(first)
     shell.open_handles.add(second)
     first_result = shell.tool_executor.await_handle(first.handle_id, shell.open_handles)
@@ -438,8 +531,6 @@ def test_wait_async_fails_when_process_handle_is_missing(tmp_path: Path) -> None
     record = shell.tool_executor._async_processes.pop(handle.handle_id)
     record.process.kill()
     record.process.wait()
-    record.stdout_handle.close()
-    record.stderr_handle.close()
     result = shell.tool_executor.wait_async(handle)
     assert result.success is False
     assert "missing" in result.stderr
@@ -700,11 +791,12 @@ def test_docker_executor_mounts_key_file_from_provider_env(monkeypatch: pytest.M
 
     monkeypatch.setattr(container_runtime_module.subprocess, "run", fake_run)
 
+    provider = build_provider("minimax")
     results = executor.run_unit(
         runtime_dir,
         [build_demo_suite().train[0]],
         0,
-        provider_name="minimax",
+        provider=provider,
     )
 
     assert results[0].task_id == "top.sum_product"
@@ -713,7 +805,52 @@ def test_docker_executor_mounts_key_file_from_provider_env(monkeypatch: pytest.M
         for index, item in enumerate(command):
             if item == "-v":
                 mounts.append(str(command[index + 1]))
-    assert any(str(key_file.resolve()) in mount and "/mnt/keys/provider_api_key.txt:ro" in mount for mount in mounts)
+    assert any(str(key_file.resolve()) in mount and "/mnt/provider_files/" in mount for mount in mounts)
+    assert any(mount.endswith(":/mnt/provider.json:ro") for mount in mounts)
+
+
+def test_evaluator_docker_batches_ordered_task_runs_once(runtime_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    suite = BenchmarkSuite(
+        name="docker_batch",
+        train=build_demo_suite().train[:2],
+        val=[],
+        test=[],
+        proxy=[build_demo_suite().train[0]],
+    )
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps([{"text": "recorded"}] * 8), encoding="utf-8")
+    provider = build_provider("replay", replay_file=str(replay_file))
+    evaluator = RuntimeEvaluator(suite, tmp_path / "eval_docker_batch", provider, runtime_backend="docker")
+    calls: list[list[tuple[str, int]]] = []
+
+    def fake_run_batch(self, runtime_dir_arg, task_runs, *, provider, runtime_profile=None):
+        calls.append([(task.task_id, seed) for task, seed in task_runs])
+        return [
+            RunResult(
+                task_id=task.task_id,
+                seed=seed,
+                artifact=task.expected,
+                verifier_score=1.0,
+                cost=0.0,
+                latency=0.0,
+                faults=0,
+                trace_path=str(tmp_path / f"{task.task_id}_{seed}.json"),
+            )
+            for task, seed in task_runs
+        ]
+
+    monkeypatch.setattr(DockerRuntimeExecutor, "run_batch", fake_run_batch)
+
+    evaluation = evaluator.evaluate_runtime(runtime_dir, partition="train", seeds=[0, 1], use_cache=False, tasks_override=suite.train)
+
+    assert len(calls) == 1
+    assert calls[0] == [
+        (suite.train[0].task_id, 0),
+        (suite.train[1].task_id, 0),
+        (suite.train[0].task_id, 1),
+        (suite.train[1].task_id, 1),
+    ]
+    assert len(evaluation.run_results) == 4
 
 
 def test_open_handle_table_rejects_incomplete_handles(tmp_path: Path) -> None:
@@ -723,14 +860,320 @@ def test_open_handle_table_rejects_incomplete_handles(tmp_path: Path) -> None:
             handle_id="h1",
             tool_name="generated/local/test",
             sandbox_hash="hash",
-            working_directory="wd",
+            working_directory="",
             launch_time=0.0,
             timeout=10.0,
-            stdout_path="stdout.log",
-            stderr_path="",
+            stdout_path=None,
+            stderr_path=None,
             state="running",
             artifact_refs=[],
         )
     )
     with pytest.raises(HardInvalidation):
         shell.open_handles.validate()
+
+
+def test_retry_provider_retries_transient_error() -> None:
+    from agintor.providers import RetryProvider
+
+    class FlakyProvider(LocalDeterministicProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("429 rate limit")
+            return super().generate(request)
+
+    wrapped = FlakyProvider()
+    provider = RetryProvider(wrapped, max_retries=2, backoff_s=0.0)
+    response = provider.generate(ModelRequest(instructions="", prompt="ok", model_class="small", seed=0, metadata={}))
+
+    assert response.text == "ok"
+    assert wrapped.calls == 2
+    events = provider.audit_trail()
+    assert events[0]["event"] == "error"
+    assert events[1]["event"] == "success"
+
+
+def test_failover_provider_uses_secondary_provider() -> None:
+    from agintor.providers import FailoverProvider
+
+    class BrokenProvider(LocalDeterministicProvider):
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            raise RuntimeError("provider unavailable")
+
+    provider = FailoverProvider([BrokenProvider(), LocalDeterministicProvider()])
+    response = provider.generate(ModelRequest(instructions="", prompt="hello", model_class="small", seed=0, metadata={}))
+
+    assert response.text == "hello"
+    assert provider.last_failures()
+
+
+def test_replay_provider_returns_rows(tmp_path: Path) -> None:
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(
+        json.dumps(
+            [
+                {
+                    "text": "response-a",
+                    "model_name": "replay/small",
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "token_estimate": 3,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider = build_provider("replay", replay_file=str(replay_file))
+    response = provider.generate(ModelRequest(instructions="", prompt="ignored", model_class="small", seed=0, metadata={}))
+
+    assert response.text == "response-a"
+    assert response.token_estimate == 3
+
+
+def test_failover_provider_treats_replay_exhaustion_as_terminal(tmp_path: Path) -> None:
+    from agintor.exceptions import ProviderExhaustedError
+
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps([{"text": "recorded"}]), encoding="utf-8")
+    provider = build_provider("replay", replay_file=str(replay_file), fallback_names=["local"])
+
+    first = provider.generate(ModelRequest(instructions="", prompt="ignored", model_class="small", seed=0, metadata={}))
+    assert first.text == "recorded"
+    with pytest.raises(ProviderExhaustedError):
+        provider.generate(ModelRequest(instructions="", prompt="fallback", model_class="small", seed=0, metadata={}))
+
+
+def test_build_provider_supports_failover_configuration() -> None:
+    provider = build_provider("local", fallback_names=["local"])
+    response = provider.generate(ModelRequest(instructions="", prompt="fallback", model_class="small", seed=0, metadata={}))
+
+    assert response.text == "fallback"
+
+
+def test_build_provider_filters_kwargs_per_backend_for_heterogeneous_failover(tmp_path: Path) -> None:
+    from agintor.providers import FailoverProvider, ReplayProvider
+
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps([]), encoding="utf-8")
+
+    replay_primary = build_provider(
+        "replay",
+        replay_file=str(replay_file),
+        fallback_names=["openai"],
+        api_key="sk-test",
+    )
+    assert isinstance(replay_primary, FailoverProvider)
+    assert isinstance(replay_primary.providers[0], ReplayProvider)
+    assert isinstance(replay_primary.providers[1], OpenAIProvider)
+
+    hosted_primary = build_provider(
+        "openai",
+        api_key="sk-test",
+        fallback_names=["replay"],
+        replay_file=str(replay_file),
+    )
+    assert isinstance(hosted_primary, FailoverProvider)
+    assert isinstance(hosted_primary.providers[0], OpenAIProvider)
+    assert isinstance(hosted_primary.providers[1], ReplayProvider)
+
+
+def test_provider_payload_roundtrip_preserves_wrappers_and_files(tmp_path: Path) -> None:
+    from agintor.providers import FailoverProvider, ReplayProvider, RetryProvider
+
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps([]), encoding="utf-8")
+    key_file = tmp_path / "openai.key"
+    key_file.write_text("sk-test", encoding="utf-8")
+
+    provider = build_provider(
+        "replay",
+        replay_file=str(replay_file),
+        fallback_names=["openai"],
+        api_key_file=str(key_file),
+        max_retries=2,
+    )
+    rebuilt = build_provider_from_payload(provider_payload(provider))
+
+    assert isinstance(rebuilt, FailoverProvider)
+    assert isinstance(rebuilt.providers[0], RetryProvider)
+    assert isinstance(rebuilt.providers[0].wrapped, ReplayProvider)
+    assert rebuilt.providers[0].wrapped.replay_file == str(replay_file)
+    assert isinstance(rebuilt.providers[1], RetryProvider)
+    assert isinstance(rebuilt.providers[1].wrapped, OpenAIProvider)
+    assert rebuilt.providers[1].wrapped.api_key_file == str(key_file)
+    assert rebuilt.providers[1].wrapped.api_key == "sk-test"
+
+
+def test_provider_payload_preserves_explicit_api_key_over_file(tmp_path: Path) -> None:
+    key_file = tmp_path / "openai.key"
+    key_file.write_text("sk-from-file", encoding="utf-8")
+
+    provider = OpenAIProvider(api_key="sk-explicit", api_key_file=str(key_file))
+    payload = provider_payload(provider)
+    rebuilt = build_provider_from_payload(payload)
+
+    assert payload["api_key"] == "sk-explicit"
+    assert isinstance(rebuilt, OpenAIProvider)
+    assert rebuilt.api_key == "sk-explicit"
+    assert rebuilt.api_key_file == str(key_file)
+
+
+def test_docker_executor_serializes_replay_provider_payload(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    replay_file = tmp_path / "replay.json"
+    replay_file.write_text(json.dumps([{"text": "recorded"}]), encoding="utf-8")
+    provider = build_provider("replay", replay_file=str(replay_file), fallback_names=["local"])
+    executor = DockerRuntimeExecutor(tmp_path / "docker_ws", repo_root=Path.cwd())
+    monkeypatch.setattr(DockerRuntimeExecutor, "ensure_image", lambda self: None)
+    captured_commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        captured_commands.append(list(command))
+        output_mount = None
+        for index, item in enumerate(command):
+            if item == "-v":
+                mount = str(command[index + 1])
+                if mount.endswith(":/mnt/output"):
+                    output_mount = mount.split(":/mnt/output", 1)[0]
+                    break
+        assert output_mount is not None
+        output_path = Path(output_mount) / "run_result.json"
+        output_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "top.sum_product",
+                        "seed": 0,
+                        "artifact": {"sum": 10, "product": 30},
+                        "verifier_score": 1.0,
+                        "cost": 0.0,
+                        "latency": 0.0,
+                        "faults": 0,
+                        "trace_path": str(tmp_path / "trace.json"),
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        class Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Completed()
+
+    monkeypatch.setattr(container_runtime_module.subprocess, "run", fake_run)
+
+    executor.run_unit(
+        runtime_dir,
+        [build_demo_suite().train[0]],
+        0,
+        provider=provider,
+    )
+
+    mounts: list[str] = []
+    for command in captured_commands:
+        for index, item in enumerate(command):
+            if item == "-v":
+                mounts.append(str(command[index + 1]))
+    provider_mount = next(mount for mount in mounts if mount.endswith(":/mnt/provider.json:ro"))
+    provider_json = Path(provider_mount.split(":/mnt/provider.json:ro", 1)[0])
+    payload = json.loads(provider_json.read_text(encoding="utf-8"))
+    assert payload["kind"] == "failover"
+    assert payload["providers"][0]["kind"] == "replay"
+    assert payload["providers"][0]["replay_file"].startswith("/mnt/provider_files/")
+    assert any(str(replay_file.resolve()) in mount and "/mnt/provider_files/" in mount for mount in mounts)
+
+
+def test_docker_executor_serializes_retry_and_key_file_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    key_file = tmp_path / "openai.key"
+    key_file.write_text("sk-test", encoding="utf-8")
+    provider = build_provider("openai", api_key_file=str(key_file), max_retries=2, fallback_names=["minimax"])
+    executor = DockerRuntimeExecutor(tmp_path / "docker_ws", repo_root=Path.cwd())
+    monkeypatch.setattr(DockerRuntimeExecutor, "ensure_image", lambda self: None)
+
+    def fake_run(command, **kwargs):
+        output_mount = None
+        for index, item in enumerate(command):
+            if item == "-v":
+                mount = str(command[index + 1])
+                if mount.endswith(":/mnt/output"):
+                    output_mount = mount.split(":/mnt/output", 1)[0]
+                    break
+        assert output_mount is not None
+        output_path = Path(output_mount) / "run_result.json"
+        output_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "top.sum_product",
+                        "seed": 0,
+                        "artifact": {"sum": 10, "product": 30},
+                        "verifier_score": 1.0,
+                        "cost": 0.0,
+                        "latency": 0.0,
+                        "faults": 0,
+                        "trace_path": str(tmp_path / "trace.json"),
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        class Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Completed()
+
+    monkeypatch.setattr(container_runtime_module.subprocess, "run", fake_run)
+
+    executor.run_unit(
+        runtime_dir,
+        [build_demo_suite().train[0]],
+        0,
+        provider=provider,
+    )
+
+    provider_json = next((tmp_path / "docker_ws").rglob("provider.json"))
+    payload = json.loads(provider_json.read_text(encoding="utf-8"))
+    assert payload["kind"] == "failover"
+    assert payload["providers"][0]["kind"] == "retry"
+    assert payload["providers"][0]["wrapped"]["kind"] == "openai"
+    assert payload["providers"][0]["wrapped"]["api_key_file"].startswith("/mnt/provider_files/")
+    assert payload["providers"][0]["max_retries"] == 2
+    assert payload["providers"][1]["kind"] == "retry"
+    assert payload["providers"][1]["wrapped"]["kind"] == "minimax"
+
+
+def test_provider_environment_names_unwrap_retry_provider() -> None:
+    from agintor.providers import RetryProvider, provider_environment_names_for_instance
+
+    provider = RetryProvider(OpenAIProvider(api_key="sk-test"), max_retries=1, backoff_s=0.0)
+    env_names = provider_environment_names_for_instance(provider, include_api_key_file_env=True)
+
+    assert "OPENAI_API_KEY" in env_names
+    assert "OPENAI_BASE_URL" in env_names
+    assert "AGINTOR_OPENAI_KEY_FILE" in env_names
+
+
+def test_provider_environment_names_unwrap_failover_provider() -> None:
+    from agintor.providers import FailoverProvider, provider_environment_names_for_instance
+
+    provider = FailoverProvider([
+        OpenAIProvider(api_key="sk-test"),
+        MiniMaxProvider(api_key="sk-test"),
+    ])
+    env_names = provider_environment_names_for_instance(provider, include_api_key_file_env=True)
+
+    assert "OPENAI_API_KEY" in env_names
+    assert "AGINTOR_MAS_MINIMAX_API_KEY" in env_names
+    assert "AGINTOR_MAS_MINIMAX_KEY_FILE" in env_names

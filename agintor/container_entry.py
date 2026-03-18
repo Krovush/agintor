@@ -5,7 +5,7 @@ import inspect
 import json
 from pathlib import Path
 
-from .providers import build_provider
+from .providers import build_provider_from_payload
 from .pydantic_compat import model_dump, model_validate
 from .runner import TaskRuntime
 from .runtime_profile import load_runtime_profile
@@ -22,32 +22,35 @@ def _supported_kwargs(callable_obj, **kwargs):
     return {key: value for key, value in kwargs.items() if key in params}
 
 
-def _run_runtime_unit(args: argparse.Namespace) -> int:
-    tasks = [
-        model_validate(BenchmarkTask, item)
-        for item in json.loads(Path(args.tasks_json).read_text(encoding="utf-8"))
-    ]
+def _run_runtime_batch(args: argparse.Namespace) -> int:
+    task_runs = json.loads(Path(args.task_runs_json).read_text(encoding="utf-8"))
+    if not isinstance(task_runs, list):
+        raise ValueError("task runs payload must be a JSON array")
     runtime_profile = load_runtime_profile(args.runtime_dir, profile_path=args.profile_json)
-    provider_profile = None
-    if runtime_profile.runtime_provider.name == args.provider:
-        provider_profile = runtime_profile.runtime_provider
-    provider = build_provider(
-        args.provider,
-        provider_profile=provider_profile,
-        api_key_file=args.api_key_file,
-    )
+    provider_payload = json.loads(Path(args.provider_json).read_text(encoding="utf-8"))
+    provider = build_provider_from_payload(provider_payload)
     runtime = load_runtime(args.runtime_dir, runtime_profile=runtime_profile)
-    shell = FixedShell(
-        Path(args.workspace),
-        **_supported_kwargs(FixedShell, profile=runtime_profile),
-    )
-    runner = TaskRuntime(
-        runtime,
-        shell,
-        provider,
-        **_supported_kwargs(TaskRuntime, runtime_profile=runtime_profile),
-    )
-    results: list[RunResult] = [runner.run_task(task, int(args.seed)) for task in tasks]
+    results: list[RunResult] = []
+    runners_by_seed: dict[int, TaskRuntime] = {}
+    for item in task_runs:
+        if not isinstance(item, dict):
+            raise ValueError("task runs entries must be JSON objects")
+        seed = int(item["seed"])
+        task = model_validate(BenchmarkTask, item["task"])
+        runner = runners_by_seed.get(seed)
+        if runner is None:
+            shell = FixedShell(
+                Path(args.workspace) / f"seed_{seed}",
+                **_supported_kwargs(FixedShell, profile=runtime_profile),
+            )
+            runner = TaskRuntime(
+                runtime,
+                shell,
+                provider,
+                **_supported_kwargs(TaskRuntime, runtime_profile=runtime_profile),
+            )
+            runners_by_seed[seed] = runner
+        results.append(runner.run_task(task, seed))
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps([model_dump(result) for result in results], indent=2, sort_keys=True), encoding="utf-8")
@@ -58,19 +61,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m agintor.container_entry")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run_unit = subparsers.add_parser("run-runtime-unit")
-    run_unit.add_argument("--runtime-dir", required=True)
-    run_unit.add_argument("--tasks-json", required=True)
-    run_unit.add_argument("--seed", required=True)
-    run_unit.add_argument("--provider", required=True)
-    run_unit.add_argument("--api-key-file")
-    run_unit.add_argument("--profile-json")
-    run_unit.add_argument("--output-json", required=True)
-    run_unit.add_argument("--workspace", required=True)
+    run_batch = subparsers.add_parser("run-runtime-batch")
+    run_batch.add_argument("--runtime-dir", required=True)
+    run_batch.add_argument("--task-runs-json", required=True)
+    run_batch.add_argument("--provider-json", required=True)
+    run_batch.add_argument("--profile-json")
+    run_batch.add_argument("--output-json", required=True)
+    run_batch.add_argument("--workspace", required=True)
 
     args = parser.parse_args(argv)
-    if args.command == "run-runtime-unit":
-        return _run_runtime_unit(args)
+    if args.command == "run-runtime-batch":
+        return _run_runtime_batch(args)
     raise ValueError(args.command)
 
 

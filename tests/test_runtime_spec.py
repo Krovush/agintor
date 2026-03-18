@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from agintor.benchmarks import build_demo_suite
@@ -59,7 +58,7 @@ def test_provider_backed_local_synthesis_returns_useful_output(runtime_dir: Path
     task = suite.by_id("proxy.tool.provider_synthesis")
     evaluator = RuntimeEvaluator(suite, tmp_path / "provider_eval", provider_local, baseline_runtime_dir=None)
     run = evaluator.evaluate_runtime(runtime_dir, partition="proxy", seeds=[0], use_cache=False, tasks_override=[task]).run_results[0]
-    trace = json.loads(Path(run.trace_path).read_text(encoding="utf-8"))
+    trace = run.trace_rows()
     assert run.hard_invalid is False
     assert run.artifact == 7
     assert "model_response" in [row.get("event") for row in trace]
@@ -97,7 +96,7 @@ def test_compaction_proxy_limits_summary_calls(runtime_dir: Path, provider_local
     task = suite.by_id("proxy.mem.compaction_trace")
     evaluator = RuntimeEvaluator(suite, tmp_path / "eval_compaction", provider_local, baseline_runtime_dir=None)
     run = evaluator.evaluate_runtime(runtime_dir, partition="proxy", seeds=[0], use_cache=False, tasks_override=[task]).run_results[0]
-    trace = json.loads(Path(run.trace_path).read_text(encoding="utf-8"))
+    trace = run.trace_rows()
     assert run.hard_invalid is False
     assert run.verifier_score == 1.0
     assert any(row.get("event") == "compaction" for row in trace)

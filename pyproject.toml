@@ -38,7 +38,7 @@ agintor = ["templates/baseline_runtime/*", "templates/prompts/*.json", "examples
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-q --basetemp=tests/_artifacts/pytest/tmp"
+addopts = "-q -p no:cacheprovider --assert=plain"
 testpaths = ["tests"]
 norecursedirs = ["_artifacts"]
 markers = [

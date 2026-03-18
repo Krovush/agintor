@@ -84,6 +84,7 @@ def test_evolution_updates_scope_credit_for_fully_evaluated_rejected_child_witho
     engine = EvolutionEngine(suite, tmp_path / "evo", LocalDeterministicProvider(), runtime_dir, mutator_type="heuristic")
     objective = ObjectiveSpec(name="sbar:tool", kind=ObjectiveKind.FAMILY, family="tool")
     scope = ["tool", "ctl"]
+    child_dir = init_runtime(tmp_path / "child_rejected")
     parent_eval = SuiteEvaluation(
         runtime_hash="parent",
         objective_scores={"sbar:tool": 0.50, "sbar:global": 0.50},
@@ -135,7 +136,7 @@ def test_evolution_updates_scope_credit_for_fully_evaluated_rejected_child_witho
             EvaluationStageResult(stage=3, passed=True, reason="ok"),
             EvaluationStageResult(stage=4, passed=True, reason="full", suite_evaluation=child_eval),
         ],
-        runtime_dir,
+        child_dir,
     )
     engine.archive.insert = lambda *args, **kwargs: []  # type: ignore[method-assign]
     credit_updates: list[tuple[str, tuple[str, ...], float]] = []
@@ -148,6 +149,7 @@ def test_evolution_updates_scope_credit_for_fully_evaluated_rejected_child_witho
     assert credit_updates == [(objective.name, tuple(scope), pytest.approx(-0.05))]
     assert counterfactual_updates == []
     assert engine.history[0].accepted is False
+    assert child_dir.exists() is False
 
 
 def test_evolution_updates_predictors_after_full_evaluation(tmp_path: Path) -> None:

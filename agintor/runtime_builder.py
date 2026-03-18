@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,9 +13,16 @@ from .goal_rubric import derive_goal_expectations
 from .project import init_runtime
 from .providers import ModelProvider
 from .pydantic_compat import model_copy
+from .runtime_loader import (
+    RUNTIME_ABI_VERSION,
+    RUNTIME_EXPORT_BUNDLE_FILE,
+    RUNTIME_PROVENANCE_BUNDLE_FILE,
+    load_runtime,
+    runtime_identity_inputs,
+)
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, profile_to_json
 from .schemas import ArchiveEntry, ArchiveRecord
-from .utils import ensure_directory, stable_hash
+from .utils import ensure_directory, file_digest, stable_hash
 
 
 @dataclass
@@ -94,6 +103,59 @@ def build_goal_conditioned_suite(goal_prompt: str, profile: RuntimeProfile) -> B
         proxy=list(suite.proxy),
     )
 
+def _runtime_file_digests(runtime_dir: Path) -> dict[str, str]:
+    skip_names = {"__pycache__", RUNTIME_PROVENANCE_BUNDLE_FILE}
+    skip_suffixes = (".pyc", ".pyo")
+    digests: dict[str, str] = {}
+    for path in sorted(runtime_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(runtime_dir).as_posix()
+        if any(part in skip_names for part in Path(rel).parts):
+            continue
+        if rel.endswith(skip_suffixes):
+            continue
+        digests[rel] = file_digest(path)
+    return digests
+
+
+@contextlib.contextmanager
+def _without_bytecode_writes():
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        yield
+    finally:
+        sys.dont_write_bytecode = previous
+
+
+def _write_runtime_provenance_bundle(
+    destination_path: Path,
+    *,
+    runtime_hash: str,
+    code_hash: str,
+    runtime_provider: str,
+    source_runtime_dir: str,
+    goal_prompt: str,
+    runtime_identity: dict[str, dict[str, str]],
+) -> None:
+    artifact_file_digests = _runtime_file_digests(destination_path)
+    payload = {
+        "schema_version": "agintor.runtime.provenance.v1",
+        "runtime_abi": RUNTIME_ABI_VERSION,
+        "runtime_hash": runtime_hash,
+        "code_hash": code_hash,
+        "runtime_provider": runtime_provider,
+        "source_runtime_dir": source_runtime_dir,
+        "goal_prompt": goal_prompt,
+        "runtime_identity_inputs": runtime_identity,
+        "artifact_file_digests": artifact_file_digests,
+    }
+    payload["attestation_hash"] = stable_hash(payload)
+    (destination_path / RUNTIME_PROVENANCE_BUNDLE_FILE).write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 def _mean_goal_score(scores: dict[str, float], goal_keys: list[str]) -> float:
     if not goal_keys:
@@ -176,6 +238,7 @@ def build_runtime_from_goal(
     profile_path: str | Path | None = None,
     runtime_backend: str | None = None,
     force: bool = False,
+    retain_artifacts: bool = True,
 ) -> BuiltRuntimeResult:
     clean_goal = _canonical_goal_prompt(goal_prompt)
     if not clean_goal:
@@ -198,6 +261,7 @@ def build_runtime_from_goal(
         runtime_backend=runtime_backend,
         runtime_profile=merged_profile,
         profile_path=Path(profile_path) if profile_path is not None else None,
+        retain_artifacts=retain_artifacts,
     )
     summary = engine.run(steps=steps)
     candidates = _export_candidate_records(engine, goal_keys)
@@ -211,7 +275,43 @@ def build_runtime_from_goal(
             shutil.rmtree(destination_path)
         else:
             destination_path.unlink()
-    shutil.copytree(Path(leader.runtime_dir), destination_path)
+    shutil.copytree(
+        Path(leader.runtime_dir),
+        destination_path,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+    with _without_bytecode_writes():
+        exported_runtime = load_runtime(destination_path, runtime_profile=merged_profile)
+    runtime_hash = exported_runtime.runtime_hash
+    code_hash = exported_runtime.code_hash
+    manifest_version = exported_runtime.manifest.version
+    runtime_id = exported_runtime.manifest.runtime_id
+    identity_inputs = runtime_identity_inputs(destination_path, runtime_profile=merged_profile)
+    export_bundle = {
+        "runtime_abi": RUNTIME_ABI_VERSION,
+        "runtime_hash": runtime_hash,
+        "code_hash": code_hash,
+        "manifest_version": manifest_version,
+        "runtime_id": runtime_id,
+        "runtime_provider": merged_profile.runtime_provider.name,
+        "source_runtime_dir": str(leader.runtime_dir),
+        "selection_policy": "goal_score_mean_then_validation",
+        "export_bundle_file": RUNTIME_EXPORT_BUNDLE_FILE,
+        "provenance_bundle_file": RUNTIME_PROVENANCE_BUNDLE_FILE,
+    }
+    (destination_path / RUNTIME_EXPORT_BUNDLE_FILE).write_text(
+        json.dumps(export_bundle, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    _write_runtime_provenance_bundle(
+        destination_path,
+        runtime_hash=runtime_hash,
+        code_hash=code_hash,
+        runtime_provider=merged_profile.runtime_provider.name,
+        source_runtime_dir=str(leader.runtime_dir),
+        goal_prompt=clean_goal,
+        runtime_identity=identity_inputs,
+    )
     summary_path = build_root / "build_summary.json"
     payload = {
         "goal_prompt": clean_goal,
@@ -230,6 +330,9 @@ def build_runtime_from_goal(
         "leader_runtime_dir": str(leader.runtime_dir),
         "leader_runtime_hash": leader.entry.runtime_hash,
         "selection_policy": "goal_score_mean_then_validation",
+        "runtime_abi": RUNTIME_ABI_VERSION,
+        "export_bundle_file": RUNTIME_EXPORT_BUNDLE_FILE,
+        "provenance_bundle_file": RUNTIME_PROVENANCE_BUNDLE_FILE,
     }
     summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return BuiltRuntimeResult(

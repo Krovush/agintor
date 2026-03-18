@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .providers import (
-    provider_api_key_file_env_name,
-    provider_environment_names,
-    provider_profile_for_name,
+    ModelProvider,
+    provider_environment_names_for_instance,
+    provider_payload,
+    provider_payload_file_paths,
+    rewrite_provider_payload_file_paths,
 )
 from .pydantic_compat import model_dump, model_validate
 from .runtime_profile import RuntimeProfile
@@ -24,11 +27,13 @@ class DockerRuntimeExecutor:
         repo_root: Path | None = None,
         image_name_prefix: str = "agintor-runtime",
         base_image: str = "python:3.11-slim",
+        retain_artifacts: bool = True,
     ) -> None:
         self.workspace = ensure_directory(workspace)
         self.repo_root = repo_root or Path(__file__).resolve().parent.parent
         self.image_name_prefix = image_name_prefix
         self.base_image = base_image
+        self.retain_artifacts = retain_artifacts
         self.image_tag = f"{self.image_name_prefix}:{self._source_digest()[:12]}"
 
     def _source_digest(self) -> str:
@@ -85,16 +90,14 @@ class DockerRuntimeExecutor:
         task: BenchmarkTask,
         seed: int,
         *,
-        provider_name: str,
-        api_key_file: str | Path | None = None,
+        provider: ModelProvider,
         runtime_profile: RuntimeProfile | None = None,
     ) -> RunResult:
         return self.run_unit(
             runtime_dir,
             [task],
             seed,
-            provider_name=provider_name,
-            api_key_file=api_key_file,
+            provider=provider,
             runtime_profile=runtime_profile,
         )[0]
 
@@ -104,74 +107,88 @@ class DockerRuntimeExecutor:
         tasks: list[BenchmarkTask],
         seed: int,
         *,
-        provider_name: str,
-        api_key_file: str | Path | None = None,
+        provider: ModelProvider,
+        runtime_profile: RuntimeProfile | None = None,
+    ) -> list[RunResult]:
+        task_runs = [(task, seed) for task in tasks]
+        return self.run_batch(
+            runtime_dir,
+            task_runs,
+            provider=provider,
+            runtime_profile=runtime_profile,
+        )
+
+    def run_batch(
+        self,
+        runtime_dir: str | Path,
+        task_runs: list[tuple[BenchmarkTask, int]],
+        *,
+        provider: ModelProvider,
         runtime_profile: RuntimeProfile | None = None,
     ) -> list[RunResult]:
         self.ensure_image()
         runtime_path = Path(runtime_dir).resolve()
-        task_payload = [model_dump(task) for task in tasks]
+        task_run_payload = [
+            {
+                "seed": int(seed),
+                "task": model_dump(task),
+            }
+            for task, seed in task_runs
+        ]
         profile_payload = model_dump(runtime_profile) if runtime_profile is not None else None
+        provider_config = provider_payload(provider)
         run_dir = ensure_directory(
             self.workspace
-            / stable_hash(runtime_path, task_payload, seed, provider_name, profile_payload, self.base_image)[:12]
+            / stable_hash(runtime_path, task_run_payload, provider_config, profile_payload, self.base_image)[:12]
         )
-        task_json = run_dir / "tasks.json"
+        task_runs_json = run_dir / "task_runs.json"
         profile_json = run_dir / "profile.json"
+        provider_json = run_dir / "provider.json"
         output_json = run_dir / "run_result.json"
         workspace_dir = ensure_directory(run_dir / "workspace")
-        task_json.write_text(json.dumps(task_payload, indent=2, sort_keys=True), encoding="utf-8")
+        task_runs_json.write_text(json.dumps(task_run_payload, indent=2, sort_keys=True), encoding="utf-8")
         if profile_payload is not None:
             profile_json.write_text(json.dumps(profile_payload, indent=2, sort_keys=True), encoding="utf-8")
         mounts = [
             f"{runtime_path}:/mnt/runtime:ro",
-            f"{task_json.resolve()}:/mnt/tasks.json:ro",
+            f"{task_runs_json.resolve()}:/mnt/task_runs.json:ro",
             f"{workspace_dir.resolve()}:/mnt/workspace",
             f"{output_json.parent.resolve()}:/mnt/output",
         ]
         if profile_payload is not None:
             mounts.append(f"{profile_json.resolve()}:/mnt/profile.json:ro")
+        provider_file_map: dict[str, str] = {}
+        for index, host_path_text in enumerate(provider_payload_file_paths(provider_config)):
+            host_path = Path(host_path_text).resolve()
+            container_path = f"/mnt/provider_files/{index}_{host_path.name}"
+            mounts.append(f"{host_path}:{container_path}:ro")
+            provider_file_map[host_path_text] = container_path
+        provider_json.write_text(
+            json.dumps(rewrite_provider_payload_file_paths(provider_config, provider_file_map), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        mounts.append(f"{provider_json.resolve()}:/mnt/provider.json:ro")
         command = [
             "docker",
             "run",
             "--rm",
         ]
-        provider_profile = None
-        if runtime_profile is not None:
-            provider_profile = provider_profile_for_name(provider_name, runtime_profile.runtime_provider)
-        for env_name in provider_environment_names(provider_name, provider_profile=provider_profile):
+        for env_name in provider_environment_names_for_instance(provider):
             env_value = os.environ.get(env_name)
             if env_value:
                 command.extend(["-e", f"{env_name}={env_value}"])
         for mount in mounts:
             command.extend(["-v", mount])
-        container_key_path: str | None = None
-        host_key_path: Path | None = None
-        if api_key_file:
-            host_key_path = Path(api_key_file).resolve()
-        else:
-            api_key_file_env = provider_api_key_file_env_name(
-                provider_name,
-                provider_profile=provider_profile,
-            )
-            env_key_path = os.environ.get(api_key_file_env) if api_key_file_env else None
-            if env_key_path:
-                host_key_path = Path(env_key_path).resolve()
-        if host_key_path is not None:
-            container_key_path = "/mnt/keys/provider_api_key.txt"
-            command.extend(["-v", f"{host_key_path}:{container_key_path}:ro"])
         command.extend(
             [
                 self.image_tag,
-                "run-runtime-unit",
+                "run-runtime-batch",
                 "--runtime-dir",
                 "/mnt/runtime",
-                "--tasks-json",
-                "/mnt/tasks.json",
-                "--seed",
-                str(seed),
-                "--provider",
-                provider_name,
+                "--task-runs-json",
+                "/mnt/task_runs.json",
+                "--provider-json",
+                "/mnt/provider.json",
                 "--output-json",
                 "/mnt/output/run_result.json",
                 "--workspace",
@@ -180,8 +197,6 @@ class DockerRuntimeExecutor:
         )
         if profile_payload is not None:
             command.extend(["--profile-json", "/mnt/profile.json"])
-        if container_key_path:
-            command.extend(["--api-key-file", container_key_path])
         completed = subprocess.run(
             command,
             capture_output=True,
@@ -192,4 +207,7 @@ class DockerRuntimeExecutor:
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "docker run failed")
-        return [model_validate(RunResult, payload) for payload in json.loads(output_json.read_text(encoding="utf-8"))]
+        results = [model_validate(RunResult, payload) for payload in json.loads(output_json.read_text(encoding="utf-8"))]
+        if not self.retain_artifacts:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        return results

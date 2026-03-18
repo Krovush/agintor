@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from .schemas import SuiteEvaluation
@@ -15,14 +13,6 @@ class PredictorObservation:
     label_probability: float | None = None
     label_positive_scalar: float | None = None
     metadata: dict[str, object] | None = None
-
-
-def _load_trace(trace_path: str) -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(Path(trace_path).read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    return payload if isinstance(payload, list) else []
 
 
 def _event_counts(trace: list[dict[str, Any]]) -> dict[str, int]:
@@ -55,7 +45,7 @@ def extract_predictor_observations(
 ) -> list[PredictorObservation]:
     observations: list[PredictorObservation] = []
     for run in evaluation.run_results:
-        trace = _load_trace(run.trace_path)
+        trace = run.trace_rows()
         counts = _event_counts(trace)
         family_name = task_family_map.get(run.task_id, "")
         family_bias = float(["top", "mem", "tool", "e2e"].index(family_name)) if family_name in {"top", "mem", "tool", "e2e"} else 0.0
@@ -83,6 +73,7 @@ def extract_predictor_observations(
                 "task_family": family_name,
                 "task_id": run.task_id,
                 "trace_path": run.trace_path,
+                "trace_ref": run.trace_ref(),
             }
             observations.append(
                 PredictorObservation(

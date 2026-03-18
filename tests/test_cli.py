@@ -38,6 +38,25 @@ def test_cli_init_solve_eval(tmp_path: Path) -> None:
     assert eval_payload["provider_usage"]["calls"] == sum(run["model_calls"] for run in eval_payload["run_results"])
 
 
+def test_cli_default_solve_eval_do_not_create_repo_workspace_dirs(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    suite_path = tmp_path / "demo_suite.json"
+    init_result = runner.invoke(app, ["init-runtime", str(runtime_dir), "--write-demo-suite", str(suite_path)])
+    assert init_result.exit_code == 0, init_result.output
+
+    solve = runner.invoke(app, ["solve", str(runtime_dir), "top.sum_product", "--suite", str(suite_path), "--provider", "local"])
+    assert solve.exit_code == 0, solve.output
+    solve_payload = json.loads(solve.output)
+    assert solve_payload["result"]["trace_path"] is None
+    assert (Path.cwd() / ".agintor_runs").exists() is False
+
+    evaluation = runner.invoke(app, ["eval", str(runtime_dir), "--suite", str(suite_path), "--partition", "train", "--seeds", "0", "--provider", "local"])
+    assert evaluation.exit_code == 0, evaluation.output
+    eval_payload = json.loads(evaluation.output)
+    assert all(run["trace_path"] is None for run in eval_payload["run_results"])
+    assert (Path.cwd() / ".agintor_runs").exists() is False
+
+
 def test_cli_solve_defaults_to_runtime_provider_profile(tmp_path: Path, monkeypatch) -> None:
     runtime_dir = tmp_path / "runtime"
     suite_path = tmp_path / "demo_suite.json"

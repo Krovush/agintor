@@ -207,12 +207,12 @@ class QualityDiversityArchive:
     def _trace_refs_for_objective(self, objective: str, evaluation: SuiteEvaluation) -> list[str]:
         if objective.startswith("s:"):
             task_id = objective.split(":", 1)[1]
-            return [run.trace_path for run in evaluation.run_results if run.task_id == task_id]
+            return [run.trace_ref() for run in evaluation.run_results if run.task_id == task_id]
         if ":" in objective:
             _, family = objective.split(":", 1)
             if family in {"top", "mem", "tool", "e2e"}:
-                return [run.trace_path for run in evaluation.run_results if run.task_id.startswith(f"{family}.")]
-        return [run.trace_path for run in evaluation.run_results]
+                return [run.trace_ref() for run in evaluation.run_results if run.task_id.startswith(f"{family}.")]
+        return [run.trace_ref() for run in evaluation.run_results]
 
     def insert(
         self,

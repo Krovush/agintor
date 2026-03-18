@@ -268,6 +268,7 @@ class HostedProviderBase(ModelProvider):
         self.model_envs = {**dict(defaults.get("model_envs", {})), **dict(model_envs or {})}
         self.default_models = {**dict(defaults.get("default_models", {})), **dict(default_models or {})}
         self.pricing_env = pricing_env or defaults.get("pricing_env")
+        self.api_key_explicit = api_key not in (None, "")
         self.api_key_file = str(api_key_file) if api_key_file is not None else os.environ.get(self.api_key_file_env or "")
         self.api_key = resolve_api_key(
             api_key=api_key,
