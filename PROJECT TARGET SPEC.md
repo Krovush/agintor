@@ -1,78 +1,280 @@
-# Agintor: Evolutionary Discovery of Self-Programming Agent Topology, Memory, Tooling, and Control
+## Task
 
-A reconstruction-complete, performance-optimized system specification
+Retain and extend the existing repository structure where it already reflects the correct responsibility boundaries. Add new modules only when there is a real contract gap. Do not bury new functionality inside unrelated files merely to avoid creating a new module, and do not create ornamental abstraction layers that exist only to mirror section headings. The required abstraction layers in this document are responsibility layers and frozen data-contract layers, not instructions to explode the codebase into unnecessary wrappers.
+
+The final Agintor MVP must be a usable CLI product, not just a library and not just an internal benchmark harness.
+
+## Goal
+
+The system must preserve the following ordered abstraction stack, and it must freeze a concrete structured artifact between adjacent layers so that signal is preserved without responsibility leakage:
+
+1. **User goal and deployment intent.** Raw natural-language request plus any explicit user overrides.
+2. **Goal interpretation and normalization.** Capability extraction, constraint extraction, deployment preference extraction, and success-criteria definition.
+3. **Benchmark-family selection and/or goal-conditioned benchmark pressure synthesis.** Translation of the normalized goal into measurable pressure on topology, memory, tooling, end-to-end solving, and control efficiency.
+4. **Verifier and grader generation or adaptation.** Local, deterministic scoring rules and checker ladders frozen before candidate evolution begins.
+5. **Runtime-factory planning and profile resolution.** Resolution of factory-only settings, runtime-only settings, provider roles, backend choices, budget caps, and export ABI.
+6. **Bounded runtime artifact contract.** Concrete definition of what the produced runtime consists of, what is immutable, what is mutable, and what will be exported.
+7. **Fixed runtime host and immutable shell substrate.** The stable execution kernel that loads and runs candidate runtimes.
+8. **Mutable runtime policy surface.** Topology, memory, tooling, and control decision logic that the outer loop is allowed to evolve.
+9. **Task-time runtime execution state and agent orchestration.** Queue state, checkpoints, open handles, message board state, memory state, tool visibility, and solve-time verification requests.
+10. **Staged evaluation, scoring, robustness measurement, and archive insertion.** Factory-side comparison of candidate runtimes under frozen benchmark pressure.
+11. **Outer-loop evolution and leader selection.** Parent selection, mutation or crossover, staged acceptance, diversity preservation, validation, and export leader choice.
+12. **Exported runtime solve and deploy path.** The user-facing produced MAS artifact and the CLI path that runs it after export.
+
+These are the required abstraction layers. They are normative at the level of ownership and information flow. They are not instructions to hand-design every class hierarchy in advance. The coding agent may choose the minimum clean implementation that preserves these boundaries, but it must not collapse them into one undifferentiated system.
+
+Later layers may consume earlier layers only through their frozen structured artifacts. A later layer must not silently reparse raw goal text or raw validation outputs when a normalized artifact already exists. The system must preserve the output of each stage and make it inspectable from the CLI workspace.
+
+The resulting MVP must successfully demonstrate all core functionality through the CLI, including:
+
+- goal intake,
+- requirement normalization,
+- capability and constraint extraction,
+- success-criteria definition,
+- benchmark-family selection and/or synthesis,
+- verifier bundle freeze,
+- runtime planning and seeded runtime creation,
+- bounded runtime evolution,
+- leader validation and export,
+- produced-runtime solve execution,
+- and deploy-path documentation for the exported runtime.
 
 ---
 
-## Abstract
+## 1. Product Definition and Scope
 
-Agintor treats agent-development-kit design as bounded evolutionary search over executable runtime code rather than as prompt tuning around a fixed agent. A candidate runtime mutates only four coupled symbolic decision surfaces inside an immutable self-programming shell: topology, hierarchical memory, dynamic tooling, and budget-verification control. The shell supplies clone-on-run sub-agents, graph-structured short-term and long-term memory, category-organized tools with isolated runtimes, exact or near-exact task verifiers, deterministic logging, and immutable safety and benchmark adapters. Candidate runtimes are proposed through exact SEARCH/REPLACE patches, screened by staged evaluation, and retained in an objective-conditioned quality-diversity archive.
+Agintor is a **runtime factory** for bounded multi-agent systems. It does not search over one benchmark-specific prompt. It searches over executable runtime policy code that decides:
 
-This specification makes the method closed and reconstruction-ready. It defines the fixed shell, mutable genotype, mandatory schemas, runtime state machine, hard invalidation rules, primary and robustness objectives, predictor family, archive descriptors, controller credit assignment, topology search, memory policy, tool synthesis and reuse, verification control, mutation curriculum, compute gates, defaults, and failure modes. The decisive design choice is to co-evolve the interaction surfaces among topology, memory, tools, and control rather than treating them as independent modules. The performance-oriented refinements in this document favor stable search, stronger diversity preservation, lower wasted compute, and tighter runtime efficiency without relaxing determinism or safety.
+- when to reuse or create agents,
+- what to remember, summarize, retrieve, or promote,
+- which tools to reuse or synthesize,
+- which model class and check path to spend budget on,
+- and when to stop.
 
-## 1. Scope, Design Goals, and Core Notation
+The MVP is **CLI-first**. There is no GUI requirement. The CLI is the product surface. Intermediate build artifacts must be human-inspectable and machine-readable.
 
-Agintor searches over runtime logic, not over a benchmark-specific prompt. The search target is the executable code that decides when to reuse or create sub-agents, what evidence to retrieve or summarize, which tools to reuse or synthesize, which model and verifier to spend budget on, and when the system should stop.
+The MVP is intentionally bounded. “Build and evolve a functional and superior MAS of any kind” must be interpreted as:
 
-The method contains two nested loops. The outer loop performs bounded program search over selected source files. The inner loop is the task-time runtime that executes those files to solve a concrete task. Search therefore acts on the control surface that determines downstream agent behavior rather than on behavior directly.
+> build and evolve any multi-agent runtime that can be expressed inside the Agintor runtime contract, tool permission model, verifier model, and deployment ABI.
 
-The design is constrained by three goals:
+It does **not** mean:
 
-1. **Bounded mutability.** Search may rewrite only designated methods inside an immutable shell.
-2. **Deterministic replay.** Parent-child comparisons use common random numbers, frozen adapters, and content-addressed tool environments.
-3. **Subsystem co-evolution.** Topology, memory, tooling, and control are optimized both locally and jointly.
+- arbitrary unsafe code execution,
+- arbitrary internet toolchains,
+- unconstrained autonomous benchmark invention with unverifiable scoring,
+- arbitrary remote deployment infrastructure,
+- or universal superiority on domains that the benchmark and verifier plan never measured.
 
-### 1.1 Core notation
+The MVP must be honest about this boundary. It must still be highly capable inside that boundary.
 
-| Symbol | Meaning |
+The central architectural split is:
+
+- **Agintor factory control plane** builds, evaluates, evolves, validates, and exports runtimes.
+- **Runtime host / fixed shell** loads and runs exported runtimes.
+- **Exported runtime artifact** is the produced MAS runtime configuration plus mutable policy code and related assets.
+- **Mutable runtime policies** are only the solve-time decision surfaces. They are not allowed to own benchmark generation, archive logic, leader selection, or provider secret handling.
+
+The MVP must prefer better runtimes than the seeded baseline under the chosen benchmark pressure, but it must not claim universal superiority outside the frozen evaluation domain.
+
+---
+
+## 2. Canonical Planes and Ownership
+
+The clean separation below is mandatory.
+
+| Plane | Owns | Must not own |
+|---|---|---|
+| **Agintor factory control plane** | goal normalization, success-criteria extraction, benchmark planning, verifier freeze, seed runtime materialization, mutation and crossover, staged evaluation, archive, validation, leader selection, export packaging, build reports | task-time agent reasoning, mutable runtime state, shell invariant bypass, provider secrets inside exports |
+| **Runtime host / immutable shell substrate** | runtime loading, task execution loop, agent cloning, message board, checkpointing, short-term and long-term memory containers, tool registry and executor, sandboxing, safety guards, trace writing, request adaptation, invariant enforcement | goal planning, benchmark planning, archive logic, phase scheduling, leader selection |
+| **Mutable runtime policy surface** | solve-time decision logic for topology, memory, tooling, and control | benchmark mutation, verifier mutation, archive mutation, phase scheduling, provider resolution, direct sandbox or filesystem bypass |
+| **Benchmark and verifier bundle** | task adapters, deterministic grading, checker ladders, partition freeze, exact benchmark correctness definitions | candidate-specific adaptation after freeze, solve-time policy decisions |
+| **Provider integration layer** | model request execution, local deterministic provider, hosted provider adapters, request accounting, container payload serialization, env resolution | benchmark semantics, archive semantics, export-time secret persistence |
+| **Exported runtime artifact** | manifest, runtime profile, mutable policies, promoted tool metadata, provenance and export bundles, deployment contract | factory history, mutator prompts, validation and test traces, archive state, user secrets |
+
+### 2.1 File and module ownership relative to the current repository
+
+The existing repository already suggests most of the correct split. The coding agent should preserve that split and complete it instead of rewriting the project into a different architecture.
+
+**Factory control plane modules to retain and extend:**
+
+- `agintor/cli.py`
+- `agintor/runtime_builder.py`
+- `agintor/goal_rubric.py` or its replacement
+- `agintor/benchmarks.py`
+- `agintor/verifiers.py`
+- `agintor/evaluator.py`
+- `agintor/evolution.py`
+- `agintor/archive.py`
+- `agintor/mutator.py`
+- `agintor/crossover.py`
+- `agintor/prompt_builder.py`
+- `agintor/prompts.py`
+- `agintor/providers.py`, `provider_common.py`, `provider_openai.py`, `provider_minimax.py`
+- `agintor/container_runtime.py`
+
+**Runtime host and immutable shell modules to retain and extend:**
+
+- `agintor/runtime_loader.py`
+- `agintor/runtime_api.py`
+- `agintor/runner.py`
+- `agintor/shell.py`
+- `agintor/memory_graph.py`
+- `agintor/tool_runtime.py`
+- `agintor/container_entry.py`
+
+**Mutable runtime artifact files to preserve as the primary search surface:**
+
+- `templates/baseline_runtime/topology_policy.py`
+- `templates/baseline_runtime/memory_policy.py`
+- `templates/baseline_runtime/tool_policy.py`
+- `templates/baseline_runtime/control_policy.py`
+
+**Artifact metadata files that remain central:**
+
+- `runtime_manifest.json`
+- `runtime_profile.json`
+- `runtime_export_bundle.json`
+- `runtime_provenance_bundle.json`
+
+If additional modules are required, place them alongside the plane that owns the responsibility. Do not put factory-only planning inside runtime shell modules, and do not put runtime solve logic inside factory planning modules.
+
+---
+
+## 3. CLI Product Contract
+
+The CLI must expose a complete user path. The golden path is `build-runtime`, but the produced runtime must also be runnable after export without re-entering the evolution pipeline.
+
+### 3.1 Mandatory commands
+
+The MVP must support the following command surfaces. Existing names should be preserved where practical.
+
+#### `agintor build-runtime`
+
+This is the end-to-end build path. It must:
+
+1. accept a natural-language goal from an argument or file,
+2. normalize the goal,
+3. derive success criteria,
+4. create or adapt a benchmark and verifier plan,
+5. resolve factory and runtime profiles,
+6. materialize a seed runtime,
+7. run bounded evolution,
+8. validate and select a leader,
+9. export the produced runtime,
+10. write a structured build summary and workspace artifacts,
+11. print a final summary to stdout in JSON or JSON-compatible form.
+
+This command must not require the user to manually author benchmark suites, runtime manifests, or mutation prompts for the golden path.
+
+#### `agintor solve`
+
+This command must support **both**:
+
+1. **benchmark mode**, where the user runs an exported or seed runtime against a benchmark task by task ID and suite, and
+2. **user-request mode**, where the user provides a natural-language prompt or request file and the exported runtime solves it through the runtime host.
+
+The MVP must not force all post-export usage through benchmark task IDs only. The produced MAS must have an actual user-facing solve path.
+
+#### `agintor eval`
+
+This evaluates a runtime on a benchmark partition and seeds. It remains a factory/expert tool.
+
+#### `agintor evolve`
+
+This evolves an existing runtime directory against a suite. It remains a factory/expert tool.
+
+#### `agintor init-runtime`
+
+This materializes the seed runtime template and is allowed to remain an expert utility.
+
+### 3.2 CLI output expectations
+
+`build-runtime` must write a workspace with frozen intermediate artifacts and return a final structured summary containing at least:
+
+- `goal_prompt`
+- `goal_spec_path`
+- `success_criteria_path`
+- `benchmark_plan_path`
+- `verifier_bundle_path`
+- `runtime_plan_path`
+- `output_runtime_dir`
+- `workspace`
+- `agintor_provider`
+- `runtime_provider`
+- `best_train_score`
+- `best_goal_score`
+- `best_val_score`
+- `archive_cells`
+- `accepted_mutations`
+- `export_bundle_file`
+- `provenance_bundle_file`
+
+`solve` in user-request mode must return at least:
+
+- the produced artifact,
+- the runtime hash,
+- whether the result is verified or best-effort,
+- what checks ran,
+- trace and artifact references if requested,
+- and budget usage.
+
+### 3.3 CLI ergonomics requirements
+
+The CLI is the UI. Therefore:
+
+- every command must work without opening Python code,
+- every long-running build must leave behind inspectable artifacts,
+- fatal errors must identify the failed stage and the frozen artifact involved,
+- and exported runtimes must be runnable from the CLI without re-running evolution.
+
+---
+
+## 4. Layer-to-Layer Frozen Artifacts
+
+A major defect in loose agentic systems is that later stages keep re-reading raw user text and silently doing fresh interpretation. Agintor must not do that. The system must write and then consume the following canonical artifacts.
+
+1. **Raw goal input** → `GoalSpec`
+2. `GoalSpec` → `SuccessCriteriaBundle`
+3. `GoalSpec` + `SuccessCriteriaBundle` → `BenchmarkPlan`
+4. `BenchmarkPlan` → `VerifierBundle`
+5. `GoalSpec` + `BenchmarkPlan` + `VerifierBundle` → `RuntimePlan`
+6. `RuntimePlan` → seed runtime artifact
+7. seed runtime artifact → candidate runtime artifacts
+8. candidate runtime artifact + frozen benchmark and verifier bundle → `SuiteEvaluation`
+9. `SuiteEvaluation` stream → archive and validation records
+10. selected leader → exported runtime artifact
+11. exported runtime artifact + `SolveRequest` → `SolveResult`
+
+Each artifact must be:
+
+- serializable,
+- written to disk in the build workspace,
+- reloadable without hidden ambient state,
+- and rich enough that the next stage does not need to reopen upstream free text except for provenance display.
+
+---
+
+## 5. Mandatory Schemas and Data Contracts
+
+The implementation may use Pydantic models, dataclasses, or an equivalent typed representation. It may add fields. It may not omit the required fields listed below.
+
+### 5.1 Build-time schemas
+
+| Object | Required fields |
 |---|---|
-| $A$ | Candidate runtime composed of four mutable subsystems. |
-| $g^{\mathrm{top}}, g^{\mathrm{mem}}, g^{\mathrm{tool}}, g^{\mathrm{ctl}}$ | Mutable code governing topology, memory, tooling, and control. |
-| $\mathcal{H}$ | Fixed shell: storage, verifiers, sandboxes, adapters, safety guards, and logging. |
-| $x$ | Task instance. |
-| $r$ | Random seed used in repeated evaluation. |
-| $y_{x,r}(A)$ | Final artifact produced by runtime $A$ on task $x$ under seed $r$. |
-| $\tau_{x,r}(A)$ | Full execution trace. |
-| $\begin{array}{c}C_{x,r}(A),\,L_{x,r}(A),\\ H_{x,r}(A)\end{array}$ | Cost, latency, and operational faults. |
-| $V_{x,r}(A)$ | Benchmark-specific verifier score in $[0,1]$. |
-| $u_{x,r}(A)$ | Utility of one task-seed run after cost, latency, and fault penalties. |
-| $s_x(A), \rho_x(A), \chi_x(A)$ | Primary score, shrinkage-robust score, and tail-risk diagnostic for task $x$. |
-| $\mathcal{F}_{\mathrm{obj}}$ | Archive objective set. |
-| $S$ | Mutation scope, a non-empty subset of $\left\{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}\right\}$. |
-| $I_f$ | Archive island associated with objective $f$. |
-| $z_t$ | Runtime state at inner-loop step $t$. |
+| `GoalSpec` | `goal_id`, `raw_prompt`, `normalized_goal`, `goal_keywords`, `goal_phrases`, `required_capabilities`, `constraints`, `success_criteria`, `target_families`, `deployment_preferences`, `assumptions`. |
+| `SuccessCriterion` | `criterion_id`, `description`, `required`, `priority`, `measurable_signal`, `verifier_hint`, `target_family`, `weight`. |
+| `BenchmarkPlan` | `plan_id`, `goal_id`, `family_targets`, `train_task_ids`, `proxy_task_ids`, `val_task_ids`, `test_task_ids`, `synthetic_task_ids`, `verifier_bundle_id`, `frozen`. |
+| `VerifierSpec` | `verifier_id`, `verifier_type`, `artifact_contract`, `tolerance`, `uses_trace`, `local_only`, `expected_signal`. |
+| `VerifierBundle` | `bundle_id`, `plan_id`, `verifiers`, `checker_chain_defaults`, `frozen`, `created_from`. |
+| `FactoryProfile` | `agintor_provider`, `evaluation`, `evolution`, `mutation`, `benchmark_generation`, `leader_selection`, `runtime_backend`. |
+| `RuntimePlan` | `plan_id`, `goal_id`, `runtime_abi`, `seed_template`, `mutable_files`, `immutable_manifest`, `runtime_profile`, `provider_plan`, `tooling_scope`, `deployment_contract`. |
+| `DeploymentContract` | `entry_command`, `runtime_abi`, `python_version`, `supported_backends`, `required_env_names`, `network_policy`, `filesystem_policy`, `notes`. |
+| `BuildSummary` | `build_id`, `goal_id`, `goal_spec_path`, `benchmark_plan_path`, `verifier_bundle_path`, `runtime_plan_path`, `workspace`, `output_runtime_dir`, `best_goal_score`, `best_val_score`, `accepted_mutations`, `archive_cells`. |
 
-## 2. Fixed Shell, Mutable Genotype, and Mandatory Schemas
+### 5.2 Runtime-time schemas
 
-### 2.1 Candidate runtime and fixed shell
-
-A candidate runtime is
-
-$$
-A = \left(g^{\mathrm{top}}, g^{\mathrm{mem}}, g^{\mathrm{tool}}, g^{\mathrm{ctl}}\right).
-$$
-
-*Variables.* $g^{\mathrm{top}}$ selects and orchestrates agents; $g^{\mathrm{mem}}$ governs short-term and long-term memory; $g^{\mathrm{tool}}$ governs discovery, synthesis, validation, and dispatch of tools; $g^{\mathrm{ctl}}$ governs model allocation, verification, stopping, and mutation-surface scoring.
-
-The fixed shell $\mathcal{H}$ is immutable during search. It contains the canonical agent pool, short-term graph store, long-term graph store, benchmark adapters, verifiers, safety guards, sandbox manager, environment cache, trace logging, token accounting, wall-clock accounting, and patch parser or applier. Search operates over $A$, never over $\mathcal{H}$.
-
-### 2.2 Mutable methods
-
-The mutable surface is intentionally narrow.
-
-**Topology:** `score_agent`, `select_mode`, `propose_children`, `select_workers`, `assign_scope`, `merge_ensemble`, `make_checkpoint`.
-
-**Memory:** `select_spans_for_compaction`, `summarize_span`, `retrieve_long_term`, `score_memory_unit`, `should_promote`, `dedup_candidates`, `upsert_memory`.
-
-**Tooling:** `rank_categories`, `rank_tools`, `should_create_tool`, `propose_tool_spec`, `validate_tool`, `promote_tool`, `dispatch_tool`.
-
-**Control:** `assign_model`, `request_checks`, `stop_policy`, `score_interface_scope`, `update_scope_credit`.
-
-Any helper routine called only by these methods may mutate. Benchmark graders, storage backends, sandbox boundaries, benchmark prompts, safety prompts, environment caches, and graph query engines may not.
-
-### 2.3 Mandatory schemas
-
-Implementations may add fields, but they may not delete any field listed below.
+The runtime-time objects already present in the repository remain central and should be preserved.
 
 | Object | Required fields |
 |---|---|
@@ -83,967 +285,907 @@ Implementations may add fields, but they may not delete any field listed below.
 | `Checkpoint` | `summary`, `artifact_refs`, `open_handles`, `unresolved_goals`, `budget_state`, `verifier_state`, `resume_constraints`. |
 | `AsyncHandle` | `handle_id`, `tool_name`, `sandbox_hash`, `working_directory`, `launch_time`, `timeout`, `stdout_path`, `stderr_path`, `state`, `artifact_refs`. |
 | `MemoryNode` | `node_id`, `type`, `label`, `content`, `embedding`, `symbol_set`, `file_paths`, `source_task_id`, `verifier_support`, `timestamps`, `provenance`, `tombstoned`. |
+| `BenchmarkTask` | `task_id`, `family`, `prompt`, `task_type`, `operations`, `expected`, `verifier_type`, `verification_required`, `allow_best_effort`, `transfer_scored`, `proxy_scope_tags`, `metadata`. |
+| `SolveRequest` | `request_id`, `prompt`, `context_items`, `file_paths`, `output_schema`, `allowed_tool_categories`, `verification_preference`, `budget_overrides`. |
+| `SolveResult` | `request_id`, `runtime_hash`, `artifact`, `status`, `summary`, `checks`, `trace_ref`, `budget`, `faults`. |
+| `RuntimeManifest` | `runtime_id`, `version`, `policy_modules`, `mutable_files`, `immutable_manifest`, `metadata`. |
 | `ArchiveEntry` | `code_hash`, `runtime_hash`, `scores`, `behavior_bin`, `scope_tag`, `complexity_bucket`, `mutable_loc`, `trace_refs`. |
 
-### 2.4 Graph contracts and invariants
+### 5.3 Logical separation between factory profile and runtime profile
 
-Short-term memory is an append-only directed graph.
+This is a necessary correction.
 
-**Mandatory short-term node types:** `AgentRun`, `Event`, `Summary`, `Artifact`, `RawBlob`, `OpenHandle`, `VerifierEvidence`.
+The current repository stores execution, evaluation, and evolution settings in one runtime profile file. The MVP may continue to use one physical file if necessary, but it must preserve the following **logical separation**:
 
-**Mandatory short-term edges:** `CALLS_AGENT`, `EMITS`, `SUMMARIZES`, `PRODUCES`, `BACKLINKS_TO`, `WAITS_ON`, `CONTINUES_FROM`, `VALIDATED_BY`.
+- **Factory-only profile fields**: evaluation stage thresholds, crossover probability, mutator prompt IDs, archive selection parameters, validation seed counts, benchmark synthesis settings.
+- **Runtime-only profile fields**: execution budgets, topology thresholds, memory thresholds, tooling thresholds, control thresholds, runtime provider mapping.
+- **Shared declarative facts**: runtime ABI, model class names, backend compatibility, safety policy references.
 
-Long-term memory stores reusable abstractions rather than transcripts.
+The exported runtime artifact must not conceptually own factory-only knobs. If one JSON file is retained, it must be namespaced or reconstructible into separate `FactoryProfile` and `RuntimeProfile` objects.
 
-**Mandatory long-term node types:** `Symbol`, `File`, `Query`, `Answer`, `ToolFailure`, `FixPattern`, `TaskNote`, `Procedure`, `EnvironmentFingerprint`, `ArtifactSignature`.
+---
 
-The following invariants are mandatory:
+## 6. Goal Interpretation and Success-Criteria Extraction
 
-1. The canonical stored agent is never executed directly; every invocation clones the stored object and discards the clone after completion.
-2. Horizontal workers share only the append-only board, with locks and per-worker read cursors; they do not share mutable short-term state.
-3. Message-board state and open-handle tables must survive compaction and resume.
-4. Short-term memory is append-only except for summary replacement with raw-output reachability preserved through backlinks.
-5. Long-term memory resets per evaluation unit unless transfer is explicitly scored.
-6. Category-first tool discovery is mandatory; loading the entire tool tree into prompt context is forbidden.
+This stage belongs to the factory control plane. It occurs before benchmark planning and before seed runtime materialization.
+
+### 6.1 Requirements
+
+The system must take a natural-language goal and produce a `GoalSpec` that captures at least:
+
+- normalized goal text,
+- target capability set,
+- hard and soft constraints,
+- deployment preferences,
+- target families,
+- required success criteria,
+- and explicit assumptions used to resolve ambiguity.
+
+The build path must not halt just because the user did not provide a perfectly structured specification. Missing details should be resolved conservatively and recorded in `assumptions`.
+
+### 6.2 Capability extraction
+
+Capability extraction must identify what the produced runtime is expected to be good at. Examples include:
+
+- decomposition and orchestration,
+- exact memory retrieval,
+- long-context management,
+- dynamic tool reuse or synthesis,
+- external artifact generation,
+- verification-heavy solving,
+- cost-sensitive solving,
+- latency-sensitive solving,
+- resumable or checkpointed workflows.
+
+Capability extraction may use heuristics, model assistance, or both, but the result must be frozen into `GoalSpec`.
+
+### 6.3 Constraint extraction
+
+Constraint extraction must capture at least:
+
+- allowed providers or provider classes,
+- expected runtime backend (`local` or `docker`),
+- filesystem and network assumptions,
+- determinism preference,
+- cost and latency sensitivity,
+- preferred solve artifact type,
+- whether best-effort output is acceptable,
+- and whether the runtime is expected to export or persist reusable tools.
+
+### 6.4 Success-criteria extraction
+
+Every build must produce explicit success criteria. Each criterion must be mapped to:
+
+- a measurable signal,
+- a target benchmark family or cross-family pressure,
+- and a verifier hint.
+
+At minimum, success criteria must address:
+
+1. correctness,
+2. end-to-end completeness,
+3. runtime efficiency,
+4. robustness or determinism,
+5. and at least one goal-specific property such as memory fidelity, tool reuse, or orchestration quality.
+
+### 6.5 Family mapping
+
+Benchmark families for the MVP remain:
+
+- `top`
+- `mem`
+- `tool`
+- `e2e`
+
+This is deliberate. The mutable interfaces are `top`, `mem`, `tool`, and `ctl`, but **control is cross-cutting** and should not be made a peer benchmark family by default. In the MVP, control pressure is expressed through:
+
+- proxy tasks,
+- verification ladder behavior,
+- stopping behavior,
+- cost and latency penalties,
+- and robustness metrics.
+
+This keeps benchmark family taxonomy aligned with externally observable task behavior while still pressuring the control surface.
+
+---
+
+## 7. Benchmark Planning and Verifier Freeze
+
+This stage translates the normalized goal into measurable evaluation pressure.
+
+### 7.1 Benchmark planning requirements
+
+The benchmark plan must:
+
+- cover every target family in `GoalSpec`,
+- include proxy, train, validation, and test partitions,
+- preserve strict partition isolation,
+- and freeze verifier logic before candidate evolution begins.
+
+The MVP may start from the existing demo benchmark library and extend it through goal-conditioned cloning and bounded synthetic task generation.
+
+### 7.2 Goal-conditioned benchmark pressure synthesis
+
+The factory must support both:
+
+1. **selection** from existing benchmark families and tasks, and
+2. **bounded synthesis** of goal-conditioned tasks when the existing suite lacks sufficient pressure.
+
+The synthesis strategy for the MVP should stay bounded and local. It must prefer tasks whose correctness can be judged by deterministic local verifiers. It may use provider assistance to propose task wording, expected artifact structure, or operation hints, but the final task and verifier must be executable locally and frozen before evaluation.
+
+A valid benchmark plan should typically:
+
+- select representative tasks from the demo or loaded suite per target family,
+- clone or adapt those tasks with goal-conditioned emphasis,
+- optionally create additional synthetic tasks for uncovered goal criteria,
+- attach proxy tasks to specific mutable interfaces,
+- and write all chosen task IDs and synthetic task IDs into `BenchmarkPlan`.
+
+### 7.3 Verifier freeze
+
+A critical invariant:
+
+> candidate runtimes may decide **when** to ask for checks, but they may not redefine **what counts as correct** after the verifier bundle is frozen.
+
+The verifier bundle must include at least:
+
+- exact benchmark verifier specifications,
+- local checker ladder defaults,
+- trace-based proxy verifier definitions where needed,
+- and any tolerance or artifact-shape contracts.
+
+Validation and test verifier outputs must never be exposed to the mutator as improvement hints.
+
+### 7.4 Supported verifier classes for the MVP
+
+At minimum, the verifier system must support deterministic local variants of:
+
+- exact JSON equality,
+- numeric-tolerant JSON equality,
+- exact string equality,
+- exact numeric equality,
+- trace event presence,
+- trace event counts,
+- artifact shape compatibility,
+- and local checker ladders such as `local`, `subtree`, `repo`, and `benchmark`.
+
+### 7.5 Benchmark tasks versus user solve requests
+
+The system must keep a clean distinction between:
+
+- **benchmark tasks**, which include an expected output or verifier contract used by the factory for evolution,
+- and **user solve requests**, which may not include a benchmark oracle and must therefore run as verified-if-possible or best-effort solves.
+
+Benchmark planning belongs to the factory. User solve adaptation belongs to the runtime host.
+
+---
+
+## 8. Runtime Planning and Bounded Artifact Definition
+
+This stage resolves what the produced runtime actually is.
+
+### 8.1 Runtime plan requirements
+
+The `RuntimePlan` must resolve:
+
+- runtime ABI version,
+- seed template,
+- mutable files,
+- immutable manifest,
+- runtime execution profile,
+- runtime provider plan,
+- allowed tooling scope,
+- export path expectations,
+- and deployment contract.
+
+The runtime plan is frozen before evolution begins. The outer loop evolves candidate runtimes inside that plan. It does not keep redesigning the runtime’s identity mid-build.
+
+### 8.2 What the produced runtime is
+
+The produced runtime is:
+
+- a manifest plus mutable policy code,
+- executed by the fixed runtime host,
+- under a frozen runtime ABI,
+- with a runtime profile and export/provenance bundles,
+- plus any promoted tool metadata or generated assets that the runtime needs at solve time.
+
+The produced runtime is **not** the factory archive, the build history, or the benchmark plan.
+
+### 8.3 Export artifact structure
+
+The exported runtime directory must contain, at minimum:
+
+```text
+runtime_manifest.json
+runtime_profile.json
+runtime_export_bundle.json
+runtime_provenance_bundle.json
+deployment_contract.json
+topology_policy.py
+memory_policy.py
+tool_policy.py
+control_policy.py
+```
+
+Optional additional exported assets may include:
+
+- promoted tool metadata,
+- serialized generated tool specs,
+- runtime-local examples,
+- or additional immutable asset fingerprints.
+
+The exported runtime may rely on an installed Agintor runtime host with a matching ABI. That is acceptable for the MVP. However, the export must still be self-describing and runnable without invoking the factory’s evolution pipeline.
+
+### 8.4 Seed runtime materialization
+
+The seed runtime must come from a concrete template, not from vague empty scaffolding. The existing baseline runtime template is the correct starting point. The factory may adjust the runtime profile for goal alignment, but the initial runtime must be loadable, executable, and benchmarkable before any mutation occurs.
+
+---
+
+## 9. Fixed Runtime Host and Immutable Shell Substrate
+
+The fixed runtime host is the runtime-side execution kernel. It is shared across candidate runtimes and remains outside the mutable search surface.
+
+### 9.1 Mandatory shell responsibilities
+
+The runtime host and shell must own:
+
+- runtime loading and ABI validation,
+- canonical agent pool and clone-on-run semantics,
+- short-term and long-term memory containers,
+- message board state,
+- open-handle table,
+- tool registry and executor,
+- safety validation and sandbox management,
+- trace writing,
+- solve request adaptation,
+- and invariant validation.
+
+### 9.2 Solve request adaptation belongs to the runtime host
+
+This is an important placement rule.
+
+The adapter from a user-facing `SolveRequest` into the runtime’s internal task envelope must belong to the fixed runtime host, not to the factory and not to mutable policies. The produced runtime must have a stable entrypoint for real user requests after export. Candidate runtimes may choose **how to solve** the adapted task, but not redefine the shape of the request contract itself on every mutation.
+
+### 9.3 Graph contracts and invariants
+
+The current graph contracts remain correct and must be preserved.
+
+**Mandatory short-term node types:**
+
+- `AgentRun`
+- `Event`
+- `Summary`
+- `Artifact`
+- `RawBlob`
+- `OpenHandle`
+- `VerifierEvidence`
+
+**Mandatory short-term edges:**
+
+- `CALLS_AGENT`
+- `EMITS`
+- `SUMMARIZES`
+- `PRODUCES`
+- `BACKLINKS_TO`
+- `WAITS_ON`
+- `CONTINUES_FROM`
+- `VALIDATED_BY`
+
+**Mandatory long-term node types:**
+
+- `Symbol`
+- `File`
+- `Query`
+- `Answer`
+- `ToolFailure`
+- `FixPattern`
+- `TaskNote`
+- `Procedure`
+- `EnvironmentFingerprint`
+- `ArtifactSignature`
+
+### 9.4 Non-negotiable shell invariants
+
+The shell must enforce at least the following invariants:
+
+1. The canonical stored agent is never executed directly; every invocation uses a clone.
+2. Horizontal workers do not share mutable solve state; they share only the append-only message board and deterministic merge inputs.
+3. Message-board state and open-handle tables survive compaction and resume.
+4. Short-term compaction may hide raw nodes, but raw-output reachability through backlinks must be preserved.
+5. Long-term memory resets between independent tasks unless transfer is explicitly being scored.
+6. Category-first tool discovery is mandatory; full-registry prompt stuffing is forbidden.
 7. Sandbox reuse must be content-addressed.
 8. Exact symbol and path matches dominate embedding similarity in retrieval and deduplication.
-9. Merge order for worker outputs must be deterministic.
-10. Validation and held-out traces may never appear in mutation prompts.
+9. Merge order is deterministic.
+10. Validation and test traces may never enter mutation prompts.
 
-## 3. Runtime State, Evaluation Unit, and Hard Invalidation
+### 9.5 Safety ownership
 
-### 3.1 Runtime state machine
+Mutable policies may propose tools and dispatch paths, but the shell owns:
 
-A task-time run of runtime $A$ on task $x$ with seed $r$ is a state machine
+- validation of tool safety,
+- sandbox environment creation,
+- forbidden import and call checks,
+- and execution isolation.
 
-$$
-z_{t+1} = T_A\left(z_t, x, \omega_t\right).
-$$
+The runtime must not be able to bypass these through mutable policy code.
 
-*Variables.* $z_t$ is runtime state at step $t$; $T_A$ is the transition rule induced by runtime $A$; $x$ is the current task; $\omega_t$ collects admissible stochasticity such as model sampling under the fixed seed.
+---
 
-State $z_t$ contains the active agent queue $Q_t$, short-term execution graph $G_t^{S}$, long-term graph $G_t^{L}$, visible tool-registry slice $R_t$, budget state $b_t$, open async handles $o_t$, verifier evidence state $e_t$, and current confidence or unresolved-goal statistics.
+## 10. Mutable Runtime Policy Surface
 
-The initial state contains one root agent, empty short-term memory, a fresh open-handle table, the canonical tool registry, and long-term memory reset according to the evaluation protocol. A run emits final artifact $y_{x,r}(A)$, execution trace $\tau_{x,r}(A)$, total cost $C_{x,r}(A)$, latency $L_{x,r}(A)$, and operational faults $H_{x,r}(A)$.
+The search surface must stay narrow and meaningful. The mutable runtime policies control behavior at solve time. They do not own factory planning, archive logic, or verifier definitions.
 
-### 3.2 Evaluation unit
+### 10.1 Topology policy
+
+**Responsibilities:**
+
+- choosing single, vertical, or horizontal execution mode,
+- scoring agent reuse versus creation,
+- proposing children,
+- selecting workers,
+- assigning tool scope to children,
+- deterministic ensemble merge,
+- checkpoint creation.
+
+**Mandatory mutable methods:**
+
+- `score_agent`
+- `select_mode`
+- `propose_children`
+- `select_workers`
+- `assign_scope`
+- `merge_ensemble`
+- `make_checkpoint`
+
+**Must not own:**
+
+- archive state,
+- benchmark generation,
+- direct sandbox execution,
+- or leader selection.
+
+### 10.2 Memory policy
+
+**Responsibilities:**
+
+- short-term compaction span selection,
+- summarization of selected spans,
+- long-term retrieval ranking,
+- memory promotion scoring,
+- promotion decision,
+- deduplication action selection,
+- and long-term upsert behavior.
+
+**Mandatory mutable methods:**
+
+- `select_spans_for_compaction`
+- `summarize_span`
+- `retrieve_long_term`
+- `score_memory_unit`
+- `should_promote`
+- `dedup_candidates`
+- `upsert_memory`
+
+**Must not own:**
+
+- shell graph integrity rules,
+- memory reset policy across evaluation units,
+- or raw-node reachability invariants.
+
+### 10.3 Tooling policy
+
+**Responsibilities:**
+
+- category ranking,
+- tool ranking,
+- build-vs-reuse decision,
+- proposed tool specification,
+- tool validation opinion,
+- promotion decision,
+- dispatch metadata.
+
+**Mandatory mutable methods:**
+
+- `rank_categories`
+- `rank_tools`
+- `should_create_tool`
+- `propose_tool_spec`
+- `validate_tool`
+- `promote_tool`
+- `dispatch_tool`
+
+**Must not own:**
+
+- safety bypass,
+- environment creation,
+- secret access,
+- or unchecked subprocess execution.
+
+### 10.4 Control policy
+
+**Responsibilities:**
+
+- model assignment,
+- checker request selection,
+- stopping policy.
+
+**Mandatory mutable methods:**
+
+- `assign_model`
+- `request_checks`
+- `stop_policy`
+
+**Factory-side responsibilities that must not be placed inside exported runtime control policy:**
+
+- archive objective selection,
+- scope scheduler state,
+- phase advancement,
+- archive cell keys,
+- leader selection,
+- counterfactual credit updates.
+
+This is an intentional correction. Solve-time control is mutable; factory-side evolutionary accounting is not.
+
+### 10.5 Why outer-loop scope credit does not belong to runtime control
+
+Earlier formulations that place archive scope credit or scheduler updates inside the runtime control surface blur the line between produced runtime and factory. For the MVP, that separation must be explicit:
+
+- candidate runtimes may emit solve-time telemetry or observable behavior,
+- but only the factory control plane updates scope credit, phase progression, or archive insertion logic.
+
+The runtime may influence those outcomes only indirectly through its measured behavior.
+
+---
+
+## 11. Task-Time Runtime Execution State and Orchestration
+
+The runtime host executes tasks through a state machine induced by the loaded runtime.
+
+### 11.1 Required runtime state
+
+The task-time state must include, at minimum:
+
+- active frame queue,
+- visible tool names,
+- unresolved goals,
+- current confidence estimate,
+- selected mode,
+- artifact map,
+- checkpoints,
+- worker plans,
+- open handle IDs,
+- created tool count,
+- promoted node count,
+- checks used,
+- subgoal negative-step counters,
+- subgoal last-model map,
+- budget state,
+- and trace rows.
+
+### 11.2 Root and child execution
+
+The runtime must support:
+
+- a root frame,
+- vertically spawned child frames with checkpoints,
+- horizontally isolated workers,
+- deterministic merge of worker outputs,
+- and resume-aware checkpoint publication.
+
+### 11.3 Solve modes
+
+The runtime must support at least:
+
+- `single`
+- `vertical`
+- `horizontal`
+
+The topology policy decides which to use. The runtime host executes the choice.
+
+### 11.4 User-request mode versus benchmark mode
+
+The runtime host must support two entry modes:
+
+1. **benchmark mode**, where a `BenchmarkTask` is executed under a known verifier,
+2. **user-request mode**, where a `SolveRequest` is converted into a bounded internal task envelope.
+
+For user-request mode, the MVP may stay bounded by restricting the adapted internal task representation to the supported operation and tool model. If no exact verifier exists, the runtime still runs but must report whether the result is verified or best-effort.
+
+### 11.5 Memory ingestion and compaction
+
+Context items provided by a benchmark task or user solve request must be ingested into short-term memory and, when appropriate, promoted into long-term memory through the mutable memory policy and the fixed long-term graph interface.
+
+Compaction is triggered by runtime budget pressure and must preserve raw-output reachability. Compaction belongs to solve time. The high-water and low-water thresholds belong to the runtime profile.
+
+### 11.6 Tool discovery and execution
+
+Tool use must follow this pipeline:
+
+1. category ranking,
+2. category slice selection,
+3. candidate tool collection,
+4. tool ranking,
+5. build-vs-reuse decision,
+6. optional tool synthesis proposal,
+7. safety validation,
+8. dispatch,
+9. optional async handle tracking,
+10. promotion decision.
+
+The runtime must not jump directly from operation description to unrestricted arbitrary tool generation.
+
+### 11.7 Verification ladder and stopping
+
+The control policy may choose which checkers to request, but the available checker ladder and benchmark verifier definitions are frozen by the verifier bundle.
+
+The stop policy may terminate only under budget exhaustion or when the runtime believes further action has negative utility, but if the task requires verification and a verified terminal artifact is still required, the runtime must not terminate as if the task were complete.
+
+---
+
+## 12. Evaluation, Scoring, Robustness, and Archive Insertion
+
+All of this belongs to the factory control plane.
+
+### 12.1 Evaluation unit
 
 An evaluation unit is either:
 
-1. a single task $x$, when transfer is not itself scored; or
-2. an ordered episode $e=(x_1,\dots,x_m)$, when transfer is explicitly part of the benchmark objective.
+- a single task, or
+- an ordered multi-task episode when transfer itself is being scored.
 
-Dynamic agents, dynamic tools, and short-term memory always reset between tasks. Long-term memory resets between independent tasks unless transfer is explicitly scored. Candidate-specific learned predictor parameters do not leak validation or test information back into mutation.
+Dynamic agents, dynamic tools, and short-term memory reset between tasks. Long-term memory resets between independent tasks unless transfer is explicitly part of the benchmark objective.
 
-### 3.3 Hard invalidation
+### 12.2 Staged evaluation gates
 
-A run is immediately invalid on task $x$ if any of the following occurs:
+The staged evaluator in the current repository is the correct core pattern and should be preserved and completed.
 
-- benchmark adapter mutated or bypassed,
-- safety boundary violated,
-- forbidden filesystem or network access,
-- canonical stored agent executed directly instead of clone-on-run,
-- open-handle table becomes inconsistent,
-- short-term compaction destroys raw-output reachability,
-- long-term memory carries across tasks when transfer is not explicitly scored.
+**Stage 0: patch and contract integrity**
 
-Invalid runs receive
+- patch format is valid,
+- patch size is within limits,
+- changed lines stay inside contracted mutable methods,
+- resulting runtime parses and loads.
 
-$$
-V_{x,r}(A)=0
-$$
+**Stage 1: deterministic smoke**
 
-*Variables.* $V_{x,r}(A)$ is the benchmark verifier score for task $x$, seed $r$, and runtime $A$. A hard-invalid run is forced to zero verifier score for that run and cannot be inserted into the archive.
+- repeated execution on a smoke proxy task yields identical artifacts, verifier scores, modes, and normalized traces.
 
-A candidate that triggers hard invalidation at Stage~0, 1, or 2 is rejected immediately and contributes only to failure statistics.
+**Stage 2: proxy gate**
 
-## 4. Evaluation Setting, Objectives, and Statistical Protocol
+- compare parent and child on proxy tasks aligned with the touched interfaces,
+- reject clear regressions or invalid runs.
 
-### 4.1 Task partition and mutator isolation
+**Stage 3: local subset gate**
 
-The scored training tasks are partitioned as
+- compare parent and child on a subset centered on the selected objective,
+- reject clear regressions or invalid runs.
 
-$$
-X_{\mathrm{train}} = X_{\mathrm{top}} \cup X_{\mathrm{mem}} \cup X_{\mathrm{tool}} \cup X_{\mathrm{e2e}}.
-$$
+**Stage 4: full train gate**
 
-*Variables.* $X_{\mathrm{train}}$ is the training suite. $X_{\mathrm{top}}$, $X_{\mathrm{mem}}$, $X_{\mathrm{tool}}$, and $X_{\mathrm{e2e}}$ are topology, memory, tooling, and end-to-end task families.
+- evaluate across the full train plan,
+- allow minibatch early rejection for clear global regression,
+- score only after the full stage succeeds.
 
-A separate validation set $X_{\mathrm{val}}$ is used only to choose leaders and trigger curriculum advancement. A disjoint test set $X_{\mathrm{test}}$ is evaluated once at the end. No trace, failure message, or grader output from $X_{\mathrm{val}}$ or $X_{\mathrm{test}}$ may enter a mutation prompt.
+Validation and test are used after archive insertion for leader tracking and final export selection, not for mutator guidance.
 
-### 4.2 Verifier score and per-seed utility
+### 12.3 Utility and robustness
 
-For task $x$ and seed $r$, the benchmark-specific verifier returns
+The scoring model from the current repository is appropriate and should remain the baseline.
 
-$$
-V_{x,r}(A) = V_x\left(y_{x,r}(A), \tau_{x,r}(A)\right) \in [0,1].
-$$
+For one run:
 
-*Variables.* $V_x(\cdot)$ is the task-specific verifier; $y_{x,r}(A)$ is the final artifact; $\tau_{x,r}(A)$ is the full execution trace.
+\[
+u = V - \lambda_C \log(1 + C / C_0) - \lambda_L \log(1 + L / L_0) - \lambda_H H
+\]
 
-All parent-child comparisons use common random numbers: if parent and child are both evaluated on task $x$, they must use the same seed set.
+where:
 
-Reference cost and latency scales are task-specific. Define $C_{0,x}$ and $L_{0,x}$ as the median baseline cost and latency on task $x$ over the initial archive and default seed set:
+- \(V\) is the benchmark verifier score,
+- \(C\) is cost,
+- \(L\) is latency,
+- \(H\) is operational faults,
+- \(C_0\) and \(L_0\) are task-level reference scales.
 
-$$
-\begin{align}
-C_{0,x} &= \max\left\{1,\ \text{median}_r\, C_{x,r}(A_0)\right\}, \\
-L_{0,x} &= \max\left\{1,\ \text{median}_r\, L_{x,r}(A_0)\right\}.
-\end{align}
-$$
+Task-level mean utility is:
 
-*Variables.* $A_0$ is the baseline runtime. $C_{0,x}$ and $L_{0,x}$ are task-specific normalization constants derived from the baseline.
+\[
+s = \frac{1}{R}\sum_{r=1}^{R} u_r
+\]
 
-Per-seed utility is
+Robustness-adjusted utility is:
 
-$$
-\begin{aligned}
-u_{x,r}(A) =\;& V_{x,r}(A)
-{} - \lambda_C \log\!\left(1+\frac{C_{x,r}(A)}{C_{0,x}}\right)
-{} - \lambda_L \log\!\left(1+\frac{L_{x,r}(A)}{L_{0,x}}\right) \\
-&\; - \lambda_H H_{x,r}(A).
-\end{aligned}
-$$
+\[
+\rho = s - \kappa_b \hat{\sigma} - \kappa_u \hat{\sigma}/\sqrt{R}
+\]
 
-*Variables.* $u_{x,r}(A)$ is the task-seed utility after cost, latency, and fault penalties. $\lambda_C$, $\lambda_L$, and $\lambda_H$ are penalty weights.
+with shrinkage variance estimate \(\hat{\sigma}\).
 
-The repeated-seed primary score is
+The lower-tail CVaR statistic should remain a validation and leader tie-break signal.
 
-$$
-s_x(A) = \frac{1}{R}\sum_{r=1}^{R} u_{x,r}(A).
-$$
+### 12.4 Objective families
 
-*Variables.* $s_x(A)$ is the mean utility of runtime $A$ on task $x$ over $R$ repeated seeds.
+Objective names should continue to include:
 
-### 4.3 Robustness and tail risk
+- single-task objectives, `s:<task_id>`
+- family means, `sbar:<family>`
+- family robustness means, `rhobar:<family>`
+- global mean, `sbar:global`
+- global robustness mean, `rhobar:global`
 
-With low seed count, raw sample variance is noisy. Agintor therefore uses shrinkage:
+### 12.5 Archive design
 
-$$
-\hat{\sigma}_x^2(A) = (1-\eta_{\sigma})\, \text{Var}_r\left(u_{x,r}(A)\right) + \eta_{\sigma}\, \sigma^2_{f(x),\mathrm{prior}}.
-$$
+The archive must preserve diversity over at least:
 
-*Variables.* $\hat{\sigma}_x^2(A)$ is the shrinkage variance estimate of task utility; $\eta_{\sigma}$ controls shrinkage strength; $\sigma^2_{f(x),\mathrm{prior}}$ is the prior variance for the family containing task $x$.
+- objective,
+- interface difference mask,
+- behavior descriptor,
+- scope tag,
+- and complexity bucket.
 
-The robustness-adjusted task score is
+The current direction is correct:
 
-$$
-\rho_x(A) = s_x(A) - \kappa_b \hat{\sigma}_x(A) - \kappa_u \frac{\hat{\sigma}_x(A)}{\sqrt{R}}.
-$$
+- behavior bins summarize dominant mode, created-tool rate, promotion density, and check density,
+- complexity buckets reflect mutable size or AST-node volume,
+- scope tags preserve which interfaces changed.
 
-*Variables.* $\rho_x(A)$ is the search-time robustness score. $\kappa_b$ penalizes brittleness and $\kappa_u$ penalizes statistical uncertainty from low seed count.
+### 12.6 Parent selection, scope scheduling, and crossover
 
-In addition, the runtime tracks a tail-risk diagnostic
+These belong to the factory control plane.
 
-$$
-\chi_x(A)=\text{CVaR}_{\alpha}\!\left(\left\{u_{x,r}(A)\right\}_{r=1}^{R}\right),
-$$
+The factory must own:
 
-*Variables.* $\chi_x(A)$ is the lower-tail conditional value at risk of task utility. It is used for validation and final champion selection, not for archive insertion. $\alpha$ is the tail fraction.
+- objective selection,
+- scope sampling,
+- parent selection,
+- counterfactual contribution analysis,
+- phase advancement from local to pair to joint scopes,
+- and crossover application.
 
-For finite $R$, if $u_{x,(1)}\le \dots \le u_{x,(R)}$ are the sorted utilities and $k=\max\left\{1,\lceil \alpha R\rceil\right\}$, then
+The runtime control policy must not update scheduler state directly.
 
-$$
-\text{CVaR}_{\alpha} = \frac{1}{k}\sum_{i=1}^{k} u_{x,(i)}.
-$$
+### 12.7 Training, validation, and test isolation
 
-*Variables.* $u_{x,(i)}$ is the $i$th order statistic after sorting utilities in ascending order. $k$ is the number of worst-seed utilities averaged into the tail statistic.
+A hard invariant:
 
-### 4.4 Family and global scores
+- train traces may inform mutation,
+- validation traces may inform only factory-side leader choice and phase advancement,
+- test traces are final measurement only,
+- and neither validation nor test traces may enter mutation prompts or mutation heuristics.
 
-Family averages are
+---
 
-$$
-\bar{s}_f(A)=\frac{1}{|X_f|}\sum_{x\in X_f} s_x(A), \qquad \bar{\rho}_f(A)=\frac{1}{|X_f|}\sum_{x\in X_f} \rho_x(A).
-$$
+## 13. Provider Backends and Isolation
 
-*Variables.* $X_f$ is the set of training tasks in family $f$. $\bar{s}_f(A)$ and $\bar{\rho}_f(A)$ are family means of primary and robustness-adjusted scores.
+### 13.1 Two provider roles
 
-Global means are hierarchically weighted by family:
+The MVP must clearly distinguish:
 
-$$
-\bar{s}(A)=\sum_{f}\omega_f \bar{s}_f(A), \qquad \bar{\rho}(A)=\sum_{f}\omega_f \bar{\rho}_f(A).
-$$
+- the **Agintor provider**, used by the factory for mutation prompts, benchmark synthesis assistance, or verifier-adaptation assistance,
+- and the **runtime provider**, used by the exported runtime during task execution.
 
-*Variables.* $\omega_f$ is the family weight; by default the four major families receive equal weight so larger families do not dominate search solely by cardinality.
+These may be the same provider implementation or different ones. Their roles must remain distinct.
 
-The archive objective set is
+### 13.2 Provider ownership rules
 
-$$
-\mathcal{F}_{\mathrm{obj}} = \left\{s_x : x\in X_{\mathrm{train}}\right\} \cup \left\{\bar{s}_{\mathrm{top}}, \bar{s}_{\mathrm{mem}}, \bar{s}_{\mathrm{tool}}, \bar{s}_{\mathrm{e2e}}, \bar{\rho}_{\mathrm{top}}, \bar{\rho}_{\mathrm{mem}}, \bar{\rho}_{\mathrm{tool}}, \bar{\rho}_{\mathrm{e2e}}, \bar{s}, \bar{\rho}\right\}.
-$$
+The provider layer owns:
 
-*Variables.* $\mathcal{F}_{\mathrm{obj}}$ contains single-task specialists, family generalists, family-robust variants, and global objectives.
+- API request execution,
+- response accounting,
+- environment variable resolution,
+- API key file loading,
+- replay and local deterministic providers,
+- and container payload serialization.
 
-Operational faults count only non-fatal runtime failures, including hallucinated tool invocations corrected by fallback, broken checkpoints missing non-critical fields, async timeouts recovered by retry, and malformed memory writes rejected by validators. Safety violations do not increment $H_{x,r}$; they invalidate the run.
+The provider layer must not own:
 
-## 5. Predictor Families, Uncertainty, and Online Calibration
+- benchmark semantics,
+- archive semantics,
+- runtime identity hashes,
+- or secret persistence inside export bundles.
 
-Every hatted quantity belongs to one of three predictor types and is implemented inside a decision-family model bank.
+### 13.3 Export secret handling
 
-### 5.1 Base predictor types
+The exported runtime may store provider names, model maps, and required environment variable names. It must not store live API keys. Secrets remain external.
 
-For decision family $d$ and candidate action $a$ in runtime state $s$, define a deterministic feature map
+### 13.4 Runtime backend support
 
-$$
-\phi_d(s,a)\in \mathbb{R}^{m_d}.
-$$
+The MVP must support at least:
 
-*Variables.* $d$ indexes a decision family such as mode selection, child spawning, compaction, retrieval, tool reuse, tool creation, model choice, or stopping. $m_d$ is the feature dimension for family $d$.
+- `local` runtime execution, and
+- `docker` runtime execution.
 
-Probability predictors use logistic regression with isotonic calibration:
+The existing container runtime pattern is valid: the factory or runtime host may package runtime execution inside a container while mounting the exported runtime, task payloads, and provider payloads.
 
-$$
-\hat{p}_d(s,a)=\text{clip}\left(\mathrm{Iso}\left(\sigma\left(w_d^{\top}\phi_d(s,a)\right)\right),\ p_{\min},\ p_{\max}\right).
-$$
+---
 
-*Variables.* $\hat{p}_d$ is the calibrated probability estimate for family $d$. $\mathrm{Iso}(\cdot)$ is the isotonic calibration map. $p_{\min}$ and $p_{\max}$ clip pathological probabilities away from exactly $0$ and $1$.
+## 14. Workspace Layout, Reports, and Export Contract
 
-Positive scalar predictors use log-linear Huber regression:
+The build workspace must make the pipeline inspectable.
 
-$$
-\hat{q}_d(s,a)=\exp\left(u_d^{\top}\phi_d(s,a)\right).
-$$
+### 14.1 Minimum workspace outputs
 
-*Variables.* $\hat{q}_d$ is a positive-valued prediction such as cost, latency, or compaction time. $u_d$ is the regression parameter vector for family $d$.
+A successful `build-runtime` execution must write, at minimum:
 
-Ranking scores use normalized linear mixtures:
+```text
+workspace/
+  goal/
+    goal_spec.json
+    success_criteria.json
+  planning/
+    benchmark_plan.json
+    verifier_bundle.json
+    runtime_plan.json
+    factory_profile.json
+  seed_runtime/
+    ...
+  evolution/
+    evolution_history.json
+    archive_index.json
+    validation_history.json
+    stage_failures.json
+  export/
+    build_summary.json
+    leaderboard.json
+    export_summary.json
+```
 
-$$
-\hat{r}_d(s,a)=\sum_i \alpha_i \tilde{\phi}_{d,i}(s,a),
-$$
+Exact subdirectory names may vary, but the logical outputs must exist.
 
-*Variables.* $\tilde{\phi}_{d,i}(s,a)$ is feature $i$ normalized to $[0,1]$ within the current candidate set, and $\alpha_i$ is its ranking weight.
+### 14.2 Exported runtime bundles
 
-### 5.2 Decision-family model bank
+The exported runtime must include:
 
-For every family $d$, maintain bootstrapped ensembles for the relevant probability and positive-scalar predictors. Let $\mu[\cdot]$ and $\sigma[\cdot]$ denote ensemble mean and standard deviation. Family utility is
+- an export bundle with runtime hash, code hash, ABI, runtime ID, provider identity, and source runtime information,
+- a provenance bundle with artifact digests and attestation hash,
+- a deployment contract that tells the user how to run the runtime,
+- and the runtime manifest plus mutable policy files.
 
-$$
-\begin{aligned}
-U_d(a\mid s)=\;&
-\mu[\hat{p}_d]
-{} -
-\lambda_T^{(d)} \log\!\left(1+\frac{\mu[\hat{T}_d]}{T_0^{(d)}}\right)
-{} -
-\lambda_L^{(d)} \log\!\left(1+\frac{\mu[\hat{L}_d]}{L_0^{(d)}}\right) \\
-&\;
-{} -
-\lambda_F^{(d)} \mu[\hat{F}_d]
-{} +
-\lambda_Q^{(d)} \mu[\hat{Q}_d].
-\end{aligned}
-$$
+### 14.3 Runtime identity and portability
 
-*Variables.* $U_d(a\mid s)$ is the scalar utility of action $a$ under decision family $d$. $\hat{T}_d$, $\hat{L}_d$, $\hat{F}_d$, and $\hat{Q}_d$ are predicted token cost, latency, fault probability, and family-specific auxiliary value.
+The runtime identity must depend on:
 
-Conservative and optimistic utilities are
+- manifest content,
+- mutable policy file digests,
+- immutable manifest digests,
+- and the effective runtime profile.
 
-$$
-U_d^{-}(a\mid s)=U_d(a\mid s)-\beta_d \sigma\left[U_d(a\mid s)\right], \qquad U_d^{+}(a\mid s)=U_d(a\mid s)+\beta_d \sigma\left[U_d(a\mid s)\right].
-$$
+It must not depend on transient bytecode files, timestamps, or hidden process state.
 
-*Variables.* $U_d^{-}$ is the conservative utility used for irreversible actions and hard gating. $U_d^{+}$ is the optimistic utility used for exploration actions such as tool creation or ensemble widening. $\beta_d$ is the uncertainty multiplier for family $d$.
+### 14.4 Inspectability
 
-### 5.3 Feature groups, labels, and update protocol
+The user must be able to inspect:
 
-Topology features include task embedding, symbolic seeds, required capabilities, permission requirements, unresolved critical count, context saturation, remaining budget fractions, candidate-agent history, tool coverage gap, and expected fanout. Memory features include span age, token length, artifact count, unresolved items, handle count, node type match, graph distance from symbolic seeds, verifier support, provenance quality, recency, and staleness. Tooling features include category similarity, signature fit, dependency depth, permission risk, cold-start cost, cache-hit probability, historical pass rate, and build-test cost. Control features include remaining budget fractions, irreversibility flags, current confidence, presence of exact verifiers, model tier, and unresolved-item severity.
+- what goal the build normalized to,
+- which benchmark families were selected,
+- which verifiers were frozen,
+- which runtime profile was resolved,
+- what leader was exported,
+- and what the exported runtime requires to run.
 
-Labels are logged directly from traces. A topology action succeeds if its child or worker contributes an artifact later accepted by its parent or passes its local verifier. A compaction action succeeds if later steps do not require raw-transcript fallback and no evidence or handle reachability is lost. A retrieval action succeeds if the retrieved node is consumed later and is not contradicted by a verifier. Tool reuse succeeds if the selected tool executes and passes designated checks. Tool creation succeeds if the synthesized tool passes validation and is successfully reused. A model choice succeeds if the chosen model completes its action without forced escalation. A verification action succeeds if it changes a downstream decision or confirms a final artifact. A stop action succeeds if stopping yields a verifier-positive terminal artifact with no unresolved critical items.
-
-Predictors are retrained whenever 50 fully evaluated children or 10 accepted elites accumulate since the previous update. Calibration uses the most recent 200 labeled examples per task family. If fewer than 100 examples are available for a family, the runtime falls back to the default heuristic weights in the relevant subsystem section. Surrogates are frozen during every parent-child comparison.
-
-## 6. Archive Design, Diversity Descriptors, and Outer-Loop Controller
-
-### 6.1 Archive cell key
-
-Agintor uses an objective-conditioned quality-diversity archive. Each cell key is
-
-$$
-k(A,f)=\left(f,\ q(A),\ b(A),\ S_{\mathrm{last}}(A),\ c_{\mathrm{bin}}(A)\right).
-$$
-
-*Variables.* $k(A,f)$ is the archive cell key for runtime $A$ under objective $f$. $q(A)$ is the interface-difference bitmask relative to baseline, $b(A)$ is the behavior descriptor, $S_{\mathrm{last}}(A)$ is the scope of the last accepted mutation, and $c_{\mathrm{bin}}(A)$ is the complexity bucket.
-
-The behavior descriptor is
-
-$$
-b(A)=\left(d_{\mathrm{mode}}, d_{\mathrm{tool}}, d_{\mathrm{mem}}, d_{\mathrm{ver}}\right).
-$$
-
-*Variables.* $d_{\mathrm{mode}}$ is the dominant solve mode in $\left\{\mathrm{single},\mathrm{vertical},\mathrm{horizontal},\mathrm{mixed}\right\}$. $d_{\mathrm{tool}}$, $d_{\mathrm{mem}}$, and $d_{\mathrm{ver}}$ are trinary bins for created-tool rate, promotion density, and checks-per-task.
-
-The complexity bucket is the insertion-time quartile of mutable AST-node count relative to the current archive; mutable changed LOC is retained as a deterministic tie-breaker.
-
-### 6.2 Parent selection and elite replacement
-
-Within objective island $I_f$, normalize the objective:
-
-$$
-\tilde{f}(A)=\frac{f(A)-\mu_f}{\sigma_f+\varepsilon}.
-$$
-
-*Variables.* $\tilde{f}(A)$ is the within-island normalized objective value. $\mu_f$ and $\sigma_f$ are the mean and standard deviation of objective $f$ over island $I_f$. $\varepsilon$ is a stability constant.
-
-Parent selection uses inverse temperature $\beta_{\mathrm{sel}}$:
-
-$$
-P(A\mid f)=\frac{\exp\left(\beta_{\mathrm{sel}}\tilde{f}(A)\right)}{\sum_{B\in I_f}\exp\left(\beta_{\mathrm{sel}}\tilde{f}(B)\right)}.
-$$
-
-*Variables.* $P(A\mid f)$ is the probability of selecting runtime $A$ from island $I_f$ under objective $f$. Larger $\beta_{\mathrm{sel}}$ sharpens selection.
-
-Within a cell, child $A'$ replaces elite $A$ under objective $f$ iff
-
-$$
-A' \succ_f A \iff \left(f(A')>f(A)+\delta_f\right) \;\vee\; \left(|f(A')-f(A)|\le \delta_f\ \land\ \ell(A')<\ell(A)\right).
-$$
-
-*Variables.* $\delta_f$ is the score tolerance for objective $f$. $\ell(A)$ measures mutable-code complexity using edited AST nodes, with changed LOC as the secondary tie-breaker.
-
-### 6.3 Scope scheduler and credit assignment
-
-Let $\mathcal{S}_t$ be the admissible mutation scopes at outer-search step $t$. Maintain:
-
-- singleton counterfactual credits $a_t(i)$ for each interface $i$,
-- pairwise interaction credits $b_t(i,j)$ for each unordered pair $i<j$,
-- objective-conditioned scope credit $c_{f,t}(S)$ for every admissible scope $S$,
-- staleness $\mathrm{stagn}_t(S)$, need $\mathrm{need}_t(S)$, and hard-failure rate $\mathrm{hardfail}_t(S)$.
-
-Aggregate global scope credit is
-
-$$
-c_t(S)=\sum_{i\in S} a_t(i)+\sum_{i<j,\ i,j\in S} b_t(i,j).
-$$
-
-*Variables.* $c_t(S)$ is the global scope credit for mutation scope $S$, obtained by summing singleton and pairwise interaction credits.
-
-Scope utility for objective $f$ is
-
-$$
-u_t(S\mid f) = \omega_1 c_t(S) +\omega_2 c_{f,t}(S) +\omega_3 \mathrm{stagn}_t(S) +\omega_4 \mathrm{need}_t(S) -\omega_5 \mathrm{hardfail}_t(S) -\omega_6 |S|.
-$$
-
-*Variables.* $u_t(S\mid f)$ is the scope utility for scope $S$ when optimizing objective $f$. $\omega_i$ are scheduler weights.
-
-Scopes are sampled by softmax:
-
-$$
-P(S_t=S)=\frac{\exp\left(\beta_{\mathrm{scope}} u_t(S\mid f)\right)}{\sum_{S'\in \mathcal{S}_t}\exp\left(\beta_{\mathrm{scope}} u_t(S'\mid f)\right)}.
-$$
-
-*Variables.* $S_t$ is the mutation scope selected at outer step $t$. $\beta_{\mathrm{scope}}$ is the scope-selection inverse temperature.
-
-Credit is updated for every fully evaluated child, whether or not it enters the archive. For child $A'_t$ derived from parent $A_t$ with exact touched scope $S$,
-
-$$
-\Delta_f(A'_t,A_t) = \frac{\sum_{x\in X_{\mathrm{train}}} w_x \left(s_x(A'_t)-s_x(A_t)\right)}{\max\left(1,|S|\right)}.
-$$
-
-*Variables.* $\Delta_f(A'_t,A_t)$ is the objective-conditioned credit signal assigned to scope $S$. $w_x$ are task weights, uniform within family by default.
-
-Then
-
-$$
-c_{f,t+1}(S)=(1-\xi_f)c_{f,t}(S)+\xi_f \Delta_f(A'_t,A_t)\,\mathbf{1}\left[S=\mathrm{touch}(A_t,A'_t)\right].
-$$
-
-*Variables.* $\xi_f$ is the exponential-moving-average update rate for objective-conditioned scope credit. $\mathrm{touch}(A_t,A'_t)$ is the exact mutated interface set.
-
-For accepted children only, compute counterfactual singleton and pair contributions on a fixed attribution proxy suite $P_{\mathrm{att}}(S)$. Let $g_S(\cdot)$ be the mean proxy score on that suite. For interface $i\in S$, let $A'_{-i}$ revert only the interface-$i$ hunks, and for pair $\{i,j\}\subseteq S$, let $A'_{-\{i,j\}}$ revert both. Then
-
-$$
-\begin{align}
-\Delta_i &= g_S(A')-g_S(A'_{-i}), \\
-\Delta_{ij} &= g_S(A')-g_S(A'_{-i})-g_S(A'_{-j})+g_S(A'_{-\{i,j\}}).
-\end{align}
-$$
-
-*Variables.* $\Delta_i$ and $\Delta_{ij}$ are singleton and pairwise counterfactual contributions of accepted child $A'$.
-
-Update singleton and pair credits by
-
-$$
-\begin{align}
-a_{t+1}(i) &= (1-\xi_a)a_t(i)+\xi_a \Delta_i, \\
-b_{t+1}(i,j) &= (1-\xi_b)b_t(i,j)+\xi_b \Delta_{ij}.
-\end{align}
-$$
-
-*Variables.* $\xi_a$ and $\xi_b$ are the update rates for singleton and pairwise interaction credits.
-
-### 6.4 Interface-wise crossover and outer loop
-
-Crossover is allowed only at whole-method granularity on disjoint mutable symbols. A valid crossover selects at most one donor per mutable method, rejects overlapping symbol edits, reparses the merged file set, and passes the same staged evaluation used for ordinary mutations.
-
-**Algorithm 1. Outer evolutionary search**
-
-1. Initialize the archive with one baseline runtime and 4--8 subsystem-local handwritten variants.
-2. Sample an objective $f \in \mathcal{F}_{\mathrm{obj}}$.
-3. Sample a mutation scope $S_t$ from the scope scheduler.
-4. Sample a parent from island $I_f$; optionally apply whole-method crossover.
-5. Build a mutation prompt from the mutable files, contracts, predictor summaries, recent failing train-set traces, and high-performing exemplars.
-6. Request exact SEARCH/REPLACE patches.
-7. Apply the patch; reject immediately on parser, contract, or immutability failure.
-8. Run staged evaluation.
-9. Update hard-failure statistics.
-10. If full evaluation completed, update scope credit.
-11. Insert the child into every improved archive cell.
-12. Periodically score leaders on validation and advance the curriculum when the trigger in Section~\ref{sec:curriculum} fires.
-13. At the end, select leaders on validation and evaluate them once on the held-out test set.
-
-## 7. Evolution of Self-Generating Topology
-
-Topology evolves the runtime logic that decides whether a task is solved by a single agent, by vertical decomposition into specialized children, or by a small horizontal ensemble.
-
-### 7.1 Agent reuse versus creation
-
-Let $q_x$ be the task representation, $T_x$ the predicted tool footprint, $\Gamma_x$ the required capability multiset, and $d_a$, $T_a$, $\Gamma_a$ the description, canonical tool scope, and capability multiset of stored agent $a$. Reuse is scored by
-
-$$
-\begin{aligned}
-r_A(a\mid x)=\;&
-\alpha_1 \mathrm{sim}(d_a,q_x)
-{} +\alpha_2 \mathrm{overlap}(T_a,T_x)
-{} +\alpha_3 J(\Gamma_a,\Gamma_x)
-{} +\alpha_4 \mathrm{succ}(a,f(x)) \\
-&\; + \alpha_5 \mathrm{reusefit}(a,x)
-{} -\alpha_6 \mathrm{ctx}(a)
-{} -\alpha_7 \mathrm{stale}(a)
-{} -\alpha_8 \mathrm{permgap}(a,x).
-\end{aligned}
-$$
-
-*Variables.* $r_A(a\mid x)$ is the reuse score of stored agent $a$ for task $x$. $J(\cdot,\cdot)$ is Jaccard overlap on capability multisets. $\mathrm{succ}(a,f(x))$ is family-conditioned historical success. $\mathrm{ctx}(a)$ is prompt overhead and $\mathrm{permgap}(a,x)$ penalizes permission mismatch.
-
-Create a new child only when
-
-$$
-\max_a r_A(a\mid x)<\theta_{\mathrm{create}} \quad\text{or}\quad \mathrm{capgap}(x,a^*)>\eta_{\mathrm{gap}},
-$$
-
-*Variables.* $\theta_{\mathrm{create}}$ is the reuse-versus-create threshold. $\mathrm{capgap}(x,a^*)$ is the uncovered capability mass of the best reusable agent $a^*$.
-
-### 7.2 Mode selection and child gating
-
-Given runtime state $z_t$ and task $x$, choose
-
-$$
-c_t^*(x)=\operatorname*{argmax}_{c\in\left\{\mathrm{single},\mathrm{vertical},\mathrm{horizontal}\right\}} \left[\hat{p}_{\mathrm{solve}}(c\mid z_t,x)-\lambda_C \hat{C}(c\mid z_t,x)-\lambda_L \hat{L}(c\mid z_t,x)-\lambda_Q \hat{Q}(c\mid z_t,x)\right].
-$$
-
-*Variables.* $c_t^*(x)$ is the selected topology mode. $\hat{p}_{\mathrm{solve}}$, $\hat{C}$, $\hat{L}$, and $\hat{Q}$ predict solve probability, cost, latency, and coordination risk.
-
-For candidate child specification $z_j$,
-
-$$
-\Delta_j(x) = \hat{p}_{\mathrm{solve}}(z_j\mid x,z_t) - \hat{p}_{\mathrm{solve}}(\varnothing\mid x,z_t) - \lambda_{\mathrm{spawn}} - \lambda_{\mathrm{coord}}\, \mathrm{fanout}(z_j) - \lambda_{\mathrm{dep}}\, \mathrm{unmet}(z_j).
-$$
-
-*Variables.* $\Delta_j(x)$ is the marginal value of spawning child $j$. $\varnothing$ denotes not spawning any extra child. $\mathrm{fanout}(z_j)$ is the coordination burden and $\mathrm{unmet}(z_j)$ is the number or weighted mass of unresolved dependencies.
-
-Spawn the child only if $\Delta_j(x)>0$. Children are ordered. Each child receives an independent short-term-memory root plus a checkpoint policy of summary + handles + artifacts.
-
-### 7.3 Joint tool-scope assignment
-
-Let $R^{\mathrm{cand}}_j$ be the candidate tools for child $j$, after category-first discovery. The selected scope is
-
-$$
-T_j^* = \operatorname*{argmax}_{T\subseteq R^{\mathrm{cand}}_j,\ |T|\le 12} \left[ \mathrm{cov}(T,z_j) - \lambda_{\mathrm{size}} |T| - \lambda_{\mathrm{cf}} \mathrm{conflict}(T) - \lambda_{\mathrm{cold}} \sum_{\tau\in T}\mathrm{coldstart}(\tau) \right].
-$$
-
-*Variables.* $T_j^*$ is the assigned tool scope for child $j$. $\mathrm{cov}(T,z_j)$ measures how well tool set $T$ covers child needs. $\mathrm{conflict}(T)$ penalizes overlapping or incompatible tools.
-
-This optimization is solved greedily over the top 12 candidate tools returned by category-first discovery.
-
-### 7.4 Horizontal worker subset selection
-
-Let $W_{\mathrm{cand}}$ be the candidate workers proposed for the same task. Select the worker subset directly:
-
-$$
-\begin{aligned}
-W^* = \operatorname*{argmax}_{W\subseteq W_{\mathrm{cand}},\ 1\le |W|\le K_{\max}}
-\Biggl[
-&1-\prod_{j\in W}(1-\hat{p}_j)
-{} -\lambda_D \frac{2}{\max\left(1,|W|(|W|-1)\right)} \sum_{i<j,\ i,j\in W}\mathrm{sim}(p_i,p_j) \\
-&-\lambda_K |W|
-{} -\lambda_T \sum_{j\in W}\frac{\hat{T}_j}{T_0}
-{} -\lambda_L \max_{j\in W}\frac{\hat{L}_j}{L_0}
-\Biggr].
-\end{aligned}
-$$
-
-*Variables.* $W^*$ is the selected worker subset. $\hat{p}_j$, $\hat{T}_j$, and $\hat{L}_j$ are predicted solve probability, token cost, and latency for worker $j$. $\mathrm{sim}(p_i,p_j)$ measures plan similarity. $K_{\max}$ is the maximum ensemble size.
-
-The optimization is implemented by greedy forward selection up to $K_{\max}=3$.
-
-### 7.5 Deterministic merge policy and topology runtime
-
-Worker outputs are merged in deterministic order: verified artifacts first, then by verifier support score, then by predicted solve probability, then by unresolved-critical-count ascending, and finally by lexicographic worker id.
-
-**Algorithm 2. Runtime topology control**
-
-1. Search the stored-agent pool before any child creation; create only when reuse falls below $\theta_{\mathrm{create}}$ or capability gap remains too large.
-2. Estimate the best control mode under the mode objective using task difficulty, context saturation, tool cold-start cost, and verifier hints.
-3. If vertical, propose ordered child specifications, assign each a minimal tool scope, attach an independent short-term root, and spawn only positive-$\Delta_j$ children.
-4. If horizontal, create at most $K_{\max}$ materially different workers; require plan diversity rather than superficial prompt perturbation.
-5. Persist tool calls, child summaries, verifier evidence, and open async handles into the short-term graph; expose only compressed summaries to the parent.
-6. Resume children from the latest checkpoint summary, unresolved goals, open handles, and artifact references rather than from raw transcripts.
-
-## 8. Evolution of Hierarchical Memory
-
-### 8.1 Short-term and long-term graphs
-
-Short-term memory is an append-only directed graph with the node and edge types specified in Section~2. Long-term memory stores reusable abstractions rather than transcripts. Every long-term node must expose base fields for type, label, content, embedding, exact symbol set, file paths, source task id, verifier support, timestamps, and provenance.
-
-### 8.2 Compaction as global budget control
-
-For candidate span $h_i$ and action $a\in\left\{\mathrm{keep},\mathrm{summarize},\mathrm{checkpoint}\right\}$,
-
-$$
-\mathrm{score}_{\mathrm{cmp}}(h_i,a) = \hat{R}_{\mathrm{ret}}(a\mid h_i) + \lambda_{\mathrm{tok}} \Delta \mathrm{tok}(h_i,a) - \lambda_{\mathrm{loss}} \hat{L}_{\mathrm{info}}(a\mid h_i) - \lambda_{\mathrm{lat}} \hat{T}_{\mathrm{cmp}}(a\mid h_i) - \lambda_{\mathrm{orph}} O(h_i,a).
-$$
-
-*Variables.* $\mathrm{score}_{\mathrm{cmp}}(h_i,a)$ is the compaction score. $\Delta \mathrm{tok}(h_i,a)$ is tokens saved by action $a$ on span $h_i$. $\hat{R}_{\mathrm{ret}}$ predicts retained utility, $\hat{L}_{\mathrm{info}}$ predicts information loss, $\hat{T}_{\mathrm{cmp}}$ predicts compaction latency, and $O(h_i,a)$ penalizes orphaned raw outputs, artifact references, or async handles.
-
-If active-history budget fraction $b_t > B_{\mathrm{hi}}$, collect all admissible $(h_i,a)$ pairs, rank them by density
-
-$$
-\mathrm{density}(h_i,a) = \frac{\mathrm{score}_{\mathrm{cmp}}(h_i,a)}{\max\left(1,\Delta \mathrm{tok}(h_i,a)\right)},
-$$
-
-*Variables.* $\mathrm{density}(h_i,a)$ prioritizes actions that save prompt budget efficiently while preserving downstream utility.
-
-apply the highest-density positive actions greedily, and continue until $b_t < B_{\mathrm{lo}}$. If no positive action exists but the hard context limit is exceeded, summarize oldest spans first as a last resort. Every summary must preserve the fields in `SummaryRecord`.
-
-### 8.3 Long-term retrieval
-
-Given query $q_x$, build the candidate set as the union of exact symbol or file-path matches, top-$M_e$ embedding neighbors, one-hop graph expansions around exact matches, and top-$M_{\ell}$ lexical matches. Exact symbol and path matches dominate embeddings. Retrieval score is
-
-$$
-\mathrm{score}_L(v\mid q_x)
-=
-\begin{cases}
-\begin{aligned}
-1 &+ \lambda_{\mathrm{path}}\, \mathrm{pathbonus}(v,q_x)
-{} + \lambda_{\nu}\, \mathrm{verifysupport}(v) \\
-&+ \lambda_{\mathrm{prov}}\, \mathrm{provenance}(v),
-\end{aligned}
-& \mathrm{exactsym}(v,q_x)=1, \\[0.35em]
-\begin{aligned}
-&\lambda_1 \tilde{f}_{\cos}
-{} + \lambda_2 \tilde{f}_{\mathrm{lex}}
-{} + \lambda_3 \tilde{f}_{\mathrm{type}}
-{} + \lambda_4 \tilde{f}_{\mathrm{path}} \\
-&\quad + \lambda_5 \tilde{f}_{\mathrm{rec}}
-{} + \lambda_6 \tilde{f}_{\nu}
-{} + \lambda_7 \tilde{f}_{\mathrm{prov}}
-{} - \lambda_8 \tilde{f}_{\mathrm{stale}},
-\end{aligned}
-& \text{otherwise.}
-\end{cases}
-$$
-
-*Variables.* $\mathrm{score}_L(v\mid q_x)$ ranks long-term memory node $v$ for query $q_x$. $\mathrm{exactsym}(v,q_x)$ detects exact symbol agreement. The $\tilde{f}$ terms are normalized cosine, lexical, type, path, recency, verifier-support, provenance, and staleness features.
-
-Before online fitting, default normalized weights are
-
-$$
-(\lambda_1,\dots,\lambda_8)=(0.30,0.20,0.15,0.10,0.10,0.10,0.05,0.05).
-$$
-
-### 8.4 Promotion, deduplication, and writes
-
-For candidate memory unit $u$,
-
-$$
-p_{\mathrm{prom}}(u)
-=
-\sigma\!\left(
-\begin{aligned}
-& w_1 n(u) + w_2 r(u) + w_3 c(u) + w_4 \nu(u) + w_5 t(u) \\
-& + w_6 \mathrm{comp}(u) - w_7 d(u) - w_8 w(u) - w_9 \mathrm{contrad}(u)
-\end{aligned}
-\right).
-$$
-
-*Variables.* $p_{\mathrm{prom}}(u)$ is the promotion probability for unit $u$. $n(u)$ is novelty, $r(u)$ anticipated reuse, $c(u)$ artifact centrality, $\nu(u)$ verifier support, $t(u)$ task-spread potential, $\mathrm{comp}(u)$ compositional value, $d(u)$ duplicate risk, $w(u)$ write or maintenance cost, and $\mathrm{contrad}(u)$ contradiction risk.
-
-Promote iff $p_{\mathrm{prom}}(u)\ge \theta_{\mathrm{prom}}$, and for claim-like nodes additionally require $\nu(u)\ge \eta_{\nu}$.
-
-Deduplication is type-aware:
-
-$$
-\mathrm{merge}(u,v)
-=
-\mathbf{1}\!\left[
-\begin{aligned}
-&\mathrm{type}(u)=\mathrm{type}(v) \\
-&\land \Bigl(
-\mathrm{primarykey}(u,v)=1
-\ \vee\
-\left(\mathrm{exactsym}(u,v)\land \mathrm{namespace\_match}(u,v)\right) \\
-&\qquad\qquad \vee\
-\left(\cos(e_u,e_v)>\theta_e \land \mathrm{jaccard}(\mathrm{tok}(u),\mathrm{tok}(v))>\theta_{\ell}\right)
-\Bigr)
-\end{aligned}
-\right].
-$$
-
-*Variables.* $\mathrm{merge}(u,v)$ is the deduplication predicate for memory units $u$ and $v$. Exact symbols plus namespace or path agreement dominate. Otherwise both embedding and lexical overlap thresholds must be satisfied.
-
-Given local neighborhood $N_u$, choose the write action by
-
-$$
-a^*(u) = \operatorname*{argmax}_{a\in\left\{\mathrm{merge},\mathrm{refine},\mathrm{new},\mathrm{tombstone}\right\}} \left[ \hat{G}(a\mid u,N_u) - \lambda_E \hat{E}(a\mid u,N_u) - \lambda_C \mathrm{contrad}(a\mid u,N_u) \right].
-$$
-
-*Variables.* $a^*(u)$ is the selected write action for unit $u$. $\hat{G}$ predicts utility gain, $\hat{E}$ predicts edit or maintenance cost, and $\mathrm{contrad}(a\mid u,N_u)$ measures contradiction risk in the local graph neighborhood.
-
-## 9. Evolution of Dynamic Tooling
-
-### 9.1 Category-first discovery and reusable-tool ranking
-
-Let $d_c$ be category summary, $n_c$ the number of descendant leaf tools, $\mathrm{histpass}(c)$ the historical pass rate of tools in category $c$, and $\mathrm{coldstart}(c)$ its median cold-start cost. Categories are ranked by
-
-$$
-\begin{aligned}
-r_c(c\mid q_x)=\;&
-\alpha_1 \mathrm{sim}(d_c,q_x)
-{} +\alpha_2 \mathrm{iface}(c,q_x)
-{} +\alpha_3 \mathrm{histpass}(c)
-{} +\alpha_4 \mathrm{cachehit}(c) \\
-&\; - \alpha_5 \log(1+n_c)
-{} -\alpha_6 \mathrm{coldstart}(c)
-{} -\alpha_7 \mathrm{permrisk}(c).
-\end{aligned}
-$$
-
-*Variables.* $r_c(c\mid q_x)$ is the ranking score for category $c$ under query $q_x$. $\mathrm{iface}(c,q_x)$ measures interface relevance, $\mathrm{cachehit}(c)$ measures environment reuse, and $\mathrm{permrisk}(c)$ measures permission risk.
-
-Inspect only the top $k_c$ categories.
-
-For reusable tool $\tau$ with metadata $m_{\tau}$,
-
-$$
-\begin{aligned}
-r_{\tau}(\tau\mid q_x)=\;&
-\beta_1 \mathrm{sim}(m_{\tau},q_x)
-{} +\beta_2 \mathrm{sigmatch}(\tau,q_x)
-{} +\beta_3 \mathrm{pass}(\tau)
-{} +\beta_4 \mathrm{cachehit}(\tau) \\
-&\; - \beta_5 \mathrm{coldstart}(\tau)
-{} -\beta_6 \mathrm{permrisk}(\tau)
-{} -\beta_7 \mathrm{depdepth}(\tau).
-\end{aligned}
-$$
-
-*Variables.* $r_{\tau}(\tau\mid q_x)$ is the ranking score for reusable tool $\tau$. $\mathrm{sigmatch}(\tau,q_x)$ compares argument and return signatures against the current need. $\mathrm{depdepth}(\tau)$ is transitive dependency depth.
-
-### 9.2 Build versus reuse
-
-Creation is allowed only when new-tool value exceeds the best reusable option including expected future reuse:
-
-$$
-\mathrm{create}(q_x) = \mathbf{1}\!\left[ \hat{G}^{\mathrm{curr}}_{\mathrm{new}}(q_x) + \lambda_F \hat{G}^{\mathrm{future}}_{\mathrm{new}}(q_x) - \max_{\tau\in R}\hat{G}_{\mathrm{reuse}}(\tau,q_x) > \lambda_B \hat{B}(q_x) + \lambda_E \hat{E}(q_x) + \lambda_S \hat{S}(q_x) \right].
-$$
-
-*Variables.* $\mathrm{create}(q_x)$ is the build-versus-reuse decision for task query $q_x$. $\hat{G}^{\mathrm{curr}}_{\mathrm{new}}$ is current-task gain from a new tool, $\hat{G}^{\mathrm{future}}_{\mathrm{new}}$ is expected future reuse value, and $\hat{B}$, $\hat{E}$, and $\hat{S}$ estimate build, execution, and safety cost.
-
-### 9.3 Tool specification, validation, promotion, and async dispatch
-
-A synthesized tool must emit a complete `ToolSpec` and source file. Validation is mandatory: parse or syntax check, linter and import resolution, signature and schema check, smoke test, permission-boundary test, timeout test, and deterministic-output replay under a fixed seed and workspace snapshot.
-
-A tool failing only non-critical deterministic replay may still be used as a task-local ephemeral tool if it is explicitly marked non-promotable and its outputs remain verifier-checkable. All other validation failures reject the tool.
-
-Promotion requires both quality and reuse on distinct tasks:
-
-$$
-\mathrm{promote}(\tau)
-=
-\mathbf{1}\!\left[
-\begin{aligned}
-&\mathrm{passrate}(\tau)\ge \eta_p
-\ \land\
-\mathrm{distinct\_task\_reuse}(\tau)\ge \eta_r \\
-&\land\
-\mathrm{safe}(\tau)=1
-\ \land\
-\mathrm{detclass}(\tau)=\mathrm{stable}
-\end{aligned}
-\right].
-$$
-
-*Variables.* $\mathrm{promote}(\tau)$ decides whether tool $\tau$ enters the reusable registry. $\eta_p$ and $\eta_r$ are promotion thresholds for pass rate and distinct-task reuse. Only stable tools may be promoted.
-
-Environment reuse must be content-based:
-
-$$
-h(\tau)=H\!\left(
-\begin{aligned}
-&\mathrm{source\_digest}(\tau),\ \mathrm{runtime}(\tau),\ \mathrm{deps}(\tau),\ \mathrm{permissions}(\tau),\\
-&\mathrm{base\_image\_digest}(\tau),\ \mathrm{compiler\_flags}(\tau),\ \mathrm{mount\_spec}(\tau),\ \mathrm{test\_digest}(\tau)
-\end{aligned}
-\right).
-$$
-
-*Variables.* $h(\tau)$ is the deterministic sandbox hash for tool $\tau$. It includes code identity, runtime, dependencies, permissions, base image, compilation flags, mount specification, and tests.
-
-Dispatch chooses sync versus async using
-
-$$
-\mathrm{async}(\tau,x)=\mathbf{1}\left[\hat{L}_{\tau}(x)>t_{\mathrm{slice}} \ \vee\ \mathrm{backgroundable}(\tau)=1\right].
-$$
-
-*Variables.* $\mathrm{async}(\tau,x)$ is the asynchronous-dispatch predicate for tool $\tau$ on task $x$. $t_{\mathrm{slice}}$ is the synchronous time slice.
-
-Background jobs return stable handles with mandatory fields for handle id, tool name, sandbox hash, working directory, launch time, timeout, stdout path, stderr path, state, and artifact references.
-
-**Algorithm 3. Task-time tool policy**
-
-1. Rank categories and inspect only the top $k_c$.
-2. Rank reusable tools inside inspected categories.
-3. If reuse is sufficient, dispatch the best reusable tool.
-4. Otherwise evaluate the build-versus-reuse gate.
-5. If creation is warranted, synthesize source plus `ToolSpec`, validate, and dispatch the tool as task-local or reusable as appropriate.
-6. Promote only after pass-rate, distinct-task reuse, safety, and determinism thresholds are met.
-7. Store failing traces, sandbox hashes, and cached build products for future reuse decisions.
-
-## 10. Budget, Verification, and Stopping Control
-
-### 10.1 Budget state
-
-The normalized budget state is
-
-$$
-b_t= \left( \frac{\mathrm{cost}_t}{C_{\max}}, \frac{\mathrm{lat}_t}{L_{\max}}, \frac{\mathrm{calls}_t}{M_{\max}}, \frac{\mathrm{checks}_t}{Q_{\max}} \right).
-$$
-
-*Variables.* $b_t$ summarizes consumed cost, latency, model-call count, and checker count relative to hard maxima $C_{\max}$, $L_{\max}$, $M_{\max}$, and $Q_{\max}$. Remaining budget fractions are derived from the same state.
-
-### 10.2 Model allocation
-
-Model allocation is a control-surface decision. Topology proposes role and scope; control chooses the cheapest model class that still satisfies predicted solve requirements and remaining budget. For subgoal $g$,
-
-$$
-m^*(g)= \operatorname*{argmax}_{m\in \mathcal{M}_g} \left[ \hat{p}_{\mathrm{solve}}(m\mid g) - \lambda_C \hat{C}(m\mid g) - \lambda_L \hat{L}(m\mid g) - \lambda_{\$} \hat{\$}(m\mid g) - \lambda_F \hat{p}_{\mathrm{fail}}(m\mid g) \right]
-$$
-
-*Variables.* $m^*(g)$ is the selected model class for subgoal $g$. $\mathcal{M}_g$ is the set of admissible model classes. $\hat{C}$, $\hat{L}$, and $\hat{\$}$ predict token, latency, and monetary cost. $\hat{p}_{\mathrm{fail}}$ predicts operational failure probability.
-
-subject to remaining budget and minimum confidence threshold
-
-$$
-\hat{p}_{\mathrm{solve}}(m^*(g)\mid g)\ge \pi_{\min}(g).
-$$
-
-*Variables.* $\pi_{\min}(g)$ is the minimum confidence threshold for subgoal $g$.
-
-After two consecutive negative-improvement steps on the same unresolved subgoal, one class escalation is allowed: small to medium to large.
-
-### 10.3 Verification request policy
-
-Let $\mathcal{K}=\left\{\mathrm{local},\mathrm{subtree},\mathrm{repo},\mathrm{benchmark}\right\}$ denote a checker ladder ordered from cheap to expensive. For evidence package $e$ and checker $k$,
-
-$$
-\mathrm{VOI}(k\mid e) = \hat{p}_{\mathrm{issue}}(k\mid e)\cdot \hat{L}_{\mathrm{miss}}(k\mid e)\cdot \hat{p}_{\mathrm{flip}}(k\mid e) - \lambda_C \hat{C}_k(e) - \lambda_L \hat{L}_k(e).
-$$
-
-*Variables.* $\mathrm{VOI}(k\mid e)$ is the value of information of checker $k$ for evidence package $e$. $\hat{p}_{\mathrm{issue}}$ is the probability that the checker reveals a real issue, $\hat{L}_{\mathrm{miss}}$ is the loss of missing it, $\hat{p}_{\mathrm{flip}}$ is the probability that the issue changes a downstream decision, and $\hat{C}_k$, $\hat{L}_k$ are checker cost and latency.
-
-Run the cheapest checker with positive value of information. Escalate only if the cheaper checker passed but uncertainty remains, the artifact is externally visible, or a parent merge depends on the child output. If an exact benchmark verifier exists for an irreversible or externally visible final artifact, run it unless a hard benchmark limit forbids it.
-
-### 10.4 Stopping rule
-
-Let $u^{\mathrm{best}}_t$ be the best optimistic next-step utility among admissible actions. Stop iff
-
-$$
-\mathrm{stop}_t
-=
-\mathbf{1}\!\left[
-\begin{aligned}
-&\mathrm{pass}_t=1
-\ \vee\
-\mathrm{budget\_exhausted}_t=1 \\
-&\vee\
-\left(
-u^{\mathrm{best}}_t<0
-\ \land\
-u^{\mathrm{best}}_{t-1}<0
-\ \land\
-\mathrm{unresolved}_t=0
-\ \land\
-\mathrm{verified\_terminal}_t=1\right)
-\end{aligned}
-\right].
-$$
-
-*Variables.* $\mathrm{stop}_t$ is the stopping predicate at step $t$. $\mathrm{pass}_t$ indicates decisive verifier success. $\mathrm{budget\_exhausted}_t$ indicates a hard budget boundary. $\mathrm{unresolved}_t$ counts unresolved goals and $\mathrm{verified\_terminal}_t$ indicates that a verified terminal artifact already exists.
-
-If no verified terminal artifact exists and all admissible actions are negative, the runtime emits best-effort output only when the benchmark explicitly allows it; otherwise it returns controlled failure.
-
-## 11. Mutation Contract, Prompt, and Curriculum
-
-### 11.1 Required patch format
-
-> `<<<<<<< SEARCH`  
-> `<exact source lines, up to 8 lines>`  
-> `=======`  
-> `<replacement lines>`  
-> `>>>>>>> REPLACE`
-
-Rules:
-
-1. SEARCH must match exactly, character for character.
-2. Only SEARCH/REPLACE blocks may be returned.
-3. One to four blocks are allowed per mutation by default.
-4. Total changed lines must remain local and may not exceed 60 lines.
-5. Blocks touching immutable files are rejected before parsing.
-6. Blocks with non-unique SEARCH matches are rejected.
-7. Large rewrites are disallowed.
-
-### 11.2 Mutation prompt contents
-
-Every mutation prompt must include the sampled objective, mutable files only, immutable-file manifest, mutable-method contracts, predictor summaries, recent failing train-set traces, and 2--6 high-performing exemplars from the archive. Validation and test traces are forbidden.
-
-### 11.3 Admissible scopes by phase
-
-The three curriculum phases are defined as
-
-$$
-\mathcal{S}_{\mathrm{local}} = \left\{\left\{\mathrm{top}\right\}, \left\{\mathrm{mem}\right\}, \left\{\mathrm{tool}\right\}, \left\{\mathrm{ctl}\right\}\right\},
-$$
-
-*Variables.* $\mathcal{S}_{\mathrm{local}}$ contains all singleton mutation scopes.
-
-$$
-\mathcal{S}_{\mathrm{pair}} = \left\{S\subseteq \left\{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}\right\} : |S|=2\right\},
-$$
-
-*Variables.* $\mathcal{S}_{\mathrm{pair}}$ contains all six pairwise mutation scopes.
-
-$$
-\mathcal{S}_{\mathrm{joint}} = \left\{S\subseteq \left\{\mathrm{top},\mathrm{mem},\mathrm{tool},\mathrm{ctl}\right\} : |S|\in \left\{3,4\right\}\right\}.
-$$
-
-*Variables.* $\mathcal{S}_{\mathrm{joint}}$ contains all joint scopes of size three or four.
-
-### 11.4 Curriculum schedule
-
-The default schedule is 1200 local mutations, 600 pairwise mutations, and 300 joint mutations. A phase can end early if the advancement trigger fires:
-
-$$
-\mathrm{advance}(t) = \mathbf{1}\left[ \Delta_{\mathrm{val}}^{(w)}<\epsilon_{\Delta} \ \land\ \mathrm{cov}_t>\eta_{\mathrm{cov}} \ \land\ \mathrm{pass}_t>\eta_{\mathrm{pass}} \right].
-$$
-
-*Variables.* $\mathrm{advance}(t)$ is the curriculum-advancement predicate. $\Delta_{\mathrm{val}}^{(w)}$ is trailing-window validation improvement, $\mathrm{cov}_t$ is accepted-method coverage in the current phase, and $\mathrm{pass}_t$ is the Stage-3 to Stage-4 advancement rate.
-
-## 12. Staged Evaluation and Compute Control
-
-### 12.1 Evaluation stages
-
-**Stage 0: patch integrity.** Patch applies uniquely, mutable boundaries are respected, AST parses, formatter and linter pass.
-
-**Stage 1: safety and determinism smoke.** Fixed smoke task, fixed-seed replay, no forbidden access, checkpoint integrity, open-handle integrity.
-
-**Stage 2: touched-family proxies.** Run only proxy tasks relevant to the touched scopes. Advance if
-
-$$
-\mathrm{LCB}_{\mathrm{proxy}} = \Delta_{\mathrm{proxy}} - 1.0 \cdot \mathrm{SE}_{\mathrm{proxy}} > -\epsilon_{\mathrm{proxy}}.
-$$
-
-*Variables.* $\mathrm{LCB}_{\mathrm{proxy}}$ is the lower-confidence bound on proxy improvement. $\Delta_{\mathrm{proxy}}$ and $\mathrm{SE}_{\mathrm{proxy}}$ are the proxy-set mean improvement and its standard error.
-
-**Stage 3: objective-local training subset.** If the active objective is a single-task score, evaluate that task plus the two nearest same-family tasks. If the objective is a family average, evaluate four representative tasks from that family. If the objective is global, evaluate one task from each family. Advance if
-
-$$
-\mathrm{LCB}_{\mathrm{part}} = \Delta_{\mathrm{part}} - 1.0 \cdot \mathrm{SE}_{\mathrm{part}} > -\epsilon_{\mathrm{part}}.
-$$
-
-*Variables.* $\mathrm{LCB}_{\mathrm{part}}$ is the lower-confidence bound on the objective-local training subset. $\Delta_{\mathrm{part}}$ and $\mathrm{SE}_{\mathrm{part}}$ are the mean child-minus-parent improvement and its standard error on the subset.
-
-**Stage 4: full training suite.** Evaluate all of $X_{\mathrm{train}}$ under the full seed set. Archive insertion and scope credit are computed only here. Within Stage 4, early rejection is allowed by minibatch:
-
-$$
-\bar{d}_B + 1.96\, \mathrm{se}_B < -\delta_{\mathrm{rej}}.
-$$
-
-*Variables.* $\bar{d}_B$ and $\mathrm{se}_B$ are the mean child-minus-parent score delta and its standard error on the current full-train minibatch $B$. $\delta_{\mathrm{rej}}$ is the early-rejection margin.
-
-**Stage 5: periodic validation.** Evaluate current leaders on $X_{\mathrm{val}}$ without exposing those traces to the mutator.
-
-### 12.2 Compute budget accounting
-
-If $N_{\mathrm{mut}}$ mutations are attempted and stage pass rates are $p_1$, $p_2$, and $p_3$, then expected full-suite task-runs are
-
-$$
-N_{\mathrm{full}} = N_{\mathrm{mut}}\, p_1 p_2 p_3\, |X_{\mathrm{train}}|\, R.
-$$
-
-*Variables.* $N_{\mathrm{full}}$ is the expected number of full-suite task-seed runs. $p_1$, $p_2$, and $p_3$ are pass rates through Stages 1, 2, and 3, respectively.
-
-Recommended pass-rate caps are $p_1\le 0.35$, $p_2\le 0.15$, and $p_3\le 0.05$. If they are exceeded, the evaluator should tighten thresholds before search proceeds.
-
-## 13. Deterministic Implementation Notes
-
-1. The canonical stored agent is never run directly. Clone-on-run is mandatory.
-2. Horizontal workers share only the append-only board, with locks and per-worker read cursors.
-3. Message-board state and open-handle tables must survive compaction and resume.
-4. Short-term memory is append-only except summary replacement with preserved backlinks.
-5. Long-term memory resets per evaluation unit unless transfer is explicitly scored.
-6. Category-first tool discovery is mandatory; loading the entire tool tree into context is forbidden.
-7. Sandbox reuse must be content-addressed by the hash in the tooling section.
-8. Exact symbol and path matches dominate embedding similarity in retrieval and deduplication.
-9. Merge order for worker outputs must be deterministic.
-10. Validation and test traces may never appear in mutation prompts.
-
-## 14. Minimal Reconstruction Sequence
-
-**Algorithm 4. Reconstruction from scratch**
-
-1. Implement the fixed shell: agent pool, tool registry, sandbox manager, short-term graph, long-term graph, open-handle table, benchmark adapters, verifiers, and safety guards.
-2. Implement one baseline self-programming runtime with handwritten policies for topology, memory, tooling, and control.
-3. Implement the mandatory schemas in Section~2.
-4. Build proxy suites for decomposition, retrieval, deduplication, build-versus-reuse, category ranking, async dispatch, checkpoint integrity, and resume fidelity.
-5. Implement the predictor family and online update loop.
-6. Implement the archive, scope scheduler, credit updates, and crossover.
-7. Implement the staged evaluator.
-8. Run local, then pairwise, then joint evolution under the curriculum.
-9. Choose leaders on validation only.
-10. Evaluate final selected runtimes once on held-out tasks with frozen shell, frozen model mappings, frozen sandboxes, and $R=5$ seeds.
+---
 
 ## 15. Recommended Defaults
 
-| Parameter group | Default values |
+These defaults are appropriate for the MVP and consistent with the current repository direction.
+
+| Parameter group | Recommended defaults |
 |---|---|
-| Core evaluation | $R_{\mathrm{proxy}}=1$, $R_{\mathrm{full}}=3$, $R_{\mathrm{val}}=5$, $R_{\mathrm{test}}=7$; $\beta_{\mathrm{sel}}=2.5$; $\delta_f=0.002$; $\theta_{\mathrm{create}}=0.58$; $K_{\max}=3$ |
-| Robustness | $\eta_{\sigma}=0.35$; $\alpha=\tfrac{1}{3}$; use $\rho_x$ for archive search and $\chi_x$ for validation tie-breaks |
-| Memory | $(B_{\mathrm{hi}},B_{\mathrm{lo}})=(0.75,0.55)$; $(\theta_e,\theta_{\ell})=(0.92,0.60)$ |
-| Tool promotion | $(\eta_p,\eta_r)=(0.80,\ 3\ \text{distinct tasks})$; $k_c\in\left\{3,4,5\right\}$; $t_{\mathrm{slice}}=60$ s |
-| Mutation budget | 1--4 patch blocks per mutation; $(N_{\mathrm{local}},N_{\mathrm{pair}},N_{\mathrm{joint}})=(1200,600,300)$ |
-| Curriculum thresholds | $\epsilon_{\Delta}=0.002$; $\eta_{\mathrm{cov}}=0.60$; $\eta_{\mathrm{pass}}=0.05$ |
-| Predictors | retrain after 50 fully evaluated children or 10 accepted elites; calibrate on the most recent 200 labels per task family; bootstrap ensemble size $B=5$ |
-| Compute caps | recommended pass-rate caps $(p_1,p_2,p_3)\le (0.35,0.15,0.05)$ |
+| Runtime interfaces | mutable surfaces are `top`, `mem`, `tool`, `ctl`; benchmark families are `top`, `mem`, `tool`, `e2e` |
+| Evaluation seeds | proxy: `1`; subset: `1`; full train: `3`; validation: `5`; held-out final: `5` or `7` |
+| Stage gates | deterministic smoke must pass repeated local replays; proxy and subset gates use LCB-style regression rejection |
+| Runtime budgets | `max_steps=64`, `model_calls_max=64`, `checks_max=16`, `context_window_tokens≈768` |
+| Topology defaults | `theta_create≈0.58`, `k_max≈3` |
+| Memory defaults | `b_hi≈0.75`, `b_lo≈0.55`, promotion and dedup thresholds near the current baseline values |
+| Tool defaults | category slice `k_c≈3`, promotion requires safety plus repeated successful reuse |
+| Evolution budgets | local scopes: about `1200`; pair scopes: about `600`; joint scopes: about `300` |
+| Crossover | enabled but low probability, around `0.15` |
+| Robustness | shrinkage variance with `eta_sigma≈0.35`; use robustness-adjusted score for search and CVaR-like tail risk for tie-breaks |
+| Providers | local deterministic provider required; hosted providers optional; exported runtime stores provider contract, not secrets |
 
-If strong determinism cannot be guaranteed by the model endpoint, set generation temperature to $0$ and keep repeated seeds enabled exactly as above.
+If a hosted endpoint cannot provide strong determinism, set temperature to zero and keep repeated-seed evaluation enabled.
 
-## 16. Failure Modes and Non-Negotiable Invariants
+---
 
-The following mismatches materially change results and therefore define the non-negotiable invariants of the framework.
+## 16. Acceptance Criteria
 
-1. Mutating the fixed shell is disallowed.
-2. Executing canonical stored agents directly is disallowed.
-3. Long-term memory carryover across nominally independent tasks is disallowed unless transfer is explicitly scored.
-4. Promoting synthesized tools without deterministic tests, explicit safety checks, and distinct-task reuse evidence is disallowed.
-5. Destroying raw-output reachability during compaction is disallowed.
-6. Losing message-board state or open-handle state during summarization or resume is disallowed.
-7. Full-suite archive scores must come only from full training evaluation.
-8. Validation and held-out tasks must remain invisible to the mutator.
-9. Environment reuse based on mutable container state rather than content hashes is disallowed.
-10. Category-first discovery may not be bypassed by loading the entire tool registry into prompt context.
-11. Using a stop rule that terminates without a verified terminal artifact when the benchmark requires verification is disallowed.
-12. Ignoring objective-conditioned scope credit or pairwise interaction credit materially weakens joint co-evolution and changes the method.
+A build is only complete if the system demonstrates the following as actual behavior, not just as source code.
 
-## 17. Closing Statement
+### 16.1 CLI and product behavior
 
-Agintor is a bounded evolutionary program-search method over the parts of a self-programming agent runtime that actually determine downstream behavior: which agents are created, what evidence is remembered, which tools are built or reused, which models and verifiers are invoked, and when the system stops. The method requires topology, memory, tooling, and control to be co-evolved under verifier-based selection inside an immutable shell. Anything looser is a different method.
+1. `agintor build-runtime "<goal>" --destination <dir>` completes the full build pipeline and exports a runtime.
+2. The build writes goal, benchmark, verifier, runtime-plan, and export artifacts into the workspace.
+3. The build does not require the user to manually write benchmark suites for the golden path.
+4. The build summary identifies the exported runtime and its leader metrics.
+
+### 16.2 Runtime separation
+
+5. The exported runtime can be loaded and run without entering the evolution path.
+6. The produced runtime artifact contains only runtime-relevant assets and not the full factory archive or mutator history.
+7. Factory-only profile knobs are logically separated from runtime-only execution knobs.
+
+### 16.3 Solve path
+
+8. `agintor solve <runtime_dir> --task-id ... --suite ...` works in benchmark mode.
+9. `agintor solve <runtime_dir> --prompt ...` or the equivalent user-request mode works on a real solve request after export.
+10. The solve result reports whether the output is verified or best-effort.
+
+### 16.4 Evolution and evaluation
+
+11. Stage 0 through Stage 4 evaluation gates function and reject invalid or regressive candidates.
+12. Archive insertion, parent selection, and validation leader tracking function end-to-end.
+13. Goal-conditioned tasks or benchmark-pressure synthesis are actually used during `build-runtime`, not merely described in comments.
+
+### 16.5 Core runtime behavior
+
+14. Topology mode selection, memory retrieval, tool reuse or synthesis, and control checks are all exercised by the shipped demo suite.
+15. Dynamic tool creation is validated locally before promotion.
+16. Memory compaction preserves raw-output reachability.
+17. Clone-on-run invariants are enforced.
+
+### 16.6 Provenance and deployability
+
+18. The export bundle and provenance bundle are written for the leader runtime.
+19. The deployment contract identifies the required runtime host, backend compatibility, and provider environment expectations.
+20. Provider secrets are not embedded in the exported runtime.
+
+---
+
+## 17. Implementation Order
+
+A correct reconstruction order for the coding agent is:
+
+1. preserve and complete the runtime host and shell invariants,
+2. preserve and complete the baseline runtime template,
+3. define or complete the build-time schemas and workspace artifacts,
+4. implement goal normalization and success-criteria extraction,
+5. implement benchmark planning and verifier freezing,
+6. resolve the split between factory profile and runtime profile,
+7. complete the CLI golden path around `build-runtime`,
+8. complete the user-request solve path for exported runtimes,
+9. finalize staged evaluation, archive insertion, and validation leader tracking,
+10. finalize export and provenance bundles,
+11. then tighten defaults and deterministic behavior.
+
+Do not start by redesigning the entire project into a different architecture. The existing repository already contains the correct core spine.
+
+---
+
+## 18. Failure Modes and Non-Negotiable Invariants
+
+The following failures materially change the method and are therefore not allowed.
+
+1. Mutating the immutable shell or benchmark/verifier bundle during candidate evolution.
+2. Executing canonical stored agents directly instead of clone-on-run.
+3. Allowing long-term memory leakage across nominally independent tasks.
+4. Promoting synthesized tools without local validation, safety checks, and reuse evidence.
+5. Destroying raw-output reachability during compaction.
+6. Losing message-board or open-handle state during summarization or resume.
+7. Using validation or test traces as mutation guidance.
+8. Letting later pipeline stages reparse raw goal text instead of consuming frozen planning artifacts.
+9. Storing provider secrets in exported runtime artifacts.
+10. Allowing the exported runtime to mutate archive state or factory scheduler state.
+11. Bypassing category-first discovery by loading the entire tool registry into prompt context.
+12. Terminating without a verified terminal artifact when the task contract requires verification.
+13. Exporting a runtime without an ABI, provenance, and deployment contract.
+14. Treating the produced runtime artifact and the factory control plane as the same thing.
+
+---
+
+## 19. Closing Statement
+
+Agintor is not a prompt-tuning script and not merely a benchmark runner. It is a bounded runtime factory for evolving multi-agent runtimes under frozen benchmark pressure and explicit architectural boundaries.
+
+The MVP is complete only when the repository produces all of the following as real CLI behavior:
+
+- a normalized goal artifact,
+- a frozen benchmark and verifier plan,
+- a resolved runtime plan,
+- a seeded and evolved runtime,
+- a validated leader,
+- an exported runtime artifact,
+- and a user-facing solve path for that exported runtime.
+
+Anything less is still a partial scaffold.
