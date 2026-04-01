@@ -6,7 +6,7 @@ A reconstruction-complete, performance-optimized system specification
 
 ## Abstract
 
-Agintor treats agent-development-kit design as bounded evolutionary search over executable runtime code rather than as prompt tuning around a fixed agent. A candidate runtime mutates only four coupled symbolic decision surfaces inside an immutable self-programming shell: topology, hierarchical memory, dynamic tooling, and budget-verification control. The shell supplies clone-on-run sub-agents, graph-structured short-term and long-term memory, category-organized tools with isolated runtimes, exact or near-exact task verifiers, deterministic logging, and immutable safety and benchmark adapters. Candidate runtimes are proposed through exact SEARCH/REPLACE patches, screened by staged evaluation, and retained in an objective-conditioned quality-diversity archive.
+Agintor treats agent-development-kit design as bounded evolutionary search over executable runtime code rather than as prompt tuning around a fixed agent. A candidate runtime mutates only four coupled symbolic decision surfaces inside an immutable self-programming shell: topology, hierarchical memory, dynamic tooling, and budget-verification control. The shell supplies clone-on-run sub-agents, graph-structured short-term and long-term memory, category-organized tools with isolated runtimes, deterministic logging, immutable safety guards, and execution against a frozen bundle of benchmark adapters and exact or near-exact task verifiers. Candidate runtimes are proposed through exact SEARCH/REPLACE patches, screened by staged evaluation, and retained in an objective-conditioned quality-diversity archive.
 
 This specification makes the method closed and reconstruction-ready. It defines the fixed shell, mutable genotype, mandatory schemas, runtime state machine, hard invalidation rules, primary and robustness objectives, predictor family, archive descriptors, controller credit assignment, topology search, memory policy, tool synthesis and reuse, verification control, mutation curriculum, compute gates, defaults, and failure modes. The decisive design choice is to co-evolve the interaction surfaces among topology, memory, tools, and control rather than treating them as independent modules. The performance-oriented refinements in this document favor stable search, stronger diversity preservation, lower wasted compute, and tighter runtime efficiency without relaxing determinism or safety.
 
@@ -28,7 +28,7 @@ The design is constrained by three goals:
 |---|---|
 | $A$ | Candidate runtime composed of four mutable subsystems. |
 | $g^{\mathrm{top}}, g^{\mathrm{mem}}, g^{\mathrm{tool}}, g^{\mathrm{ctl}}$ | Mutable code governing topology, memory, tooling, and control. |
-| $\mathcal{H}$ | Fixed shell: storage, verifiers, sandboxes, adapters, safety guards, and logging. |
+| $\mathcal{H}$ | Fixed shell: storage, sandboxes, execution against frozen benchmark and verifier bundles, safety guards, and logging. |
 | $x$ | Task instance. |
 | $r$ | Random seed used in repeated evaluation. |
 | $y_{x,r}(A)$ | Final artifact produced by runtime $A$ on task $x$ under seed $r$. |
@@ -52,9 +52,9 @@ $$
 A = \left(g^{\mathrm{top}}, g^{\mathrm{mem}}, g^{\mathrm{tool}}, g^{\mathrm{ctl}}\right).
 $$
 
-*Variables.* $g^{\mathrm{top}}$ selects and orchestrates agents; $g^{\mathrm{mem}}$ governs short-term and long-term memory; $g^{\mathrm{tool}}$ governs discovery, synthesis, validation, and dispatch of tools; $g^{\mathrm{ctl}}$ governs model allocation, verification, stopping, and mutation-surface scoring.
+*Variables.* $g^{\mathrm{top}}$ selects and orchestrates agents; $g^{\mathrm{mem}}$ governs short-term and long-term memory; $g^{\mathrm{tool}}$ governs discovery, synthesis, validation, and dispatch of tools; $g^{\mathrm{ctl}}$ governs model allocation, verification requests, and stopping.
 
-The fixed shell $\mathcal{H}$ is immutable during search. It contains the canonical agent pool, short-term graph store, long-term graph store, benchmark adapters, verifiers, safety guards, sandbox manager, environment cache, trace logging, token accounting, wall-clock accounting, and patch parser or applier. Search operates over $A$, never over $\mathcal{H}$.
+The fixed shell $\mathcal{H}$ is immutable during search. It contains the canonical agent pool, short-term graph store, long-term graph store, safety guards, sandbox manager, environment cache, trace logging, token accounting, wall-clock accounting, patch parser or applier, and execution interfaces for a frozen benchmark and verifier bundle. Search operates over $A$, never over $\mathcal{H}$.
 
 ### 2.2 Mutable methods
 
@@ -66,7 +66,7 @@ The mutable surface is intentionally narrow.
 
 **Tooling:** `rank_categories`, `rank_tools`, `should_create_tool`, `propose_tool_spec`, `validate_tool`, `promote_tool`, `dispatch_tool`.
 
-**Control:** `assign_model`, `request_checks`, `stop_policy`, `score_interface_scope`, `update_scope_credit`.
+**Control:** `assign_model`, `request_checks`, `stop_policy`.
 
 Any helper routine called only by these methods may mutate. Benchmark graders, storage backends, sandbox boundaries, benchmark prompts, safety prompts, environment caches, and graph query engines may not.
 
@@ -1001,7 +1001,7 @@ Recommended pass-rate caps are $p_1\le 0.35$, $p_2\le 0.15$, and $p_3\le 0.05$. 
 
 **Algorithm 4. Reconstruction from scratch**
 
-1. Implement the fixed shell: agent pool, tool registry, sandbox manager, short-term graph, long-term graph, open-handle table, benchmark adapters, verifiers, and safety guards.
+1. Implement the fixed shell: agent pool, tool registry, sandbox manager, short-term graph, long-term graph, open-handle table, execution interfaces for the frozen benchmark and verifier bundle, and safety guards.
 2. Implement one baseline self-programming runtime with handwritten policies for topology, memory, tooling, and control.
 3. Implement the mandatory schemas in Section~2.
 4. Build proxy suites for decomposition, retrieval, deduplication, build-versus-reuse, category ranking, async dispatch, checkpoint integrity, and resume fidelity.

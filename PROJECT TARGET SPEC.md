@@ -727,11 +727,11 @@ The search surface must stay narrow and meaningful. The mutable runtime policies
 - leader selection,
 - counterfactual credit updates.
 
-This is an intentional correction. Solve-time control is mutable; factory-side evolutionary accounting is not.
+Solve-time control is mutable; factory-side evolutionary accounting is not.
 
 ### 10.5 Why outer-loop scope credit does not belong to runtime control
 
-Earlier formulations that place archive scope credit or scheduler updates inside the runtime control surface blur the line between produced runtime and factory. For the MVP, that separation must be explicit:
+Archive scope credit and scheduler updates do not belong inside the runtime control surface. For the MVP, that separation must be explicit:
 
 - candidate runtimes may emit solve-time telemetry or observable behavior,
 - but only the factory control plane updates scope credit, phase progression, or archive insertion logic.
