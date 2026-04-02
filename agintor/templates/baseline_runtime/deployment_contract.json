@@ -1,0 +1,13 @@
+{
+  "entry_command": "agintor solve <runtime_dir> --prompt \"<request>\"",
+  "runtime_abi": "agintor-runtime-abi-v2",
+  "python_version": ">=3.11",
+  "supported_backends": [
+    "local",
+    "docker"
+  ],
+  "required_env_names": [],
+  "network_policy": "provider-only",
+  "filesystem_policy": "workspace-read-write",
+  "notes": []
+}

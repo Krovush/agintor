@@ -39,6 +39,8 @@ from agintor.shell import FixedShell
 from agintor.tool_runtime import RegisteredTool, SandboxManager
 from agintor.verifiers import run_checker, verify_task_with_evidence
 
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
+
 
 def _run_result(task_id: str, verifier_score: float, family_mode: str = "single", *, cost: float = 0.0, latency: float = 0.0, faults: int = 0, created_tools: int = 0, promoted_nodes: int = 0, checks_used: int = 0) -> RunResult:
     return RunResult(

@@ -13,6 +13,8 @@ from agintor.benchmarks import (
 )
 from agintor.schemas import BenchmarkTask
 
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
+
 
 def _minimal_task(task_id: str) -> BenchmarkTask:
     return BenchmarkTask(

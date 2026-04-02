@@ -151,6 +151,7 @@ def solve_cmd(
             baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
             budget_overrides=budget_overrides,
             runtime_backend=runtime_backend,
+            artifact_mode="always" if retain_artifacts else "none",
             retain_artifacts=retain_artifacts,
             **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
         )
@@ -197,6 +198,7 @@ def eval_cmd(
             provider_impl,
             baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
             runtime_backend=runtime_backend,
+            artifact_mode="always" if retain_artifacts else "none",
             retain_artifacts=retain_artifacts,
             **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
         )
@@ -232,6 +234,7 @@ def evolve_cmd(
         mutator_type=mutator,
         reference_runtime_dir=_reference_runtime_dir(provider, runtime_dir),
         runtime_backend=runtime_backend,
+        artifact_mode="always" if retain_artifacts else "none",
         retain_artifacts=retain_artifacts,
         **_supported_kwargs(EvolutionEngine, runtime_profile=runtime_profile, profile_path=profile),
     )

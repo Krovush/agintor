@@ -1,0 +1,31 @@
+{
+  "runtime_id": "baseline",
+  "version": "0.1.0",
+  "policy_modules": {
+    "top": "topology_policy.py:TopologyPolicy",
+    "mem": "memory_policy.py:MemoryPolicy",
+    "tool": "tool_policy.py:ToolPolicy",
+    "ctl": "control_policy.py:ControlPolicy"
+  },
+  "mutable_files": [
+    "topology_policy.py",
+    "memory_policy.py",
+    "tool_policy.py",
+    "control_policy.py"
+  ],
+  "immutable_manifest": [
+    "agintor/shell.py",
+    "agintor/runner.py",
+    "agintor/archive.py",
+    "agintor/evaluator.py",
+    "agintor/mutator.py",
+    "agintor/tool_runtime.py",
+    "agintor/memory_graph.py",
+    "agintor/verifiers.py",
+    "runtime_profile.json"
+  ],
+  "metadata": {
+    "template": "baseline_runtime",
+    "runtime_abi": "agintor-runtime-abi-v2"
+  }
+}

@@ -50,6 +50,8 @@ from agintor.schemas import (
 from agintor.shell import AgentPool, FixedShell
 from agintor.tool_runtime import RegisteredTool, SafetyGuard, SandboxManager, validate_expression_tool, validate_tool_candidate
 
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
+
 
 def test_patch_roundtrip_exact_replace() -> None:
     source = "alpha\nbeta\ngamma\n"

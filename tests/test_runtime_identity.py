@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import agintor.evaluator as evaluator_module
 
 from agintor.benchmarks import build_demo_suite
@@ -12,6 +14,8 @@ from agintor.providers import LocalDeterministicProvider
 from agintor.runtime_loader import load_runtime
 from agintor.runtime_profile import RUNTIME_PROFILE_FILE, load_runtime_profile, profile_to_json
 from agintor.schemas import RunResult
+
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
 
 
 def test_runtime_identity_changes_when_embedded_profile_changes(runtime_dir: Path, tmp_path: Path) -> None:
@@ -106,6 +110,7 @@ def test_evaluator_cache_separates_effective_runtime_profiles(runtime_dir: Path,
         LocalDeterministicProvider(),
         baseline_runtime_dir=runtime_dir,
     )
+    evaluator.prepare_reference_scales()
     observed_steps.clear()
     task = suite.proxy[0]
 

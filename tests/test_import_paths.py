@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agintor.memory_graph import LongTermGraph, ShortTermGraph
 from agintor.project import baseline_template_dir, init_runtime
 from agintor.prompt_builder import METHOD_CONTRACTS
 from agintor.runtime_api import RuntimeBudget
 from agintor.runtime_loader import load_runtime
+
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
 
 
 def test_runtime_template_path_resolves_and_initializes(tmp_path: Path) -> None:

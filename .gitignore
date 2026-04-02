@@ -1,6 +1,7 @@
 /agintor.egg-info/
 /tests/_artifacts/
 /tests/_artifacts/**
+/tests/_artifacts/run_*/
 /.agintor_runs/
 /.agintor_evo/
 /.agintor*_tmp*/
@@ -26,4 +27,3 @@ MiniMax API Key.txt
 /.codex_doc_build/
 /.codex_review_smoke*/
 /.codex_review_tmp*/
-/agintor/templates/baseline_runtime/

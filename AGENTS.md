@@ -5,3 +5,4 @@ Before doing anything read these files FULLY to understand the project:
 
 # **NEVER INCLUDE 'META-COMMENTARY' IN THE DOCUMENTS YOU WRITE OR EDIT!!!**
 # **NEVER INCLUDE 'META-COMMENTARY' IN THE CODE YOU WRITE OR EDIT!!!**
+# **I DO NOT CARE about backward compatibility preservation. Agintor is very far from production, so preserving legacy (anything) is NOT a concern!**

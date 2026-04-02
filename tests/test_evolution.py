@@ -14,6 +14,8 @@ from agintor.providers import LocalDeterministicProvider
 from agintor.project import init_runtime
 from agintor.schemas import ArchiveEntry, ArchiveRecord, EvaluationStageResult, EvolutionHistoryRow, MutationCandidate, ObjectiveKind, ObjectiveSpec, RunResult, SuiteEvaluation
 
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
+
 
 def _run_result(task_id: str, verifier_score: float) -> RunResult:
     return RunResult(

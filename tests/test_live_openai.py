@@ -11,6 +11,8 @@ from agintor.providers import OpenAIProvider
 from agintor.project import init_runtime
 from agintor.schemas import ModelRequest
 
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
+
 
 @pytest.mark.live_openai
 def test_openai_provider_live_roundtrip_with_mock_credentials() -> None:

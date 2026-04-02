@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from .artifacts import ArtifactMode, ArtifactPolicy
 from .exceptions import HardInvalidation
 from .memory_graph import LongTermGraph, ShortTermGraph
 from .predictors import DecisionFamilyModelBank
@@ -96,10 +97,17 @@ class FixedShell:
         workspace: Path,
         predictors: DecisionFamilyModelBank | None = None,
         *,
+        artifact_mode: str | ArtifactMode | None = None,
+        sandbox_root: Path | None = None,
         retain_artifacts: bool = False,
     ) -> None:
         self.workspace = Path(workspace)
-        self.retain_artifacts = retain_artifacts
+        self.artifact_policy = ArtifactPolicy.resolve(
+            artifact_mode=artifact_mode,
+            retain_artifacts=retain_artifacts,
+            sandbox_root=sandbox_root,
+        )
+        self.retain_artifacts = self.artifact_policy.write_traces
         self.short_term = ShortTermGraph()
         self.long_term = LongTermGraph()
         self.message_board = MessageBoard()
@@ -108,9 +116,13 @@ class FixedShell:
         self._shared_predictors = predictors is not None
         self.agent_pool = AgentPool()
         self.safety_guard = SafetyGuard()
-        self.sandbox_manager = SandboxManager(self.workspace / "sandboxes")
+        self.sandbox_manager = SandboxManager(self.artifact_policy.sandbox_root)
         self.tool_registry = ToolRegistry(self.sandbox_manager, self.safety_guard)
-        self.tool_executor = ToolExecutor(self.tool_registry, self.sandbox_manager, persist_artifacts=retain_artifacts)
+        self.tool_executor = ToolExecutor(
+            self.tool_registry,
+            self.sandbox_manager,
+            persist_artifacts=self.artifact_policy.persist_tool_artifacts,
+        )
         self.trace_dir = self.workspace / "traces"
         self._current_task_id: str | None = None
         self._current_episode_id: str | None = None

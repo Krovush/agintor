@@ -38,9 +38,12 @@ agintor = ["templates/baseline_runtime/*", "templates/prompts/*.json", "examples
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-q -p no:cacheprovider --assert=plain"
+addopts = "-q -p no:cacheprovider --assert=plain -m \"not heavy and not docker and not live_openai\""
 testpaths = ["tests"]
 norecursedirs = ["_artifacts"]
 markers = [
+  "integration: runtime-backed integration coverage that should stay in the default offline suite",
+  "heavy: runtime-heavy coverage kept out of the default fast suite",
+  "docker: docker-backed coverage kept out of the default offline suite",
   "live_openai: live OpenAI integration tests (not run offline)",
 ]

@@ -22,6 +22,7 @@ from agintor.runtime_loader import (
 from agintor.runtime_profile import default_runtime_profile
 from agintor.schemas import ArchiveEntry, ArchiveRecord, SuiteEvaluation
 
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
 
 def _candidate_record(runtime_dir: Path, runtime_hash: str, scores: dict[str, float], *, objective: str = "sbar:global") -> ArchiveRecord:
     return ArchiveRecord(

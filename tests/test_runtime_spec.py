@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agintor.benchmarks import build_demo_suite
 from agintor.evaluator import RuntimeEvaluator
 from agintor.providers import LocalDeterministicProvider
 from agintor.schemas import ModelResponse
 from agintor.verifiers import verify_task_with_evidence
 
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
 
 def test_trace_verifier_supports_event_presence() -> None:
     task = build_demo_suite().by_id("proxy.tool.generated_trace")

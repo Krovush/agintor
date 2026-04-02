@@ -6,7 +6,9 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
+import inspect
 
+from .artifacts import ArtifactMode, ArtifactPolicy
 from .archive import objective_specs_from_suite
 from .benchmarks import BenchmarkSuite
 from .container_runtime import DockerRuntimeExecutor
@@ -38,22 +40,37 @@ class RuntimeEvaluator:
         runtime_backend: str | None = None,
         runtime_profile: RuntimeProfile | None = None,
         profile_path: Path | None = None,
+        artifact_mode: str | ArtifactMode | None = None,
+        sandbox_root: Path | None = None,
         retain_artifacts: bool = False,
     ) -> None:
         self.suite = suite
-        self.workspace = ensure_directory(workspace)
+        self.workspace = Path(workspace)
         self.provider = provider
-        self.retain_artifacts = retain_artifacts
+        self.artifact_policy = ArtifactPolicy.resolve(
+            artifact_mode=artifact_mode,
+            retain_artifacts=retain_artifacts,
+            sandbox_root=sandbox_root,
+        )
+        self.retain_artifacts = self.artifact_policy.keep_successes
         self.budget_overrides = dict(budget_overrides or {})
         self.predictors = predictors or DecisionFamilyModelBank()
         self.profile_path = Path(profile_path) if profile_path is not None else None
+        self._baseline_runtime_dir = Path(baseline_runtime_dir) if baseline_runtime_dir is not None else None
+        self._preparing_reference_scales = False
+        self._reference_scales_ready = False
         self.reference_profile = runtime_profile or resolve_runtime_profile(
             baseline_runtime_dir,
             profile_path=self.profile_path,
         )
         self.runtime_backend = (runtime_backend or os.environ.get("AGINTOR_RUNTIME_BACKEND", "local")).strip().lower()
         self.container_executor = (
-            DockerRuntimeExecutor(self.workspace / ".runtime_container_cache", retain_artifacts=retain_artifacts)
+            DockerRuntimeExecutor(
+                self.workspace / ".runtime_container_cache",
+                artifact_mode=self.artifact_policy.mode,
+                sandbox_root=self.artifact_policy.sandbox_root,
+                retain_artifacts=retain_artifacts,
+            )
             if self.runtime_backend == "docker"
             else None
         )
@@ -65,17 +82,41 @@ class RuntimeEvaluator:
         self.delta_rej = self.reference_profile.evaluation.delta_rej
         self.cache: dict[tuple[str, str, tuple[int, ...], tuple[str, ...]], SuiteEvaluation] = {}
         self.reference_scales = ({}, {})
-        if baseline_runtime_dir is not None:
-            baseline_eval = self.evaluate_runtime(
-                baseline_runtime_dir,
-                partition="train",
-                seeds=self.reference_profile.evaluation.reference_scale_seeds,
-                use_cache=False,
-            )
-            self.reference_scales = estimate_reference_scales(baseline_eval.run_results)
+ 
 
-    def _score_calculator(self) -> ScoreCalculator:
-        costs, latencies = self.reference_scales
+    def prepare_reference_scales(self, force: bool = False) -> None:
+        if self._baseline_runtime_dir is None:
+            return
+        if self._reference_scales_ready and not force:
+            return
+        self._preparing_reference_scales = True
+        try:
+            kwargs = {
+                "partition": "train",
+                "seeds": self.reference_profile.evaluation.reference_scale_seeds,
+                "use_cache": False,
+                "use_reference_scales": False,
+            }
+            try:
+                params = inspect.signature(self.evaluate_runtime).parameters
+            except (TypeError, ValueError):
+                params = {}
+            filtered_kwargs = {key: value for key, value in kwargs.items() if key in params}
+            baseline_eval = self.evaluate_runtime(self._baseline_runtime_dir, **filtered_kwargs)
+        finally:
+            self._preparing_reference_scales = False
+        self.reference_scales = estimate_reference_scales(baseline_eval.run_results)
+        self._reference_scales_ready = True
+
+    def _score_calculator(self, *, use_reference_scales: bool = True) -> ScoreCalculator:
+        if (
+            use_reference_scales
+            and self._baseline_runtime_dir is not None
+            and not self._reference_scales_ready
+            and not self._preparing_reference_scales
+        ):
+            self.prepare_reference_scales()
+        costs, latencies = self.reference_scales if use_reference_scales and self._reference_scales_ready else ({}, {})
         return ScoreCalculator(
             baseline_costs=costs,
             baseline_latencies=latencies,
@@ -143,8 +184,12 @@ class RuntimeEvaluator:
     def _trace_rows(self, run) -> list[dict[str, Any]]:
         return run.trace_rows() if hasattr(run, "trace_rows") else []
 
-    def _cleanup_path(self, path: Path | None) -> None:
-        if path is None or self.retain_artifacts or not path.exists():
+    def _cleanup_path(self, path: Path | None, *, failed: bool = False) -> None:
+        if path is None or not path.exists():
+            return
+        if failed and self.artifact_policy.keep_failures:
+            return
+        if not failed and self.artifact_policy.keep_successes:
             return
         shutil.rmtree(path, ignore_errors=True)
 
@@ -206,7 +251,16 @@ class RuntimeEvaluator:
         if stage_name == "stage3":
             self.epsilon_part = max(0.0, self.epsilon_part - 0.0025)
 
-    def evaluate_runtime(self, runtime_dir: str | Path, partition: str = "train", seeds: Sequence[int] = (0, 1, 2), use_cache: bool = True, tasks_override: Sequence[Any] | None = None) -> SuiteEvaluation:
+    def evaluate_runtime(
+        self,
+        runtime_dir: str | Path,
+        partition: str = "train",
+        seeds: Sequence[int] = (0, 1, 2),
+        use_cache: bool = True,
+        tasks_override: Sequence[Any] | None = None,
+        *,
+        use_reference_scales: bool = True,
+    ) -> SuiteEvaluation:
         runtime_profile = self._effective_runtime_profile(runtime_dir)
         runtime = self._load_runtime(runtime_dir, runtime_profile=runtime_profile)
         task_key = ()
@@ -218,6 +272,7 @@ class RuntimeEvaluator:
         tasks = list(tasks_override) if tasks_override is not None else self.suite.all_tasks(partition)
         units = self._evaluation_units(tasks)
         run_results = []
+        shell_workspaces: list[Path] = []
         self.predictors.freeze()
         try:
             if self.runtime_backend == "docker" and self.container_executor is not None:
@@ -237,9 +292,13 @@ class RuntimeEvaluator:
                 )
             else:
                 for seed in seeds:
+                    shell_workspace = self.workspace / f"ev_{runtime.runtime_hash[:8]}_{partition[:1]}_{seed}"
+                    shell_workspaces.append(shell_workspace)
                     shell = FixedShell(
-                        self.workspace / f"ev_{runtime.runtime_hash[:8]}_{partition[:1]}_{seed}",
+                        shell_workspace,
                         predictors=self.predictors,
+                        artifact_mode=self.artifact_policy.mode,
+                        sandbox_root=self.artifact_policy.sandbox_root,
                         retain_artifacts=self.retain_artifacts,
                     )
                     runner = TaskRuntime(
@@ -252,10 +311,21 @@ class RuntimeEvaluator:
                     for unit in units:
                         for task in unit:
                             run_results.append(runner.run_task(task, int(seed)))
+        except Exception:
+            for shell_workspace in shell_workspaces:
+                self._cleanup_path(shell_workspace, failed=True)
+            raise
         finally:
             self.predictors.unfreeze()
         task_family_map = {task.task_id: task.family for task in tasks}
-        evaluation = self._score_calculator().suite_score(runtime.runtime_hash, task_family_map, run_results)
+        evaluation = self._score_calculator(use_reference_scales=use_reference_scales).suite_score(
+            runtime.runtime_hash,
+            task_family_map,
+            run_results,
+        )
+        if not evaluation.invalid:
+            for shell_workspace in shell_workspaces:
+                self._cleanup_path(shell_workspace)
         if use_cache:
             self.cache[cache_key] = evaluation
         return evaluation
@@ -481,20 +551,20 @@ class RuntimeEvaluator:
         stage1 = self.stage1_smoke(child_dir)
         results.append(stage1)
         if not stage1.passed:
-            self._cleanup_path(child_dir)
+            self._cleanup_path(child_dir, failed=True)
             return results, child_dir
         stage2 = self.stage2_proxy(parent_dir, child_dir, candidate.touched_scope, epsilon_proxy=self.epsilon_proxy)
         results.append(stage2)
         if not stage2.passed:
-            self._cleanup_path(child_dir)
+            self._cleanup_path(child_dir, failed=True)
             return results, child_dir
         stage3 = self.stage3_local_subset(parent_dir, child_dir, objective, epsilon_part=self.epsilon_part)
         results.append(stage3)
         if not stage3.passed:
-            self._cleanup_path(child_dir)
+            self._cleanup_path(child_dir, failed=True)
             return results, child_dir
         stage4 = self.stage4_full(parent_dir, child_dir)
         results.append(stage4)
         if not stage4.passed:
-            self._cleanup_path(child_dir)
+            self._cleanup_path(child_dir, failed=True)
         return results, child_dir

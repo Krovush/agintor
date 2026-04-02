@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import agintor.cli as cli_module
@@ -11,6 +12,8 @@ from agintor.cli import app
 from agintor.providers import LocalDeterministicProvider
 from agintor.runtime_profile import HostedProviderProfile, RuntimeProfile
 from agintor.schemas import RunResult, SuiteEvaluation
+
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
 
 
 runner = CliRunner()

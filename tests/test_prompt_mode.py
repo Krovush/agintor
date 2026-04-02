@@ -11,6 +11,8 @@ from agintor.provider_common import LocalDeterministicProvider
 from agintor.runtime_api import load_solve_request, solve_request_to_task
 from agintor.schemas import BenchmarkTask, ModelRequest, OperationSpec
 
+pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
+
 
 def test_solve_request_to_task_skips_tool_path_when_tool_scope_blocks_it() -> None:
     request = load_solve_request(prompt="Compute the sum of squares modulo 7 for [2, 3].").copy(

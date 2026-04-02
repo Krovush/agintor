@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .artifacts import ArtifactMode, ArtifactPolicy
 from .providers import (
     ModelProvider,
     provider_environment_names_for_instance,
@@ -27,13 +28,20 @@ class DockerRuntimeExecutor:
         repo_root: Path | None = None,
         image_name_prefix: str = "agintor-runtime",
         base_image: str = "python:3.11-slim",
+        artifact_mode: str | ArtifactMode | None = None,
+        sandbox_root: Path | None = None,
         retain_artifacts: bool = True,
     ) -> None:
-        self.workspace = ensure_directory(workspace)
+        self.workspace = Path(workspace)
         self.repo_root = repo_root or Path(__file__).resolve().parent.parent
         self.image_name_prefix = image_name_prefix
         self.base_image = base_image
-        self.retain_artifacts = retain_artifacts
+        self.artifact_policy = ArtifactPolicy.resolve(
+            artifact_mode=artifact_mode,
+            retain_artifacts=retain_artifacts,
+            sandbox_root=sandbox_root,
+        )
+        self.retain_artifacts = self.artifact_policy.keep_successes
         self.image_tag = f"{self.image_name_prefix}:{self._source_digest()[:12]}"
 
     def _source_digest(self) -> str:
@@ -208,6 +216,6 @@ class DockerRuntimeExecutor:
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "docker run failed")
         results = [model_validate(RunResult, payload) for payload in json.loads(output_json.read_text(encoding="utf-8"))]
-        if not self.retain_artifacts:
+        if not self.artifact_policy.keep_successes:
             shutil.rmtree(run_dir, ignore_errors=True)
         return results

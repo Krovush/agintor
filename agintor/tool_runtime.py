@@ -167,8 +167,8 @@ class SafetyGuard:
 
 
 def _tool_filename(spec: ToolSpec) -> str:
-    slug = spec.name.replace("/", "_").strip("_") or "tool"
-    return f"{slug[:12]}_{stable_hash(spec.name, spec.source_digest)[:8]}.py"
+    digest = stable_hash(spec.source_digest, spec.runtime, spec.signature)[:16]
+    return f"generated_{digest}.py"
 
 
 def _async_artifact_stem(tool_name: str, handle_id: str) -> str:
@@ -683,19 +683,7 @@ def validate_tool_candidate(
         sandbox_manager = SandboxManager(temp_root)
     try:
         finalized_spec, tool_file = _materialize_generated_tool(spec, source, sandbox_manager)
-        pyc_file = tool_file.with_name(f"{tool_file.stem[:12]}.pyc")
-        compile_program = "import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)"
-        compiled = subprocess.run(
-            [sys.executable, "-c", compile_program, str(tool_file), str(pyc_file)],
-            cwd=str(tool_file.parent),
-            capture_output=True,
-            text=True,
-            timeout=finalized_spec.timeout_s,
-            check=False,
-        )
-        if compiled.returncode != 0:
-            detail = compiled.stderr.strip() or compiled.stdout.strip()
-            raise ValidationError(f"generated tool failed py_compile: {detail}")
+        compile(tool_file.read_text(encoding="utf-8"), str(tool_file), "exec")
         _check_import_resolution(tool_file, finalized_spec.timeout_s)
         timeout_payload = dict(finalized_spec.tests[0].get("input", {})) if finalized_spec.tests else {}
         _run_validation_trial(tool_file, timeout_payload, finalized_spec.timeout_s)

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
+from .artifacts import ArtifactMode, ArtifactPolicy
 from .archive import PHASE_SCOPES, QualityDiversityArchive, ScopeScheduler, objective_specs_from_suite
 from .benchmarks import BenchmarkSuite
 from .crossover import crossover_runtime
@@ -49,12 +50,19 @@ class EvolutionEngine:
         runtime_backend: str | None = None,
         runtime_profile: RuntimeProfile | None = None,
         profile_path: Path | None = None,
+        artifact_mode: str | ArtifactMode | None = None,
+        sandbox_root: Path | None = None,
         retain_artifacts: bool = False,
     ) -> None:
         self.suite = suite
-        self.workspace = ensure_directory(workspace)
+        self.workspace = Path(workspace)
         self.provider = provider
-        self.retain_artifacts = retain_artifacts
+        self.artifact_policy = ArtifactPolicy.resolve(
+            artifact_mode=artifact_mode,
+            retain_artifacts=retain_artifacts,
+            sandbox_root=sandbox_root,
+        )
+        self.retain_artifacts = self.artifact_policy.keep_successes
         self.baseline_runtime_dir = baseline_runtime_dir
         self.profile_path = Path(profile_path) if profile_path is not None else None
         self.runtime_profile = runtime_profile or load_runtime_profile(baseline_runtime_dir, profile_path=self.profile_path)
@@ -71,6 +79,8 @@ class EvolutionEngine:
             runtime_backend=runtime_backend,
             runtime_profile=self.runtime_profile,
             profile_path=self.profile_path,
+            artifact_mode=self.artifact_policy.mode,
+            sandbox_root=self.artifact_policy.sandbox_root,
             retain_artifacts=retain_artifacts,
         )
         self.objectives = objective_specs_from_suite(suite, partition="train")
@@ -98,8 +108,12 @@ class EvolutionEngine:
         self.accepted_since_retrain = 0
         self.crossover_probability = self.runtime_profile.evolution.crossover_probability
 
-    def _cleanup_path(self, path: Path | None) -> None:
-        if path is None or self.retain_artifacts or not path.exists():
+    def _cleanup_path(self, path: Path | None, *, failed: bool = False) -> None:
+        if path is None or not path.exists():
+            return
+        if failed and self.artifact_policy.keep_failures:
+            return
+        if not failed and self.artifact_policy.keep_successes:
             return
         shutil.rmtree(path, ignore_errors=True)
 
@@ -346,6 +360,7 @@ class EvolutionEngine:
         return False
 
     def run(self, steps: int = 10) -> EvolutionSummary:
+        ensure_directory(self.workspace)
         self.seed_archive()
         accepted = 0
         for step in range(1, steps + 1):
