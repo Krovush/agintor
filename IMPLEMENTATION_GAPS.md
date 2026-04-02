@@ -22,16 +22,8 @@ Status tags mean:
 ## Executive Summary
 
 - `[Implemented]` The repository is a real bounded runtime-search workbench: baseline runtime templating, runtime loading, profile-aware runtime identity, benchmark execution, staged evaluation, objective-conditioned archive insertion, mutation, crossover, predictors, Docker-backed evaluation, and CLI commands all exist in the current code path.
-- `[Partial]` The repository is still centered on a small synthetic benchmark universe with pre-structured operations. `build-runtime` is a goal-conditioned search path over cloned demo pressure, not a full goal-to-runtime factory with frozen planning artifacts and a deploy-ready solve product.
-- `[Missing]` The largest target-spec gaps are the build-time artifact pipeline, the user-request solve path for exported runtimes, durable runtime/deployment packaging, first-class checkpoint-resume, durable promoted-tool assets, realistic benchmark pressure, and predictor-driven task-time decisions.
-
-## Notable Status Changes Since The Previous Version
-
-- `[Implemented]` Runtime ABI checking is now real. `runtime_loader.py` validates `runtime_manifest.json` against `RUNTIME_ABI_VERSION`.
-- `[Partial]` Export and provenance bundles are now real artifacts. `build-runtime` writes `runtime_export_bundle.json` and `runtime_provenance_bundle.json`, but there is still no deployment contract, signed provenance, or sealed asset packaging.
-- `[Partial]` Benchmark extensibility is no longer absent. `benchmarks.py` supports JSON suite loading plus registered or module-based suite plugins, but there is still no rich benchmark adapter ecosystem.
-- `[Partial]` Provider infrastructure is materially broader than before. Replay, retry, failover, payload serialization, environment isolation, basic health checks, and audit trails exist, but provider behavior is still text-generation-centric and lightweight.
-- `[Implemented]` Docker evaluation is not just a stub. The evaluator can batch ordered task runs through `container_runtime.py`, forward provider configuration, and rehydrate run results.
+- `[Partial]` The repository is still centered on a small synthetic benchmark universe with pre-structured operations. `build-runtime` is a goal-conditioned search path over cloned demo pressure with frozen planning artifacts and a bounded prompt-mode solve path, not a full goal-to-runtime factory or a broad deploy-ready solve product.
+- `[Missing]` The largest target-spec gaps are a trustworthy goal-to-objective compiler, contradiction-driven replanning, durable runtime/deployment packaging beyond the current artifact set, first-class checkpoint-resume, durable promoted-tool assets, realistic benchmark pressure, and predictor-driven task-time decisions.
 
 ## Product Surface And Build Artifact Pipeline
 
@@ -39,38 +31,35 @@ Status tags mean:
 
 - `[Implemented]` The CLI already exposes `init-runtime`, `solve`, `eval`, `evolve`, and `build-runtime`.
 - `[Implemented]` `build-runtime` creates a seed runtime, runs bounded evolution, selects a leader by goal score then validation, exports a runtime directory, and writes a machine-readable build summary.
+- `[Implemented]` `build-runtime` writes `goal_spec.json`, `success_criteria.json`, `benchmark_plan.json`, `verifier_bundle.json`, `factory_profile.json`, and `runtime_plan.json` into a structured `goal/`, `planning/`, `export/`, and `evolution/` workspace.
 - `[Implemented]` Benchmark-mode solving is real: `agintor solve <runtime_dir> <task_id> --suite ...` loads a runtime and executes it against a benchmark task.
+- `[Implemented]` Prompt-mode solving is real in bounded form: `agintor solve <runtime_dir> --prompt ...` or `--prompt-file ...` loads a `SolveRequest`, adapts it into a constrained internal task envelope, and returns a `SolveResult`.
 
 ### Partial
 
-- `[Partial]` `build-runtime` is a goal-conditioned wrapper around the demo suite. It appends cloned train tasks with goal metadata and prompt emphasis, but it does not create the full frozen planning stack required by the target spec.
-- `[Partial]` The build workspace is only partly inspectable. It contains the seed runtime, evolution outputs, and build summary, but it does not persist the full chain of normalized planning artifacts the target spec requires.
+- `[Partial]` `build-runtime` is a goal-conditioned wrapper around the demo suite. It appends cloned train tasks with goal metadata and prompt emphasis, and it freezes a planning stack, but the planning logic is still heuristic and narrower than the target spec.
+- `[Partial]` The build workspace is partly inspectable. It contains the seed runtime, evolution outputs, build summary, and frozen planning artifacts, but it still reports a thinner build story than the target spec expects and omits richer long-lived reporting surfaces.
 - `[Partial]` CLI output is structured JSON, but it reports a thinner build story than the target spec expects and omits several planned artifact paths.
-
-### Missing
-
-- `[Missing]` There is no `GoalSpec`, `SuccessCriteriaBundle`, `BenchmarkPlan`, `VerifierBundle`, `RuntimePlan`, or `DeploymentContract` artifact pipeline.
-- `[Missing]` There is no user-request solve path for exported runtimes. `agintor solve` currently requires a benchmark task ID rather than accepting a raw solve prompt or request file.
-- `[Missing]` There is no target-spec workspace layout with frozen `goal/`, `planning/`, and `export/` artifact families that later stages consume instead of reparsing raw intent.
+- `[Partial]` The user-request solve path is bounded. Prompt input is translated into a constrained task envelope rather than a broader open-ended runtime plan over raw user intent.
 
 ## Runtime Artifact Contract And Export Packaging
 
 ### Implemented
 
-- `[Implemented]` A runtime artifact is a directory with `runtime_manifest.json`, `runtime_profile.json`, and four mutable policy files.
+- `[Implemented]` A runtime artifact is a directory with `runtime_manifest.json`, `runtime_profile.json`, `deployment_contract.json`, and four mutable policy files.
 - `[Implemented]` Runtime identity includes the effective runtime profile. `runtime_loader.py` hashes mutable files plus immutable manifest inputs.
 - `[Implemented]` `build-runtime` writes `runtime_export_bundle.json` and `runtime_provenance_bundle.json`, including runtime hash, code hash, ABI, provider identity, file digests, and an attestation hash.
+- `[Implemented]` `runtime_loader.py` validates `deployment_contract.json` against `RUNTIME_ABI_VERSION`, Python version requirements, and supported backends.
 
 ### Partial
 
 - `[Partial]` The runtime is still a loose Python directory loaded by an installed Agintor host, not a sealed packaged runtime with a stronger compatibility or deployment boundary.
 - `[Partial]` ABI enforcement is currently a string-equality handshake. There is no richer compatibility matrix, migration story, or versioned host capability negotiation.
 - `[Partial]` The provenance bundle is self-generated and unsigned. It is useful for traceability, but not a strong attestation or reproducible-build story.
-- `[Partial]` The runtime profile still mixes factory-side and runtime-side settings in one physical JSON document, even though the target spec wants a clearer logical split.
+- `[Partial]` The runtime profile still mixes factory-side and runtime-side settings in one physical JSON document, even though the build and export flow reconstructs a clearer logical split.
 
 ### Missing
 
-- `[Missing]` There is no `deployment_contract.json`.
 - `[Missing]` There is no packaged durable asset layer for promoted tools, memory snapshots, benchmark adapters, or environment fingerprints.
 - `[Missing]` There is no signed provenance, reproducible export manifest, artifact registry integration, or forward/backward migration contract.
 
@@ -82,6 +71,7 @@ Status tags mean:
 - `[Implemented]` Clone-on-run is enforced. `AgentPool.assert_clone()` hard-invalidates direct execution of canonical stored agents.
 - `[Implemented]` Task resets enforce long-term memory boundaries. Non-transfer tasks clear long-term memory; transfer-scored episodes preserve it within the episode scope only.
 - `[Implemented]` Open-handle integrity and short-term raw-output reachability are hard invariants enforced by the shell and graph classes.
+- `[Implemented]` The runtime host supports a user-facing `SolveRequest` path and adapts it into a bounded internal task envelope.
 
 ### Partial
 
@@ -92,7 +82,6 @@ Status tags mean:
 ### Missing
 
 - `[Missing]` There is no first-class checkpoint/resume manager that can restore open handles, board state, unresolved queues, and suspended branches after process death.
-- `[Missing]` There is no runtime-host adapter from a user-facing `SolveRequest` into an internal bounded task envelope.
 - `[Missing]` There is no durable replay database, observability UI, or long-running orchestration substrate.
 
 ## Mutable Runtime Policy Surface
@@ -119,19 +108,19 @@ Status tags mean:
 
 ### Implemented
 
-- `[Implemented]` The builder has a real, if shallow, goal-conditioning path. `goal_rubric.py` extracts keywords, phrases, and target families, and `runtime_builder.py` uses that to shape benchmark pressure.
+- `[Implemented]` The builder has a real, if shallow, goal-conditioning path. `goal_rubric.py` produces `GoalSpec` and success-criteria artifacts, and `runtime_builder.py` writes `BenchmarkPlan`, `VerifierBundle`, `FactoryProfile`, `RuntimePlan`, and deployment-contract artifacts into the build workspace.
+- `[Implemented]` The build path freezes a runtime plan before evolution begins.
 
 ### Partial
 
-- `[Partial]` Goal interpretation is keyword-heuristic and family-heuristic only. It does not yet produce stable structured artifacts with explicit assumptions, deployment intent, or measurable success criteria.
-- `[Partial]` The build path selects and clones tasks from the demo suite based on heuristic family mapping, but it does not freeze a true runtime plan before evolution.
+- `[Partial]` Goal interpretation is keyword-heuristic and family-heuristic only. It does produce structured artifacts with explicit assumptions, deployment intent, and measurable success criteria, but those artifacts remain shallow and template-driven.
+- `[Partial]` The build path selects and clones tasks from the demo suite based on heuristic family mapping, and it freezes a runtime plan before evolution, but the plan remains thin and demo-suite-conditioned.
+- `[Partial]` The build flow preserves a logical split between factory-only and runtime-only payloads, but the source profile format still mixes both concerns physically.
 
 ### Missing
 
-- `[Missing]` There is no `GoalSpec`.
-- `[Missing]` There is no success-criteria extraction artifact or weighting model.
-- `[Missing]` There is no `RuntimePlan`, `FactoryProfile`, or `DeploymentContract` artifact.
-- `[Missing]` There is no bounded runtime-factory planning stage that cleanly separates factory-only settings from runtime-only execution settings.
+- `[Missing]` There is no contradiction-driven replanning loop that repairs bad upstream interpretations once downstream evidence shows they were wrong.
+- `[Missing]` There is no trustworthy goal-to-objective compiler that turns broad natural-language intent into a credible frozen evaluation world.
 
 ## Benchmarks And Verifier System
 
@@ -140,6 +129,7 @@ Status tags mean:
 - `[Implemented]` The benchmark model supports train, validation, test, and proxy partitions; proxy scope tags; context items; transfer-scored episodes; and benchmark-task loading from JSON.
 - `[Implemented]` The verifier layer supports exact JSON, numeric-tolerant JSON, exact string, exact number, trace-event presence, and trace-event-count checks, plus the `local`, `subtree`, `repo`, and `benchmark` checker ladder.
 - `[Implemented]` The suite loader supports registered plugins and module-based plugin factories.
+- `[Implemented]` `build-runtime` writes an explicit `BenchmarkPlan` and `VerifierBundle` to disk as part of the build path.
 
 ### Partial
 
@@ -149,7 +139,6 @@ Status tags mean:
 
 ### Missing
 
-- `[Missing]` There is no explicit `BenchmarkPlan` or `VerifierBundle` written to disk and then consumed by later stages.
 - `[Missing]` There is no broad benchmark adapter ecosystem for repo editing, browsers, services, multimodal tasks, or long-horizon workflows.
 - `[Missing]` There is no serious verifier-generation or verifier-adaptation stage beyond the hard-coded task verifier types.
 
@@ -160,18 +149,18 @@ Status tags mean:
 - `[Implemented]` The runtime supports single, vertical, and horizontal solve modes.
 - `[Implemented]` Child specs, checkpoint summaries, deterministic horizontal merge, isolated worker execution, and controlled failure on unmet verification are real execution behaviors.
 - `[Implemented]` Merge order is deterministic and benchmark-visible in the current runner and topology policy.
+- `[Implemented]` The runtime supports bounded user-request mode through prompt-to-task adaptation.
 
 ### Partial
 
 - `[Partial]` Horizontal workers are still logically parallel only. They execute sequentially in-process.
 - `[Partial]` Checkpoints are summary objects with open-handle and artifact references, but there is no restart-from-checkpoint execution path.
-- `[Partial]` Task execution still assumes a benchmark task with structured operations rather than a runtime-generated plan over raw goals.
+- `[Partial]` Task execution still assumes either a benchmark task with structured operations or a bounded prompt-derived task envelope rather than a richer runtime-generated plan over raw goals.
 
 ### Missing
 
 - `[Missing]` There is no concurrent scheduler, cancellation/preemption system, or branch-level budget allocator.
 - `[Missing]` There is no durable resume workflow for suspended branches or long-lived async work.
-- `[Missing]` There is no user-request mode adapter that turns raw prompts into bounded runtime work.
 
 ## Short-Term Memory
 
@@ -280,6 +269,7 @@ Status tags mean:
 
 - `[Implemented]` The evaluator supports staged gates, common-random-number comparisons, reference-scale estimation, family/global objective scoring, shrinkage robustness, CVaR tie-break statistics, full-train minibatch early rejection, and validation evaluation.
 - `[Implemented]` Train, validation, and test partitions are materially isolated in the evaluator and mutation-prompt construction code, and validation/test traces are excluded from mutation prompts.
+- `[Implemented]` `evolution.py` persists `validation_history.json` and `stage_failures.json` alongside `evolution_history.json` and `archive_index.json`.
 
 ### Partial
 
@@ -291,7 +281,6 @@ Status tags mean:
 
 - `[Missing]` There is no experiment database, contamination-controlled held-out program, or distributed evaluation harness.
 - `[Missing]` There is no serious grader family for repo, browser, service, multimodal, or long-horizon tasks.
-- `[Missing]` There is no persisted validation-history or stage-failure reporting contract matching the target-spec workspace plan.
 
 ## Evolution Loop, Archive, And Search State
 
@@ -334,7 +323,7 @@ Status tags mean:
 ### Implemented
 
 - `[Implemented]` The repository already proves the bounded-runtime-search architecture end to end for the current MVP problem class.
-- `[Implemented]` The current codebase already enforces many architecture edges directly in runtime and evaluator logic: mutation boundaries, graph invariants, async handles, provider forwarding, runtime identity, archive behavior, crossover, and builder export logic.
+- `[Implemented]` The current codebase already enforces many architecture edges directly in runtime and evaluator logic: mutation boundaries, graph invariants, async handles, provider forwarding, runtime identity, archive behavior, crossover, builder export logic, frozen planning artifacts, deployment contracts, and bounded prompt-mode solve.
 
 ### Partial
 
@@ -343,12 +332,12 @@ Status tags mean:
 
 ### Missing
 
-- `[Missing]` The project does not yet demonstrate robust domain-specialized runtime improvement on serious held-out suites or a deployable user-facing MAS workflow after export.
+- `[Missing]` The project does not yet demonstrate robust domain-specialized runtime improvement on serious held-out suites or a broad deployable user-facing MAS workflow beyond the bounded prompt-mode solve path after export.
 
 ## Highest-Leverage Remaining Work
 
-- Add the build-time artifact chain first: `GoalSpec`, success criteria, benchmark plan, verifier bundle, runtime plan, and deployment contract.
-- Add the exported-runtime user-request solve path next. Without it, the product is still benchmark-only after export.
+- Strengthen the goal-to-objective compiler so the existing `GoalSpec`, success-criteria, benchmark-plan, verifier-bundle, and runtime-plan pipeline becomes domain-richer and less heuristic.
+- Add contradiction-driven replanning when downstream evidence shows the frozen early interpretation was wrong.
 - Move remaining factory-only control concepts out of the runtime control surface so the implementation matches the target-spec ownership model.
 - Make checkpoint/resume first-class instead of summary-only.
 - Turn promoted/generated tools into durable exported assets rather than task-local registry entries.

@@ -61,7 +61,7 @@ Because of that, several of the critique points are valid mainly as objections t
 
 The strongest issues are:
 
-1. there is no trustworthy implemented goal-to-objective pipeline from raw prompt to frozen benchmark and verifier artifacts,
+1. the implemented goal-to-objective pipeline from raw prompt to frozen benchmark and verifier artifacts is still heuristic and not yet trustworthy,
 2. the amount of full-evaluation signal is thin relative to the archive, scheduler, and predictor machinery described,
 3. the determinism assumptions are stronger than what a hosted-provider and docker-capable stack can reliably guarantee,
 4. the immutable shell carries a great deal of the real capability burden,
@@ -88,15 +88,15 @@ The target spec adds a substantially more ambitious product layer:
 - `RuntimePlan` freeze,
 - exported-runtime solve behavior for real user requests.
 
-The current implementation does not yet realize that full stack.
+The current implementation realizes a bounded slice of that stack.
 
 What is implemented today is much narrower:
 
-- goal interpretation is heuristic keyword and phrase extraction in `agintor/goal_rubric.py`,
-- `build-runtime` creates a goal-conditioned suite by cloning demo tasks with prompt emphasis in `agintor/runtime_builder.py`,
+- goal interpretation produces typed planning artifacts in `agintor/goal_rubric.py`, but it does so through heuristic keyword and phrase extraction,
+- `build-runtime` freezes `GoalSpec`, success criteria, benchmark-plan, verifier-bundle, factory-profile, and runtime-plan artifacts in `agintor/runtime_builder.py`, but benchmark pressure is still built by cloning demo tasks with prompt emphasis,
 - verifiers are local exact or near-exact checks in `agintor/verifiers.py`,
 - staged evaluation, archive insertion, scope scheduling, and predictor collection are implemented,
-- the CLI `solve` path is benchmark-task oriented and does not yet implement the full user-request solve contract from the target spec.
+- the CLI `solve` path supports benchmark mode and bounded user-request mode through `SolveRequest` adaptation, not the full open-ended user-request solve contract from the target spec.
 
 That means the critique is strongest when it is read as: the target spec and product narrative outrun what the paper proves and what the current code implements.
 
@@ -108,15 +108,17 @@ This is valid, and it is one of the strongest points.
 
 It is especially valid against the target spec and the current implementation.
 
-The target spec requires a raw-goal pipeline with frozen structured artifacts between each planning stage. The implementation does not have that. Instead, it:
+The target spec requires a raw-goal pipeline with frozen structured artifacts between each planning stage. The implementation has a real artifact pipeline, but it is still thin and heuristic. Instead, it:
 
 - normalizes the goal text,
 - extracts simple keywords and phrases,
 - infers target families with heuristics,
+- derives success criteria from templates,
 - clones one representative demo task per inferred family,
-- adds the goal prompt as emphasis text.
+- adds the goal prompt as emphasis text,
+- and freezes benchmark, verifier, and runtime-plan artifacts around that adapted suite.
 
-That is nowhere near a trustworthy `GoalSpec -> SuccessCriteriaBundle -> BenchmarkPlan -> VerifierBundle -> RuntimePlan` pipeline.
+That is not yet a trustworthy `GoalSpec -> SuccessCriteriaBundle -> BenchmarkPlan -> VerifierBundle -> RuntimePlan` pipeline.
 
 So the critique is right that if upstream formalization is wrong, the search loop optimizes the wrong thing. The current code confirms that concern rather than refuting it.
 
@@ -293,12 +295,13 @@ The paper is fairly honest that Agintor is a bounded benchmark-shaped method. Th
 - deploy-path documentation,
 - a produced MAS that is useful under the chosen runtime contract.
 
-The current implementation does not yet deliver that full product claim:
+The current implementation does deliver part of that product claim:
 
-- `build-runtime` exports a runtime and provenance bundle,
-- but the real user-request solve path from the target spec is not implemented,
-- the CLI `solve` command still expects a benchmark `task_id`,
-- the build pipeline does not produce the full set of frozen planning artifacts the spec calls for.
+- `build-runtime` exports a runtime, a deployment contract, and provenance bundles,
+- the build pipeline writes frozen planning artifacts for the bounded build path,
+- the CLI `solve` command supports both benchmark mode and bounded user-request mode through `SolveRequest` adaptation.
+
+The remaining gap is that the user-request solve path is still a constrained task-envelope adapter rather than a broad deployable MAS solve surface.
 
 So the critique is right that benchmark optimization and deployable runtime usefulness should not be conflated here.
 
