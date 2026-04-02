@@ -14,6 +14,7 @@
 /.tmp_pytest*/
 /.tmp/
 /.tmp_*/
+/.tmp_*
 /temp_*/
 /.temp/
 /.temp_*/
@@ -24,3 +25,5 @@ OpenAI API Key.txt
 MiniMax API Key.txt
 /.codex_doc_build/
 /.codex_review_smoke*/
+/.codex_review_tmp*/
+/agintor/templates/baseline_runtime/

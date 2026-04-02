@@ -54,6 +54,10 @@ def verify_task_with_evidence(task: BenchmarkTask, artifact: Any, trace: list[di
         "artifact": artifact,
         "trace": _trace_summary(trace),
     }
+    if task.verifier_type in {"none", "best_effort"}:
+        evidence["matched"] = None
+        evidence["reason"] = "no exact verifier available"
+        return 0.0, evidence
     if task.verifier_type == "trace_event":
         matched = _trace_has_events(trace, task.expected)
         evidence["matched"] = matched

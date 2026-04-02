@@ -15,11 +15,28 @@ from .runtime_profile import RuntimeProfile, load_runtime_profile
 from .runtime_api import AgentFrame, PolicyContext, RuntimeBudget, RuntimeState
 from .runtime_loader import LoadedRuntime
 from .pydantic_compat import model_copy, model_dump
-from .schemas import AgentTemplate, BenchmarkTask, Checkpoint, ChildSpec, MemoryNode, RunResult
+from .schemas import AgentTemplate, BenchmarkTask, Checkpoint, ChildSpec, MemoryNode, ModelRequest, RunResult
 from .shell import FixedShell
 from .tool_runtime import _signature_arg_names
 from .utils import count_tokens_rough, ensure_directory, now_ts, stable_hash
 from .verifiers import run_checker, verify_task
+
+
+def _category_allowed(allowed_categories: Sequence[str], category_key: str | None) -> bool:
+    if not category_key:
+        return True
+    normalized_allowed = [
+        str(category or "").strip().strip("/").lower()
+        for category in allowed_categories
+        if str(category or "").strip()
+    ]
+    if not normalized_allowed:
+        return True
+    normalized_key = str(category_key).strip().strip("/").lower()
+    return any(
+        normalized_key == allowed or normalized_key.startswith(f"{allowed}/")
+        for allowed in normalized_allowed
+    )
 
 
 class TaskRuntime:
@@ -129,14 +146,24 @@ class TaskRuntime:
                     if frame.role == "merge_vertical":
                         artifact = {op.output_key: state.artifacts.get(op.output_key) for op in task.operations}
                         if self._all_outputs_present(task, state.artifacts):
-                            verifier_score = self._maybe_verify(context, artifact, frame.metadata.get("run_node_id"))
+                            verifier_score = self._maybe_verify(
+                                context,
+                                artifact,
+                                frame.metadata.get("run_node_id"),
+                                exact_verifier_exists=self._has_exact_verifier(task),
+                            )
                             verified_terminal = verifier_score >= 1.0
                         self._record_artifact_node(self.shell.short_term, "final", artifact, frame.metadata.get("run_node_id"))
                         context.record("merge_vertical", artifact=artifact)
                     elif frame.role == "merge_horizontal":
                         worker_outputs = frame.metadata.get("worker_outputs", [])
                         artifact = self.runtime.topology.merge_ensemble(context, worker_outputs)
-                        verifier_score = self._maybe_verify(context, artifact, frame.metadata.get("run_node_id"))
+                        verifier_score = self._maybe_verify(
+                            context,
+                            artifact,
+                            frame.metadata.get("run_node_id"),
+                            exact_verifier_exists=self._has_exact_verifier(task),
+                        )
                         verified_terminal = verifier_score >= 1.0
                         self._record_artifact_node(self.shell.short_term, "ensemble", artifact, frame.metadata.get("run_node_id"))
                         context.record("merge_horizontal", artifact=artifact)
@@ -156,16 +183,28 @@ class TaskRuntime:
                         if op.output_key not in state.artifacts and not (isinstance(artifact, dict) and op.output_key in artifact)
                     ]
                     state.unresolved_goals = unresolved
-                    best_optimistic = self._best_next_action_utility(context, unresolved, verified_terminal)
-                    self._update_subgoal_progress(context, unresolved, best_optimistic, prev_best, verified_terminal)
-                    if self.runtime.control.stop_policy(context, best_optimistic, prev_best, len(unresolved), verified_terminal):
-                        context.record("stop", unresolved=unresolved, verified=verified_terminal, best_optimistic=best_optimistic)
+                    terminal_ready = verified_terminal or not task.verification_required
+                    best_optimistic = self._best_next_action_utility(context, unresolved, terminal_ready)
+                    self._update_subgoal_progress(context, unresolved, best_optimistic, prev_best, terminal_ready)
+                    if self.runtime.control.stop_policy(context, best_optimistic, prev_best, len(unresolved), terminal_ready):
+                        context.record(
+                            "stop",
+                            unresolved=unresolved,
+                            verified=verified_terminal,
+                            terminal_ready=terminal_ready,
+                            best_optimistic=best_optimistic,
+                        )
                         break
                     prev_best = best_optimistic
                     context.record("agent_end", step=step, unresolved=unresolved, verified=verified_terminal)
                 if artifact is None and state.artifacts:
                     artifact = {op.output_key: state.artifacts.get(op.output_key) for op in task.operations}
-                    verifier_score = self._maybe_verify(context, artifact, None)
+                    verifier_score = self._maybe_verify(
+                        context,
+                        artifact,
+                        None,
+                        exact_verifier_exists=self._has_exact_verifier(task),
+                    )
                     verified_terminal = verifier_score >= 1.0
                 if not verified_terminal and task.verification_required and not task.allow_best_effort:
                     artifact = {"error": "controlled_failure"}
@@ -191,7 +230,12 @@ class TaskRuntime:
         if mode == "single":
             artifact, local_faults = self._execute_operations(context, frame, task.operations)
             faults += local_faults
-            verifier_score = self._maybe_verify(context, artifact, frame.metadata.get("run_node_id"))
+            verifier_score = self._maybe_verify(
+                context,
+                artifact,
+                frame.metadata.get("run_node_id"),
+                exact_verifier_exists=self._has_exact_verifier(task),
+            )
             verified_terminal = verifier_score >= 1.0
             return artifact, faults, verifier_score, verified_terminal
         if mode == "vertical":
@@ -599,6 +643,8 @@ class TaskRuntime:
                 )
                 faults += local_faults
                 context.record("tool_operation", op_id=operation.op_id, tool=used_tool, created=created_tool, output=output)
+            elif operation.kind == "direct_response":
+                output = self._execute_direct_response(context, operation, resolved_args, model_class)
             else:
                 output = resolved_args
             results[operation.output_key] = output
@@ -626,6 +672,45 @@ class TaskRuntime:
         feeds_downstream = any(operation.output_key in candidate.dependencies for candidate in context.task.operations)
         return self._coerce(node.content) if feeds_downstream else node.content
 
+    def _execute_direct_response(
+        self,
+        context: PolicyContext,
+        operation: Any,
+        resolved_args: Mapping[str, Any],
+        model_class: str,
+    ) -> Any:
+        output_schema = resolved_args.get("output_schema", {})
+        prompt_lines = [context.task.prompt]
+        if context.task.context_items:
+            prompt_lines.append("Context items:")
+            prompt_lines.append(json.dumps(context.task.context_items, sort_keys=True, default=str))
+        if context.task.file_paths:
+            prompt_lines.append("File paths:")
+            prompt_lines.append(json.dumps(context.task.file_paths, sort_keys=True, default=str))
+        if output_schema:
+            prompt_lines.append("Output schema:")
+            prompt_lines.append(json.dumps(output_schema, sort_keys=True, default=str))
+        response = context.provider.generate(
+            ModelRequest(
+                instructions="Return the strongest bounded answer you can for the request. Use JSON only when an output schema is provided.",
+                prompt="\n".join(prompt_lines),
+                model_class=model_class,
+                seed=context.seed,
+                metadata={
+                    "mode": "user_request",
+                    "payload": {
+                        "prompt": context.task.prompt,
+                        "output_schema": output_schema,
+                    },
+                },
+            )
+        )
+        context.consume_model_response(response, purpose="user_request")
+        try:
+            return json.loads(response.text)
+        except Exception:
+            return response.text
+
     def _dedupe_tools(self, tools: Sequence[Any]) -> list[Any]:
         deduped: dict[str, Any] = {}
         for tool in tools:
@@ -638,15 +723,26 @@ class TaskRuntime:
         frame: AgentFrame,
         operation: Any,
     ) -> list[Any]:
+        allowed_categories = list(context.task.allowed_tool_categories)
+        category_summaries = {
+            category_key: summary
+            for category_key, summary in self.shell.tool_registry.category_summaries.items()
+            if _category_allowed(allowed_categories, category_key)
+        }
         categories = self.runtime.tooling.rank_categories(
             context,
             operation,
-            self.shell.tool_registry.category_summaries,
+            category_summaries,
         )
         inspected_categories = categories[: context.profile.tooling.k_c]
         candidate_tools: list[Any] = []
         for category in inspected_categories:
             candidate_tools.extend(self.shell.tool_registry.tools_in_category(category))
+        candidate_tools = [
+            tool
+            for tool in candidate_tools
+            if _category_allowed(allowed_categories, tool.category_key)
+        ]
         if frame.tool_scope:
             allowed = set(frame.tool_scope)
             candidate_tools = [tool for tool in candidate_tools if tool.spec.name in allowed]
@@ -679,7 +775,8 @@ class TaskRuntime:
             tool_name = ranked_tool_names[0]
         else:
             tool_name = None
-        if operation.kind == "generated_expression" and self.runtime.tooling.should_create_tool(context, operation, ranked_tool_names):
+        generated_allowed = _category_allowed(context.task.allowed_tool_categories, "generated/local")
+        if operation.kind == "generated_expression" and generated_allowed and self.runtime.tooling.should_create_tool(context, operation, ranked_tool_names):
             synth_name = operation.tool_hint or f"synth:{operation.op_id}"
             try:
                 spec, source, executor = self.runtime.tooling.propose_tool_spec(context, operation, dict(args))
@@ -809,11 +906,19 @@ class TaskRuntime:
         )
         self._promote_memory_candidate(context, candidate)
 
-    def _maybe_verify(self, context: PolicyContext, artifact: Any, run_node_id: str | None) -> float:
+    def _maybe_verify(
+        self,
+        context: PolicyContext,
+        artifact: Any,
+        run_node_id: str | None,
+        *,
+        exact_verifier_exists: bool | None = None,
+    ) -> float:
+        exact_verifier_exists = self._has_exact_verifier(context.task) if exact_verifier_exists is None else exact_verifier_exists
         checkers = self.runtime.control.request_checks(
             context,
             artifact,
-            exact_verifier_exists=True,
+            exact_verifier_exists=exact_verifier_exists,
             irreversible=True,
             external_visible=context.task.externally_visible,
         )
@@ -840,6 +945,9 @@ class TaskRuntime:
         context.budget.consume_check(executed_checks, total_latency)
         self._record_artifact_signature(context, artifact, verifier_score)
         return verifier_score
+
+    def _has_exact_verifier(self, task: BenchmarkTask) -> bool:
+        return str(task.verifier_type).strip().lower() not in {"", "none", "best_effort"}
 
     def _best_next_action_utility(self, context: PolicyContext, unresolved: Sequence[str], verified_terminal: bool) -> float:
         if not unresolved and verified_terminal:

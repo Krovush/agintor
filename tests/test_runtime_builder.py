@@ -9,6 +9,7 @@ import pytest
 
 import agintor.runtime_builder as runtime_builder
 from agintor.exceptions import RuntimeLoadError
+from agintor.goal_rubric import build_goal_spec
 from agintor.project import init_runtime as init_runtime_dir
 from agintor.providers import LocalDeterministicProvider
 from agintor.runtime_builder import build_goal_conditioned_suite, build_runtime_from_goal
@@ -63,6 +64,7 @@ def _install_fake_engine(
     validation_calls: list[Path],
     init_calls: list[dict[str, object]] | None = None,
     archive_setup=None,
+    patch_init_runtime: bool = True,
 ) -> None:
     def fake_init_runtime(destination: str | Path, force: bool = False) -> Path:
         path = Path(destination)
@@ -113,20 +115,30 @@ def _install_fake_engine(
         def __init__(self, *args, **kwargs) -> None:
             if init_calls is not None:
                 init_calls.append(dict(kwargs))
+            self.workspace = Path(args[1]) if len(args) > 1 else tmp_path / "fake_evolution"
             self.archive = FakeArchive()
             if callable(archive_setup):
                 archive_setup(self.archive)
             self.evaluator = FakeEvaluator()
 
         def run(self, steps: int = 10) -> SimpleNamespace:
+            self.workspace.mkdir(parents=True, exist_ok=True)
+            (self.workspace / "evolution_history.json").write_text("[]", encoding="utf-8")
+            (self.workspace / "archive_index.json").write_text("[]", encoding="utf-8")
+            (self.workspace / "validation_history.json").write_text("[]", encoding="utf-8")
+            (self.workspace / "stage_failures.json").write_text("[]", encoding="utf-8")
             return SimpleNamespace(
                 best_train_score=0.42,
                 archive_cells=sum(len(records) for records in candidates_by_objective.values()),
                 accepted=2,
-                history_path="history.json",
+                history_path=str(self.workspace / "evolution_history.json"),
+                archive_index_path=str(self.workspace / "archive_index.json"),
+                validation_history_path=str(self.workspace / "validation_history.json"),
+                stage_failures_path=str(self.workspace / "stage_failures.json"),
             )
 
-    monkeypatch.setattr(runtime_builder, "init_runtime", fake_init_runtime)
+    if patch_init_runtime:
+        monkeypatch.setattr(runtime_builder, "init_runtime", fake_init_runtime)
     monkeypatch.setattr(runtime_builder, "EvolutionEngine", FakeEngine)
 
 
@@ -317,6 +329,14 @@ def test_build_goal_conditioned_suite_derives_goal_specific_metadata() -> None:
     assert any("tool" in task.metadata["target_families"] for task in goal_tasks)
     assert any(str(task.metadata["source_task_id"]).startswith("tool.") for task in goal_tasks)
     assert all("Goal emphasis:" in task.prompt for task in goal_tasks)
+
+
+def test_build_goal_spec_does_not_treat_build_as_tool_signal() -> None:
+    goal_spec = build_goal_spec("Build a runtime specialized for checkpointed memory retrieval.", runtime_provider_name="minimax")
+
+    assert "tool" not in goal_spec.target_families
+    assert "tool_reuse_synthesis" not in goal_spec.required_capabilities
+    assert goal_spec.target_families[0] == "mem"
 
 
 def test_build_runtime_forwards_mutator_type_to_evolution_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -552,3 +572,119 @@ def test_build_runtime_export_omits_generated_bytecode_artifacts(runtime_dir: Pa
     assert not any("__pycache__" in str(path.relative_to(exported)) for path in exported.rglob("*"))
     provenance = json.loads((exported / RUNTIME_PROVENANCE_BUNDLE_FILE).read_text(encoding="utf-8"))
     assert not any("__pycache__" in path or path.endswith((".pyc", ".pyo")) for path in provenance["artifact_file_digests"])
+
+
+def test_build_runtime_writes_frozen_workspace_artifact_chain_and_runtime_only_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    goal_prompt = "Build a runtime specialized for checkpointed memory retrieval."
+    goal_score_keys = _goal_score_keys(goal_prompt)
+    candidate_runtime = _write_runtime_dir(tmp_path / "candidate_runtime", "candidate")
+    validation_calls: list[Path] = []
+    _install_fake_engine(
+        monkeypatch,
+        candidates_by_objective={
+            "sbar:global": [
+                _candidate_record(
+                    candidate_runtime,
+                    "candidate",
+                    {
+                        **{key: 0.75 for key in goal_score_keys},
+                        "sbar:global": 0.60,
+                    },
+                )
+            ]
+        },
+        validation_scores={str(candidate_runtime): 0.60},
+        validation_calls=validation_calls,
+        patch_init_runtime=False,
+    )
+
+    result = build_runtime_from_goal(
+        goal_prompt,
+        destination=tmp_path / "exported",
+        workspace=tmp_path / "workspace",
+        provider=LocalDeterministicProvider(),
+        steps=1,
+        runtime_backend="local",
+    )
+
+    workspace_root = Path(result.workspace)
+    assert (workspace_root / "goal" / "goal_spec.json").exists()
+    assert (workspace_root / "goal" / "success_criteria.json").exists()
+    assert (workspace_root / "planning" / "benchmark_plan.json").exists()
+    assert (workspace_root / "planning" / "verifier_bundle.json").exists()
+    assert (workspace_root / "planning" / "runtime_plan.json").exists()
+    assert (workspace_root / "planning" / "factory_profile.json").exists()
+    assert (workspace_root / "export" / "build_summary.json").exists()
+    assert (workspace_root / "export" / "export_summary.json").exists()
+    assert (workspace_root / "export" / "leaderboard.json").exists()
+    assert (workspace_root / "evolution" / "archive_index.json").exists()
+    assert (workspace_root / "evolution" / "validation_history.json").exists()
+    assert (workspace_root / "evolution" / "stage_failures.json").exists()
+
+    exported_profile = json.loads((tmp_path / "exported" / "runtime_profile.json").read_text(encoding="utf-8"))
+    assert "evaluation" not in exported_profile
+    assert "evolution" not in exported_profile
+    assert exported_profile["execution"]["max_steps"] == 64
+
+    build_summary = json.loads((workspace_root / "export" / "build_summary.json").read_text(encoding="utf-8"))
+    assert build_summary["goal_spec_path"] == str(workspace_root / "goal" / "goal_spec.json")
+    assert build_summary["success_criteria_path"] == str(workspace_root / "goal" / "success_criteria.json")
+    assert build_summary["benchmark_plan_path"] == str(workspace_root / "planning" / "benchmark_plan.json")
+    assert build_summary["verifier_bundle_path"] == str(workspace_root / "planning" / "verifier_bundle.json")
+    assert build_summary["runtime_plan_path"] == str(workspace_root / "planning" / "runtime_plan.json")
+
+
+def test_build_runtime_freezes_explicit_runtime_backend_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    goal_prompt = "Build a runtime specialized for checkpointed memory retrieval."
+    goal_score_keys = _goal_score_keys(goal_prompt)
+    candidate_runtime = _write_runtime_dir(tmp_path / "candidate_runtime", "candidate")
+    _install_fake_engine(
+        monkeypatch,
+        candidates_by_objective={
+            "sbar:global": [
+                _candidate_record(
+                    candidate_runtime,
+                    "candidate",
+                    {
+                        **{key: 0.75 for key in goal_score_keys},
+                        "sbar:global": 0.60,
+                    },
+                )
+            ]
+        },
+        validation_scores={str(candidate_runtime): 0.60},
+        validation_calls=[],
+        patch_init_runtime=False,
+    )
+
+    result = build_runtime_from_goal(
+        goal_prompt,
+        destination=tmp_path / "exported",
+        workspace=tmp_path / "workspace",
+        provider=LocalDeterministicProvider(),
+        steps=1,
+        runtime_backend="docker",
+    )
+
+    workspace_root = Path(result.workspace)
+    goal_spec = json.loads((workspace_root / "goal" / "goal_spec.json").read_text(encoding="utf-8"))
+    runtime_plan = json.loads((workspace_root / "planning" / "runtime_plan.json").read_text(encoding="utf-8"))
+    assert goal_spec["constraints"]["runtime_backend"] == "docker"
+    assert goal_spec["deployment_preferences"]["runtime_backend"] == "docker"
+    assert runtime_plan["provider_plan"]["factory_runtime_backend"] == "docker"
+    assert runtime_plan["deployment_contract"]["supported_backends"] == ["local", "docker"]
+
+
+def test_runtime_loader_rejects_unsupported_backend_from_deployment_contract(runtime_dir: Path, tmp_path: Path) -> None:
+    candidate = tmp_path / "runtime_bad_backend"
+    shutil.copytree(runtime_dir, candidate)
+    contract_path = candidate / "deployment_contract.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["supported_backends"] = ["docker"]
+    contract_path.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+
+    with pytest.raises(RuntimeLoadError):
+        load_runtime(candidate, runtime_backend="local")

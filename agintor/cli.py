@@ -9,13 +9,14 @@ from typing import Optional
 
 import typer
 
-from .benchmarks import load_suite
+from .benchmarks import BenchmarkSuite, load_suite
 from .exceptions import AgintorError
 from .evaluator import RuntimeEvaluator
 from .evolution import EvolutionEngine
 from .project import init_runtime as init_runtime_dir, write_demo_suite
 from .pydantic_compat import model_dump
 from .providers import build_provider
+from .runtime_api import load_solve_request, solve_request_to_task, solve_result_from_run_result
 from .runtime_builder import build_runtime_from_goal
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile
 from .runtime_loader import load_runtime
@@ -107,9 +108,11 @@ def init_runtime_cmd(destination: str, force: bool = typer.Option(False, "--forc
 @app.command("solve")
 def solve_cmd(
     runtime_dir: str,
-    task_id: str,
+    task_id: Optional[str] = typer.Argument(None),
     suite: str = typer.Option("demo", "--suite"),
     partition: str = typer.Option("train", "--partition"),
+    prompt: Optional[str] = typer.Option(None, "--prompt"),
+    prompt_file: Optional[str] = typer.Option(None, "--prompt-file"),
     seed: int = typer.Option(0, "--seed"),
     provider: Optional[str] = typer.Option(None, "--provider", "--runtime-provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
@@ -117,29 +120,51 @@ def solve_cmd(
     workspace: Optional[str] = typer.Option(None, "--workspace"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
 ) -> None:
-    benchmark = load_suite(suite)
-    task = benchmark.by_id(task_id)
+    if task_id and (prompt or prompt_file):
+        raise typer.BadParameter("use either benchmark mode with <task_id> or prompt mode with --prompt / --prompt-file")
+    if not task_id and not (prompt or prompt_file):
+        raise typer.BadParameter("provide either <task_id> for benchmark mode or --prompt / --prompt-file for user-request mode")
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
-    runtime = load_runtime(runtime_dir, runtime_profile=runtime_profile)
+    runtime = load_runtime(runtime_dir, runtime_profile=runtime_profile, runtime_backend=runtime_backend)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
     effective_provider = provider or runtime_profile.runtime_provider.name
     workspace_path, retain_artifacts = _resolve_workspace(workspace, "runs")
     try:
+        solve_request = None
+        if task_id:
+            benchmark = load_suite(suite)
+            task = benchmark.by_id(task_id)
+            benchmark_suite = benchmark
+            mode = "benchmark"
+            solve_request = load_solve_request(prompt=task.prompt)
+        else:
+            solve_request = load_solve_request(prompt=prompt, prompt_file=prompt_file)
+            task = solve_request_to_task(solve_request)
+            benchmark_suite = BenchmarkSuite(name=f"solve_request_{solve_request.request_id}", train=[task], val=[], test=[], proxy=[task])
+            partition = "train"
+            mode = "user_request"
+        budget_overrides = solve_request.budget_overrides if mode == "user_request" else None
         evaluator = RuntimeEvaluator(
-            benchmark,
+            benchmark_suite,
             workspace_path,
             provider_impl,
             baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
+            budget_overrides=budget_overrides,
             runtime_backend=runtime_backend,
             retain_artifacts=retain_artifacts,
             **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
         )
         usage_before = provider_impl.usage_summary()
         evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=[seed], use_cache=False, tasks_override=[task])
+        run_result = evaluation.run_results[0]
+        solve_result = solve_result_from_run_result(solve_request, run_result, runtime.runtime_hash)
         typer.echo(json.dumps({
+            "mode": mode,
             "runtime_hash": runtime.runtime_hash,
-            "task_id": task_id,
-            "result": model_dump(evaluation.run_results[0]),
+            "task_id": task.task_id,
+            "request": model_dump(solve_request),
+            "result": model_dump(run_result),
+            "solve_result": model_dump(solve_result),
             "objective_scores": evaluation.objective_scores,
             "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary()),
         }, indent=2, sort_keys=True))

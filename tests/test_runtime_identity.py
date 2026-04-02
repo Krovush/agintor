@@ -39,6 +39,19 @@ def test_runtime_identity_changes_when_profile_override_changes(runtime_dir: Pat
     assert low_runtime.runtime_hash != high_runtime.runtime_hash
 
 
+def test_runtime_identity_ignores_factory_only_profile_changes(runtime_dir: Path, tmp_path: Path) -> None:
+    override_low = tmp_path / "profile_eval_low.json"
+    override_high = tmp_path / "profile_eval_high.json"
+    override_low.write_text(json.dumps({"evaluation": {"stage1_replays": 2}, "evolution": {"phase_budgets": {"local": 100}}}), encoding="utf-8")
+    override_high.write_text(json.dumps({"evaluation": {"stage1_replays": 4}, "evolution": {"phase_budgets": {"local": 900}}}), encoding="utf-8")
+
+    low_runtime = load_runtime(runtime_dir, profile_path=override_low)
+    high_runtime = load_runtime(runtime_dir, profile_path=override_high)
+
+    assert low_runtime.code_hash == high_runtime.code_hash
+    assert low_runtime.runtime_hash == high_runtime.runtime_hash
+
+
 def test_legacy_provider_override_still_updates_runtime_provider(runtime_dir: Path, tmp_path: Path) -> None:
     override_path = tmp_path / "profile_legacy_provider.json"
     override_path.write_text(

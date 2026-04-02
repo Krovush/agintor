@@ -31,6 +31,9 @@ class EvolutionSummary:
     best_train_score: float
     best_val_score: float
     history_path: str
+    archive_index_path: str = ""
+    validation_history_path: str = ""
+    stage_failures_path: str = ""
 
 
 class EvolutionEngine:
@@ -82,6 +85,7 @@ class EvolutionEngine:
         else:
             raise ValueError(f"unknown mutator_type {mutator_type}")
         self.best_val_score = float("-inf")
+        self.validation_history: list[dict[str, Any]] = []
         self._baseline_manifest = self._load_runtime(self.baseline_runtime_dir).manifest
         self.phase_remaining = dict(self.runtime_profile.evolution.phase_budgets)
         self.pass_rate_caps = dict(self.runtime_profile.evaluation.pass_rate_caps)
@@ -233,6 +237,15 @@ class EvolutionEngine:
         leader = max(island, key=lambda record: record.entry.scores.get("sbar:global", float("-inf")))
         val_eval = self.evaluator.evaluate_validation(Path(leader.runtime_dir))
         val_score = val_eval.objective_scores.get("sbar:global", float("-inf"))
+        self.validation_history.append(
+            {
+                "iteration": iteration,
+                "runtime_hash": leader.entry.runtime_hash,
+                "runtime_dir": leader.runtime_dir,
+                "objective_scores": val_eval.objective_scores,
+                "validation_score": val_score,
+            }
+        )
         improvement = val_score - self.best_val_score if self.best_val_score != float("-inf") else val_score
         self.best_val_score = max(self.best_val_score, val_score)
         accepted_scopes = [row.scope for row in self.history if row.accepted]
@@ -403,5 +416,42 @@ class EvolutionEngine:
             self._validation_tick(step)
         history_path = self.workspace / "evolution_history.json"
         history_path.write_text(json.dumps([model_dump(row) for row in self.history], indent=2), encoding="utf-8")
+        archive_index_path = self.workspace / "archive_index.json"
+        archive_records = sorted(
+            self.archive.cells.values(),
+            key=lambda record: (record.objective, record.key),
+        )
+        archive_index_path.write_text(
+            json.dumps([model_dump(record) for record in archive_records], indent=2),
+            encoding="utf-8",
+        )
+        validation_history_path = self.workspace / "validation_history.json"
+        validation_history_path.write_text(json.dumps(self.validation_history, indent=2), encoding="utf-8")
+        stage_failures_path = self.workspace / "stage_failures.json"
+        stage_failures = []
+        for row in self.history:
+            failures = [model_dump(stage) for stage in row.stage_results if not stage.passed]
+            if not failures:
+                continue
+            stage_failures.append(
+                {
+                    "step": row.step,
+                    "objective": row.objective,
+                    "scope": row.scope,
+                    "child_runtime_hash": row.child_runtime_hash,
+                    "failures": failures,
+                }
+            )
+        stage_failures_path.write_text(json.dumps(stage_failures, indent=2), encoding="utf-8")
         best_train = max((record.entry.scores.get("sbar:global", float("-inf")) for record in self.archive.island("sbar:global")), default=float("-inf"))
-        return EvolutionSummary(steps=steps, accepted=accepted, archive_cells=len(self.archive.cells), best_train_score=best_train, best_val_score=self.best_val_score, history_path=str(history_path))
+        return EvolutionSummary(
+            steps=steps,
+            accepted=accepted,
+            archive_cells=len(self.archive.cells),
+            best_train_score=best_train,
+            best_val_score=self.best_val_score,
+            history_path=str(history_path),
+            archive_index_path=str(archive_index_path),
+            validation_history_path=str(validation_history_path),
+            stage_failures_path=str(stage_failures_path),
+        )

@@ -206,6 +206,57 @@ def _deterministic_tool_spec_payload(prompt: str, payload: Mapping[str, Any]) ->
     }
 
 
+def _prompt_excerpt(prompt: str, *, words: int) -> str:
+    tokens = [token for token in str(prompt or "").split() if token]
+    return " ".join(tokens[:words]).strip()
+
+
+def _schema_string_sample(prompt: str, field_name: str | None) -> str:
+    label = str(field_name or "response").strip().replace("_", " ")
+    short_excerpt = _prompt_excerpt(prompt, words=6)
+    full_excerpt = _prompt_excerpt(prompt, words=16)
+    lowered = label.lower()
+    if lowered == "title":
+        return short_excerpt or "Title"
+    if lowered == "summary":
+        return full_excerpt or "Summary"
+    return full_excerpt or label or "response"
+
+
+def _schema_sample_value(schema: Mapping[str, Any], prompt: str, field_name: str | None = None) -> Any:
+    default = schema.get("default")
+    if default is not None:
+        return default
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        return enum_values[0]
+    schema_type = schema.get("type")
+    if schema_type == "object" or (schema_type is None and isinstance(schema.get("properties"), Mapping)):
+        properties = schema.get("properties", {})
+        if not isinstance(properties, Mapping):
+            return {}
+        return {
+            str(name): _schema_sample_value(
+                definition if isinstance(definition, Mapping) else {},
+                prompt,
+                str(name),
+            )
+            for name, definition in properties.items()
+        }
+    if schema_type == "array":
+        items = schema.get("items", {})
+        if isinstance(items, Mapping):
+            return [_schema_sample_value(items, prompt, field_name)]
+        return []
+    if schema_type == "integer":
+        return 1
+    if schema_type == "number":
+        return 1.0
+    if schema_type == "boolean":
+        return True
+    return _schema_string_sample(prompt, field_name)
+
+
 class LocalDeterministicProvider(ModelProvider):
     def __init__(self) -> None:
         super().__init__("local")
@@ -222,6 +273,16 @@ class LocalDeterministicProvider(ModelProvider):
         elif mode == "tool_spec":
             payload = request.metadata.get("payload", {})
             text = json.dumps(_deterministic_tool_spec_payload(request.prompt, payload), sort_keys=True)
+        elif mode == "user_request":
+            payload = request.metadata.get("payload", {})
+            output_schema = payload.get("output_schema", {})
+            if isinstance(output_schema, Mapping) and output_schema:
+                text = json.dumps(
+                    _schema_sample_value(output_schema, request.prompt),
+                    sort_keys=True,
+                )
+            else:
+                text = f"Best effort response: {request.prompt.strip()}"
         else:
             text = request.prompt.strip()
         latency = time.perf_counter() - start

@@ -11,6 +11,133 @@ from pydantic import BaseModel, Field, PrivateAttr, validator
 from .utils import cheap_embedding, stable_hash
 
 
+class GoalSpec(BaseModel):
+    goal_id: str
+    raw_prompt: str
+    normalized_goal: str
+    goal_keywords: List[str] = Field(default_factory=list)
+    goal_phrases: List[str] = Field(default_factory=list)
+    required_capabilities: List[str] = Field(default_factory=list)
+    constraints: Dict[str, Any] = Field(default_factory=dict)
+    success_criteria: List[str] = Field(default_factory=list)
+    target_families: List[str] = Field(default_factory=list)
+    deployment_preferences: Dict[str, Any] = Field(default_factory=dict)
+    assumptions: List[str] = Field(default_factory=list)
+
+
+class SuccessCriterion(BaseModel):
+    criterion_id: str
+    description: str
+    required: bool
+    priority: int
+    measurable_signal: str
+    verifier_hint: str
+    target_family: str
+    weight: float
+
+
+class SuccessCriteriaBundle(BaseModel):
+    bundle_id: str
+    goal_id: str
+    criteria: List[SuccessCriterion] = Field(default_factory=list)
+    assumptions: List[str] = Field(default_factory=list)
+
+
+class BenchmarkPlan(BaseModel):
+    plan_id: str
+    goal_id: str
+    family_targets: List[str] = Field(default_factory=list)
+    train_task_ids: List[str] = Field(default_factory=list)
+    proxy_task_ids: List[str] = Field(default_factory=list)
+    val_task_ids: List[str] = Field(default_factory=list)
+    test_task_ids: List[str] = Field(default_factory=list)
+    synthetic_task_ids: List[str] = Field(default_factory=list)
+    verifier_bundle_id: str
+    frozen: bool = True
+
+
+class VerifierSpec(BaseModel):
+    verifier_id: str
+    verifier_type: str
+    artifact_contract: Dict[str, Any] = Field(default_factory=dict)
+    tolerance: float = 0.0
+    uses_trace: bool = False
+    local_only: bool = True
+    expected_signal: str
+
+
+class VerifierBundle(BaseModel):
+    bundle_id: str
+    plan_id: str
+    verifiers: List[VerifierSpec] = Field(default_factory=list)
+    checker_chain_defaults: List[str] = Field(default_factory=list)
+    frozen: bool = True
+    created_from: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DeploymentContract(BaseModel):
+    entry_command: str
+    runtime_abi: str
+    python_version: str
+    supported_backends: List[str] = Field(default_factory=list)
+    required_env_names: List[str] = Field(default_factory=list)
+    network_policy: str
+    filesystem_policy: str
+    notes: List[str] = Field(default_factory=list)
+
+
+class FactoryProfile(BaseModel):
+    agintor_provider: str
+    evaluation: Dict[str, Any] = Field(default_factory=dict)
+    evolution: Dict[str, Any] = Field(default_factory=dict)
+    mutation: Dict[str, Any] = Field(default_factory=dict)
+    benchmark_generation: Dict[str, Any] = Field(default_factory=dict)
+    leader_selection: Dict[str, Any] = Field(default_factory=dict)
+    runtime_backend: str
+
+
+class RuntimePlan(BaseModel):
+    plan_id: str
+    goal_id: str
+    runtime_abi: str
+    seed_template: str
+    mutable_files: List[str] = Field(default_factory=list)
+    immutable_manifest: List[str] = Field(default_factory=list)
+    runtime_profile: Dict[str, Any] = Field(default_factory=dict)
+    provider_plan: Dict[str, Any] = Field(default_factory=dict)
+    tooling_scope: List[str] = Field(default_factory=list)
+    deployment_contract: DeploymentContract
+
+
+class BuildSummary(BaseModel):
+    build_id: str
+    goal_id: str
+    goal_prompt: str
+    goal_task_ids: List[str] = Field(default_factory=list)
+    goal_spec_path: str
+    success_criteria_path: str
+    benchmark_plan_path: str
+    verifier_bundle_path: str
+    runtime_plan_path: str
+    workspace: str
+    output_runtime_dir: str
+    history_path: str = ""
+    leader_runtime_hash: str = ""
+    leader_runtime_dir: str = ""
+    runtime_abi: str = ""
+    selection_policy: str = ""
+    best_train_score: float
+    best_goal_score: float
+    best_val_score: float
+    accepted_mutations: int
+    archive_cells: int
+    agintor_provider: str
+    runtime_provider: str
+    export_bundle_file: str
+    provenance_bundle_file: str
+    export_summary_path: str = ""
+
+
 class AgentTemplate(BaseModel):
     agent_id: str
     description: str
@@ -221,6 +348,7 @@ class BenchmarkTask(BaseModel):
     task_type: str
     symbolic_seeds: List[str] = Field(default_factory=list)
     file_paths: List[str] = Field(default_factory=list)
+    allowed_tool_categories: List[str] = Field(default_factory=list)
     context_items: List[Dict[str, Any]] = Field(default_factory=list)
     operations: List[OperationSpec] = Field(default_factory=list)
     expected: Any
@@ -236,6 +364,31 @@ class BenchmarkTask(BaseModel):
 
     class Config:
         allow_mutation = False
+
+
+class SolveRequest(BaseModel):
+    request_id: str
+    prompt: str
+    context_items: List[Dict[str, Any]] = Field(default_factory=list)
+    file_paths: List[str] = Field(default_factory=list)
+    output_schema: Dict[str, Any] = Field(default_factory=dict)
+    allowed_tool_categories: List[str] = Field(default_factory=list)
+    verification_preference: str = "verified_if_available"
+    budget_overrides: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SolveResult(BaseModel):
+    request_id: str
+    runtime_hash: str
+    artifact: Any
+    status: str
+    summary: str
+    checks: List[Dict[str, Any]] = Field(default_factory=list)
+    trace_ref: Optional[str] = None
+    budget: Dict[str, Any] = Field(default_factory=dict)
+    faults: Dict[str, Any] = Field(default_factory=dict)
+    verified: bool = False
+    best_effort: bool = False
 
 
 class RunResult(BaseModel):

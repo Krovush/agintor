@@ -95,6 +95,7 @@ class RuntimeEvaluator:
         return load_runtime(
             runtime_dir,
             runtime_profile=runtime_profile or self._effective_runtime_profile(runtime_dir),
+            runtime_backend=self.runtime_backend,
         )
 
     def _evaluation_units(self, tasks: Sequence[Any]) -> list[list[Any]]:

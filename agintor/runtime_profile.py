@@ -220,6 +220,10 @@ class RuntimeProfile(BaseModel):
         allow_population_by_field_name = True
 
 
+_RUNTIME_ONLY_KEYS = ("prompts", "runtime_provider", "execution", "topology", "memory", "tooling", "control")
+_RUNTIME_PROMPT_KEYS = ("memory_summary", "tool_spec")
+
+
 def runtime_profile_path(runtime_dir: str | Path) -> Path:
     return Path(runtime_dir) / RUNTIME_PROFILE_FILE
 
@@ -288,5 +292,33 @@ def resolve_runtime_profile(
     return default_runtime_profile()
 
 
-def profile_to_json(profile: RuntimeProfile) -> str:
-    return json.dumps(model_dump(profile), indent=2, sort_keys=True)
+def runtime_profile_payload(profile: RuntimeProfile) -> dict[str, Any]:
+    payload = model_dump(profile)
+    prompts = payload.get("prompts", {})
+    runtime_prompts = {
+        key: prompts[key]
+        for key in _RUNTIME_PROMPT_KEYS
+        if key in prompts
+    }
+    runtime_payload = {
+        key: payload[key]
+        for key in _RUNTIME_ONLY_KEYS
+        if key in payload
+    }
+    runtime_payload["prompts"] = runtime_prompts
+    return runtime_payload
+
+
+def factory_profile_payload(profile: RuntimeProfile) -> dict[str, Any]:
+    payload = model_dump(profile)
+    prompts = payload.get("prompts", {})
+    return {
+        "prompts": {"mutation_patch": prompts.get("mutation_patch", PromptProfile().mutation_patch)},
+        "evaluation": payload.get("evaluation", {}),
+        "evolution": payload.get("evolution", {}),
+    }
+
+
+def profile_to_json(profile: RuntimeProfile, *, runtime_only: bool = False) -> str:
+    payload = runtime_profile_payload(profile) if runtime_only else model_dump(profile)
+    return json.dumps(payload, indent=2, sort_keys=True)

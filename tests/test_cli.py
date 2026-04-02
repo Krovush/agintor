@@ -10,6 +10,7 @@ import agintor.cli as cli_module
 from agintor.cli import app
 from agintor.providers import LocalDeterministicProvider
 from agintor.runtime_profile import HostedProviderProfile, RuntimeProfile
+from agintor.schemas import RunResult, SuiteEvaluation
 
 
 runner = CliRunner()
@@ -55,6 +56,161 @@ def test_cli_default_solve_eval_do_not_create_repo_workspace_dirs(tmp_path: Path
     eval_payload = json.loads(evaluation.output)
     assert all(run["trace_path"] is None for run in eval_payload["run_results"])
     assert (Path.cwd() / ".agintor_runs").exists() is False
+
+
+def test_cli_solve_supports_prompt_mode_with_verified_result(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    init_result = runner.invoke(app, ["init-runtime", str(runtime_dir)])
+    assert init_result.exit_code == 0, init_result.output
+
+    solve = runner.invoke(
+        app,
+        [
+            "solve",
+            str(runtime_dir),
+            "--prompt",
+            "Given the numbers [2, 3, 5], compute the sum and product and return JSON with keys sum and product.",
+            "--provider",
+            "local",
+            "--workspace",
+            str(tmp_path / "solve_prompt_ws"),
+        ],
+    )
+
+    assert solve.exit_code == 0, solve.output
+    payload = json.loads(solve.output)
+    assert payload["mode"] == "user_request"
+    assert payload["solve_result"]["status"] == "verified"
+    assert payload["solve_result"]["verified"] is True
+    assert payload["solve_result"]["artifact"] == {"product": 30, "sum": 10}
+
+
+def test_cli_solve_prompt_mode_reports_best_effort_for_generic_requests(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    init_result = runner.invoke(app, ["init-runtime", str(runtime_dir)])
+    assert init_result.exit_code == 0, init_result.output
+
+    solve = runner.invoke(
+        app,
+        [
+            "solve",
+            str(runtime_dir),
+            "--prompt",
+            "Write one short sentence about why deterministic runtime contracts are useful.",
+            "--provider",
+            "local",
+            "--workspace",
+            str(tmp_path / "solve_best_effort_ws"),
+        ],
+    )
+
+    assert solve.exit_code == 0, solve.output
+    payload = json.loads(solve.output)
+    assert payload["mode"] == "user_request"
+    assert payload["solve_result"]["status"] == "best_effort"
+    assert payload["solve_result"]["verified"] is False
+    assert payload["solve_result"]["best_effort"] is True
+    assert payload["solve_result"]["artifact"]
+
+
+def test_cli_solve_prompt_mode_passes_budget_overrides_to_evaluator(tmp_path: Path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "runtime"
+    init_result = runner.invoke(app, ["init-runtime", str(runtime_dir)])
+    assert init_result.exit_code == 0, init_result.output
+    request_path = tmp_path / "request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "prompt": "Write one short sentence about runtime profiles.",
+                "budget_overrides": {"M_max": 3, "Q_max": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeEvaluator:
+        def __init__(self, suite, workspace, provider, **kwargs):
+            del suite, workspace, provider
+            captured["budget_overrides"] = kwargs.get("budget_overrides")
+
+        def evaluate_runtime(self, runtime_dir, partition="train", seeds=(0,), use_cache=False, tasks_override=None):
+            del runtime_dir, partition, seeds, use_cache, tasks_override
+            return SuiteEvaluation(
+                runtime_hash="runtime",
+                objective_scores={},
+                task_scores={},
+                family_scores={},
+                run_results=[
+                    RunResult(
+                        task_id="user.solve.request",
+                        seed=0,
+                        artifact="ok",
+                        verifier_score=0.0,
+                        cost=0.0,
+                        latency=0.0,
+                        faults=0,
+                    )
+                ],
+                invalid=False,
+            )
+
+    monkeypatch.setattr(cli_module, "RuntimeEvaluator", FakeEvaluator)
+
+    solve = runner.invoke(
+        app,
+        [
+            "solve",
+            str(runtime_dir),
+            "--prompt-file",
+            str(request_path),
+            "--provider",
+            "local",
+            "--workspace",
+            str(tmp_path / "solve_budget_ws"),
+        ],
+    )
+
+    assert solve.exit_code == 0, solve.output
+    assert captured["budget_overrides"] == {"M_max": 3, "Q_max": 1}
+
+
+def test_cli_solve_prompt_mode_returns_controlled_failure_when_tool_scope_blocks_exact_path(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    init_result = runner.invoke(app, ["init-runtime", str(runtime_dir)])
+    assert init_result.exit_code == 0, init_result.output
+    request_path = tmp_path / "restricted_request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "prompt": "Compute the sum of squares modulo 7 for [2, 3].",
+                "verification_preference": "required",
+                "allowed_tool_categories": ["memory"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    solve = runner.invoke(
+        app,
+        [
+            "solve",
+            str(runtime_dir),
+            "--prompt-file",
+            str(request_path),
+            "--provider",
+            "local",
+            "--workspace",
+            str(tmp_path / "solve_restricted_ws"),
+        ],
+    )
+
+    assert solve.exit_code == 0, solve.output
+    payload = json.loads(solve.output)
+    assert payload["mode"] == "user_request"
+    assert payload["solve_result"]["status"] == "controlled_failure"
+    assert payload["solve_result"]["verified"] is False
+    assert payload["solve_result"]["best_effort"] is False
 
 
 def test_cli_solve_defaults_to_runtime_provider_profile(tmp_path: Path, monkeypatch) -> None:

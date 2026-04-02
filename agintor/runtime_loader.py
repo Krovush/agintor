@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,11 +12,12 @@ from typing import Any, Dict
 
 from .exceptions import RuntimeLoadError
 from .pydantic_compat import model_dump, model_validate
-from .schemas import RuntimeManifest
+from .schemas import DeploymentContract, RuntimeManifest
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, profile_to_json
 from .utils import ast_node_count, file_digest, stable_hash
 
-RUNTIME_ABI_VERSION = "agintor-runtime-abi-v1"
+RUNTIME_ABI_VERSION = "agintor-runtime-abi-v2"
+DEPLOYMENT_CONTRACT_FILE = "deployment_contract.json"
 RUNTIME_EXPORT_BUNDLE_FILE = "runtime_export_bundle.json"
 RUNTIME_PROVENANCE_BUNDLE_FILE = "runtime_provenance_bundle.json"
 
@@ -32,6 +34,7 @@ def _validate_runtime_abi(runtime_path: Path, manifest: RuntimeManifest) -> None
 class LoadedRuntime:
     runtime_dir: Path
     manifest: RuntimeManifest
+    deployment_contract: DeploymentContract
     topology: Any
     memory: Any
     tooling: Any
@@ -49,6 +52,18 @@ def _load_manifest(runtime_path: Path) -> RuntimeManifest:
     manifest = model_validate(RuntimeManifest, json.loads(manifest_path.read_text(encoding="utf-8")))
     _validate_runtime_abi(runtime_path, manifest)
     return manifest
+
+
+def _load_deployment_contract(runtime_path: Path) -> DeploymentContract:
+    contract_path = runtime_path / DEPLOYMENT_CONTRACT_FILE
+    if not contract_path.exists():
+        raise RuntimeLoadError(f"missing {DEPLOYMENT_CONTRACT_FILE} in {runtime_path}")
+    contract = model_validate(DeploymentContract, json.loads(contract_path.read_text(encoding="utf-8")))
+    if contract.runtime_abi != RUNTIME_ABI_VERSION:
+        raise RuntimeLoadError(
+            f"deployment contract ABI mismatch for {runtime_path}: contract={contract.runtime_abi} loader={RUNTIME_ABI_VERSION}"
+        )
+    return contract
 
 
 @contextlib.contextmanager
@@ -96,7 +111,63 @@ def _effective_profile_payload(
     profile_path: str | Path | None,
 ) -> str:
     effective_profile = runtime_profile or load_runtime_profile(runtime_path, profile_path=profile_path)
-    return profile_to_json(effective_profile)
+    return profile_to_json(effective_profile, runtime_only=True)
+
+
+def _parse_python_version(value: str) -> tuple[int, ...]:
+    cleaned = value.strip()
+    if cleaned.startswith(">="):
+        cleaned = cleaned[2:]
+    if cleaned.endswith("+"):
+        cleaned = cleaned[:-1]
+    parts: list[int] = []
+    for part in cleaned.split("."):
+        if not part:
+            continue
+        try:
+            parts.append(int(part))
+        except ValueError:
+            break
+    return tuple(parts)
+
+
+def _python_version_ok(spec: str) -> bool:
+    current = (sys.version_info.major, sys.version_info.minor)
+    text = spec.strip()
+    if not text:
+        return True
+    parsed = _parse_python_version(text)
+    if not parsed:
+        return True
+    if text.startswith(">=") or text.endswith("+"):
+        return current >= parsed[:2]
+    return current[: len(parsed)] == parsed
+
+
+def _validate_deployment_contract(
+    runtime_path: Path,
+    contract: DeploymentContract,
+    *,
+    runtime_backend: str | None = None,
+    require_env_names: bool = False,
+) -> None:
+    if not _python_version_ok(contract.python_version):
+        raise RuntimeLoadError(
+            f"python version mismatch for {runtime_path}: required={contract.python_version} current={sys.version_info.major}.{sys.version_info.minor}"
+        )
+    if runtime_backend is not None:
+        backend = str(runtime_backend).strip().lower()
+        supported = {item.strip().lower() for item in contract.supported_backends}
+        if backend and supported and backend not in supported:
+            raise RuntimeLoadError(
+                f"runtime backend {backend!r} is not supported by {runtime_path}; supported backends: {sorted(supported)}"
+            )
+    if require_env_names:
+        missing = [name for name in contract.required_env_names if name and not os.environ.get(name)]
+        if missing:
+            raise RuntimeLoadError(
+                f"missing required runtime environment variables for {runtime_path}: {', '.join(sorted(missing))}"
+            )
 
 
 def runtime_identity_inputs(
@@ -132,9 +203,18 @@ def load_runtime(
     *,
     runtime_profile: RuntimeProfile | None = None,
     profile_path: str | Path | None = None,
+    runtime_backend: str | None = None,
+    require_env_names: bool = False,
 ) -> LoadedRuntime:
     runtime_path = Path(runtime_dir)
     manifest = _load_manifest(runtime_path)
+    deployment_contract = _load_deployment_contract(runtime_path)
+    _validate_deployment_contract(
+        runtime_path,
+        deployment_contract,
+        runtime_backend=runtime_backend,
+        require_env_names=require_env_names,
+    )
     policy_objects: Dict[str, Any] = {}
     ast_count = 0
     mutable_loc = 0
@@ -158,6 +238,7 @@ def load_runtime(
     return LoadedRuntime(
         runtime_dir=runtime_path,
         manifest=manifest,
+        deployment_contract=deployment_contract,
         topology=policy_objects["top"],
         memory=policy_objects["mem"],
         tooling=policy_objects["tool"],
@@ -170,6 +251,7 @@ def load_runtime(
 
 
 __all__ = [
+    "DEPLOYMENT_CONTRACT_FILE",
     "LoadedRuntime",
     "RUNTIME_ABI_VERSION",
     "RUNTIME_EXPORT_BUNDLE_FILE",
