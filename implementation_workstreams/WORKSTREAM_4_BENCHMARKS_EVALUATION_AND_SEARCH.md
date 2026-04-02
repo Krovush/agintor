@@ -11,30 +11,32 @@
 ## Boundaries
 
 - Own benchmark and verifier content, benchmark/task adapters, staged evaluation, validation reporting, held-out policy, archive and search policy, and search-state persistence.
-- Workstream 1 owns the schema shapes and workspace placement for `BenchmarkPlan`, `VerifierBundle`, `build_summary.json`, `leaderboard.json`, and related planning outputs. This workstream owns the contents of those artifacts and the code that consumes them during evaluation.
-- Workstream 2 owns runtime execution semantics, task-time orchestration, and shell invariants. This workstream may require new telemetry or adapter hooks from the runtime host, but it does not own the host itself.
-- Workstream 3 owns memory-specific benchmark pressure once transfer, retrieval, and compaction durability require new runtime-state semantics or memory-graph behavior.
-- Workstream 5 owns provider integration, task-time predictor semantics, tool/runtime sandboxing, and control-surface behavior. This workstream owns only the factory-side use of predictors for evaluation, retraining cadence, freezing, and search decisions.
+- Own the contents of `BenchmarkPlan`, `VerifierBundle`, `validation_history.json`, `stage_failures.json`, `leaderboard.json`, and the evaluation code that consumes them.
+- Keep runtime execution semantics, task-time orchestration, shell invariants, and solve-time kernel implementation outside this workstream. This workstream may require telemetry or adapter hooks from runtime execution, but it does not own the runtime host.
+- Keep memory-specific benchmark pressure bounded to benchmark content and evaluation pressure. Runtime-state semantics and memory-graph behavior remain outside this workstream.
+- Keep provider integration, task-time predictor semantics, tool/runtime sandboxing, and control-surface behavior outside this workstream. This workstream owns only evaluation-time predictor use, retraining cadence, freezing, and search decisions.
 
 ## Planning Constraints
 
 - Keep MVP benchmark growth bounded and locally judgeable. Do not introduce open-ended benchmark synthesis or unverifiable graders in v1.
 - Prefer typed task templates and frozen verifier templates over free-form provider-authored graders.
-- Search-state hardening follows evaluation hardening. Do not scale out a search loop that still measures mostly synthetic toy tasks.
+- Search-state hardening follows evaluation hardening. Do not scale out a search loop that measures mostly synthetic toy tasks.
 - Validation and test traces remain mutation-invisible at every phase.
 - Determinism claims must match the stack. Hosted-provider and Docker paths may exist, but the reference evaluation lane stays local, replayable, and reproducible.
+- Factory evaluation must measure runtimes through the same runtime entrypoint used in solve-time execution. Improvements that depend on hidden direct-import execution paths do not count as valid benchmark wins.
 
-## Current Baseline
+## Baseline
 
-- `agintor/benchmarks.py` already defines `BenchmarkSuite` with `train`, `val`, `test`, and `proxy` partitions, task lookup helpers, JSON loading, and plugin or module suite providers.
-- `agintor/schemas.py` already gives `BenchmarkTask` support for `context_items`, `file_paths`, `operations`, `proxy_scope_tags`, `transfer_scored`, `episode_id`, and `episode_order`.
-- `agintor/verifiers.py` already supports `json_exact`, `json_numeric`, `string_exact`, `number_exact`, `trace_event`, and `trace_event_count`, plus the `local`, `subtree`, `repo`, and `benchmark` checker ladder.
-- `agintor/evaluator.py` already enforces Stage 0 through Stage 4 gates, deterministic smoke replay, common-random-number comparisons, reference-scale estimation, robustness scoring, CVaR tie-breaks, minibatch early rejection, and validation evaluation.
-- `agintor/archive.py` and `agintor/evolution.py` already implement objective catalogs, scope scheduling, archive insertion, counterfactual singleton and pair credits, AST crossover, predictor updates, and pass-rate tightening.
-- `agintor/runtime_builder.py` still goal-conditions evaluation by cloning one representative demo task per family and appending prompt emphasis. There is no persisted `BenchmarkPlan` or `VerifierBundle` consumption path yet.
-- Search state is still mostly process-local. The durable artifact today is `evolution_history.json`; there is no search checkpoint, validation history ledger, stage-failure report, or resumable archive snapshot.
-- Objective sampling is still uniform random in `EvolutionEngine._select_objective()`.
-- The active suite is still dominated by small synthetic structured tasks, so the evaluator is materially stronger than the benchmark pressure it currently measures.
+- `agintor/benchmarks.py` defines `BenchmarkSuite` with `train`, `val`, `test`, and `proxy` partitions, task lookup helpers, JSON loading, and plugin or module suite providers.
+- `agintor/schemas.py` gives `BenchmarkTask` support for `context_items`, `file_paths`, `operations`, `proxy_scope_tags`, `transfer_scored`, `episode_id`, and `episode_order`.
+- `agintor/verifiers.py` supports `json_exact`, `json_numeric`, `string_exact`, `number_exact`, `trace_event`, and `trace_event_count`, plus the `local`, `subtree`, `repo`, and `benchmark` checker ladder.
+- `agintor/evaluator.py` enforces Stage 0 through Stage 4 gates, deterministic smoke replay, common-random-number comparisons, reference-scale estimation, robustness scoring, CVaR tie-breaks, minibatch early rejection, and validation evaluation.
+- `agintor/archive.py` and `agintor/evolution.py` implement objective catalogs, scope scheduling, archive insertion, counterfactual singleton and pair credits, AST crossover, predictor updates, and pass-rate tightening.
+- `agintor/runtime_builder.py` goal-conditions evaluation by cloning one representative demo task per family and appending prompt emphasis. There is no persisted `BenchmarkPlan` or `VerifierBundle` consumption path.
+- Search state is mostly process-local. The durable artifact is `evolution_history.json`; there is no search checkpoint, validation history ledger, stage-failure report, or resumable archive snapshot.
+- Objective sampling is uniform random in `EvolutionEngine._select_objective()`.
+- The active suite is dominated by small synthetic structured tasks, so the evaluator is materially stronger than the benchmark pressure it measures.
+- Evaluation runs directly against loaded runtimes instead of the runtime execution entrypoint.
 
 ## Reference Benchmark Ladder
 
@@ -52,6 +54,7 @@
 - Add concrete `BenchmarkPlan` and `VerifierBundle` loading and consumption paths so `agintor/runtime_builder.py`, `agintor/evaluator.py`, and `agintor/evolution.py` run from frozen planning artifacts instead of ad hoc suite assembly.
 - Refactor suite construction so benchmark selection, cloning, bounded synthesis, and verifier freeze occur before any candidate evolution begins.
 - Persist benchmark provenance with at least suite name, task source, fixture digest, environment digest, benchmark-plan ID, verifier-bundle ID, and generation timestamp.
+- Route evaluation through the runtime execution entrypoint rather than relying on direct imports as the hidden execution path.
 - Add `validation_history.json`, `stage_failures.json`, and `leaderboard.json` outputs aligned with the target-spec workspace plan.
 - Keep the content conservative in this phase. The demo suite may remain the only active content while the frozen-artifact contract lands.
 
@@ -63,9 +66,9 @@
 - Separate benchmark fixtures from benchmark selection. A benchmark plan should choose tasks and fixtures by ID, not embed loose task construction logic inside the build path.
 - Add local fixture contracts for repository snapshots, browser environments, service simulators, and multimodal assets so every serious task has explicit setup and teardown requirements.
 - Keep benchmark planning conservative: selection first, template cloning second, bounded synthesis last.
-- Require every synthetic or adapted task to declare why its correctness is still deterministically and locally judgeable.
+- Require every synthetic or adapted task to declare why its correctness is deterministically and locally judgeable.
 
-`Exit gate:` the benchmark plan can mix the current demo tasks with at least one serious non-demo family while still freezing all task IDs, fixtures, and verifier references before evolution starts.
+`Exit gate:` the benchmark plan can mix demo tasks with at least one serious non-demo family while freezing all task IDs, fixtures, and verifier references before evolution starts.
 
 ## Phase 3: Expand The Verifier Ladder With Typed Local Graders
 
@@ -130,7 +133,7 @@
 - `agintor/evolution.py`: objective selection policy, operator portfolio, checkpoint and resume, champion tracking, leaderboard writes.
 - `agintor/mutator.py`: operator hooks for simplification, refactoring, and bounded family-aware mutations.
 - `agintor/crossover.py`: whole-method crossover and donor-selection constraints.
-- `agintor/predictors.py`: shared with Workstream 5; this workstream owns retraining cadence, freezing during evaluation, serialized snapshots, and search-side summaries only.
+- `agintor/predictors.py`: retraining cadence, freezing during evaluation, serialized snapshots, and search-side summaries.
 
 ## Deferred Until Post-MVP
 
