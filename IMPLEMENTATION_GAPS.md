@@ -11,7 +11,7 @@ Use it with the following precedence:
 - For what the repository does today, actual code paths and current wiring win.
 - For the intended end-state architecture, `PROJECT TARGET SPEC.md` wins.
 - `PROJECT PAPER.md` remains useful for target behavior where it does not conflict with the target spec.
-- Literal contradictions between the paper and the target spec are handled in `PAPER_SPEC_RECONCILIATION.md`.
+- Literal contradictions between the paper and the target spec are handled inline in the relevant sections below.
 
 Status tags mean:
 
@@ -38,8 +38,9 @@ Status tags mean:
 ### Partial
 
 - `[Partial]` `build-runtime` is a goal-conditioned wrapper around the demo suite. It appends cloned train tasks with goal metadata and prompt emphasis, and it freezes a planning stack, but the planning logic is still heuristic and narrower than the target spec.
-- `[Partial]` The build workspace is partly inspectable. It contains the seed runtime, evolution outputs, build summary, and frozen planning artifacts, but it still reports a thinner build story than the target spec expects and omits richer long-lived reporting surfaces.
-- `[Partial]` CLI output is structured JSON, but it reports a thinner build story than the target spec expects and omits several planned artifact paths.
+- `[Partial]` The builder persists canonical planning artifacts, but the pipeline still passes live Python objects between stages instead of reloading each stage strictly from the serialized artifacts it just wrote.
+- `[Partial]` The build workspace is materially inspectable. It contains the seed runtime, frozen planning artifacts, evolution outputs, leaderboard, validation history, stage failures, and export summaries, but it still omits richer long-lived experiment and provenance reporting surfaces.
+- `[Partial]` CLI output is structured JSON and includes the main planning and export paths, but it still omits some richer reporting references such as validation-history, stage-failure, and archive-report paths.
 - `[Partial]` The user-request solve path is bounded. Prompt input is translated into a constrained task envelope rather than a broader open-ended runtime plan over raw user intent.
 
 ## Runtime Artifact Contract And Export Packaging
@@ -54,9 +55,10 @@ Status tags mean:
 ### Partial
 
 - `[Partial]` The runtime is still a loose Python directory loaded by an installed Agintor host, not a sealed packaged runtime with a stronger compatibility or deployment boundary.
-- `[Partial]` ABI enforcement is currently a string-equality handshake. There is no richer compatibility matrix, migration story, or versioned host capability negotiation.
+- `[Partial]` ABI and deployment-contract enforcement go beyond string equality: the loader validates runtime ABI, Python version requirements, and supported backend claims. There is still no richer compatibility matrix, migration story, or versioned host capability negotiation.
 - `[Partial]` The provenance bundle is self-generated and unsigned. It is useful for traceability, but not a strong attestation or reproducible-build story.
 - `[Partial]` The runtime profile still mixes factory-side and runtime-side settings in one physical JSON document, even though the build and export flow reconstructs a clearer logical split.
+- `[Partial]` Exported runtimes still resolve immutable support modules such as `agintor/runner.py`, `agintor/shell.py`, and `agintor/tool_runtime.py` from the installed host package. There is no bundled runtime kernel or runtime-owned SDK in the export.
 
 ### Missing
 
@@ -116,6 +118,7 @@ Status tags mean:
 - `[Partial]` Goal interpretation is keyword-heuristic and family-heuristic only. It does produce structured artifacts with explicit assumptions, deployment intent, and measurable success criteria, but those artifacts remain shallow and template-driven.
 - `[Partial]` The build path selects and clones tasks from the demo suite based on heuristic family mapping, and it freezes a runtime plan before evolution, but the plan remains thin and demo-suite-conditioned.
 - `[Partial]` The build flow preserves a logical split between factory-only and runtime-only payloads, but the source profile format still mixes both concerns physically.
+- `[Partial]` The planning artifacts are persisted to disk, but later build stages still consume live in-memory objects rather than reloading the canonical serialized artifacts between stages.
 
 ### Missing
 
@@ -134,7 +137,7 @@ Status tags mean:
 ### Partial
 
 - `[Partial]` The shipped suite is still tiny, synthetic, and heavily structured around predeclared operations.
-- `[Partial]` Goal-conditioned benchmark pressure is still just cloned demo tasks with prompt emphasis and metadata, not true bounded task synthesis plus verifier freeze.
+- `[Partial]` Goal-conditioned benchmark pressure is still just cloned demo tasks with prompt emphasis and metadata. Benchmark and verifier artifacts are frozen, but they are frozen around that narrow demo-conditioned pressure rather than around richer typed benchmark planning.
 - `[Partial]` The verifier stack is still a compact local grader family rather than a richer bundle of domain-specific artifact-shape, repo, browser, or service graders.
 
 ### Missing
@@ -253,7 +256,7 @@ Status tags mean:
 
 ### Partial
 
-- `[Partial]` The provider abstraction is still centered on text generation requests and simple response payloads.
+- `[Partial]` The provider abstraction is still centered on `ModelRequest` and `ModelResponse` text-generation flows, even though hosted adapters now preserve some metadata such as response IDs, status, usage, latency, and reasoning effort in `ModelResponse.raw`.
 - `[Partial]` Retry and failover logic are simple token-based heuristics over exception text, not robust provider-specific policies.
 - `[Partial]` Audit, health, and replay are useful but lightweight and local to the wrapper classes.
 
@@ -274,7 +277,7 @@ Status tags mean:
 ### Partial
 
 - `[Partial]` Stage 0 still stops at patch-format, boundary, and parse/load integrity. It does not run formatter, linter, or broader unit-test gates as described in the paper.
-- `[Partial]` Validation exists as an evaluator call and export tie-break signal, but not as a richer tracked leaderboard/report surface with frozen planning artifacts.
+- `[Partial]` Validation, leaderboard, and stage-failure reporting now persist to the workspace, but there is still no richer experiment database, held-out campaign tracking, or contamination-governed reporting surface.
 - `[Partial]` Docker evaluation isolates whole runtime executions, not per-tool or per-branch sandboxes.
 
 ### Missing
@@ -293,7 +296,7 @@ Status tags mean:
 ### Partial
 
 - `[Partial]` Objective selection is still uniform random rather than adaptive to archive need or uncertainty.
-- `[Partial]` Search state is mostly in-memory plus `evolution_history.json`; it is not a robust resumable long-running system.
+- `[Partial]` Search state now persists `evolution_history.json`, `archive_index.json`, `validation_history.json`, and `stage_failures.json`, but the engine still cannot resume from those artifacts as a first-class checkpointed search process.
 - `[Partial]` The mutators are still local patch operators over the existing heuristics, not broader self-programming transformations.
 
 ### Missing
@@ -332,12 +335,13 @@ Status tags mean:
 
 ### Missing
 
-- `[Missing]` The project does not yet demonstrate robust domain-specialized runtime improvement on serious held-out suites or a broad deployable user-facing MAS workflow beyond the bounded prompt-mode solve path after export.
+- `[Missing]` The project does not yet demonstrate robust domain-specialized runtime improvement on serious held-out suites or a self-contained exported runtime that can execute without host implementation reach-through.
 
 ## Highest-Leverage Remaining Work
 
 - Strengthen the goal-to-objective compiler so the existing `GoalSpec`, success-criteria, benchmark-plan, verifier-bundle, and runtime-plan pipeline becomes domain-richer and less heuristic.
 - Add contradiction-driven replanning when downstream evidence shows the frozen early interpretation was wrong.
+- Establish a real host/runtime boundary so exported runtimes stop depending on installed host implementation modules for solve-time execution.
 - Move remaining factory-only control concepts out of the runtime control surface so the implementation matches the target-spec ownership model.
 - Make checkpoint/resume first-class instead of summary-only.
 - Turn promoted/generated tools into durable exported assets rather than task-local registry entries.
