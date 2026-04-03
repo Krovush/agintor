@@ -1,237 +1,289 @@
-# Workstream 5: Tooling, Providers, And Control
+# Workstream 5: Tooling, Providers, and Control
 
 ## Outcome
 
-- The runtime tool layer must become a bounded capability system with clear separation between task-local generated tools and promoted reusable tools. Promoted tools must have stable manifests, validation evidence, sandbox fingerprints, and runtime-owned loading paths.
-- Per-tool execution must become an explicit runtime contract. Tool runs and background jobs must expose sandbox policy, permission scope, resource ceilings, lifecycle state, and failure reasons instead of behaving like anonymous subprocesses.
-- The provider layer must become a stable runtime-facing request and response contract that can support local deterministic execution, replay, and hosted providers without collapsing everything into flat text strings.
-- The control surface must become purely solve-time and predictor-informed. Model assignment, checker requests, and stopping must be explainable from runtime state, uncertainty estimates, and budget state, not mixed with factory scheduler responsibilities.
-- Execution-time observability must make it possible to answer, from workspace artifacts alone, which tool was selected or synthesized, why a provider was chosen or retried, what hosted response metadata was returned, and why the runtime asked for checks or stopped.
+- Tooling, provider, and control contracts become runtime-owned surfaces that live entirely inside the bundled solve-time runtime boundary.
+- Promoted tools become durable runtime assets with manifests, validation evidence, determinism classification, sandbox fingerprints, and rollback state.
+- Tool runs and provider background operations share a unified async job model with restart and receipt linkage.
+- Hosted provider adapters preserve rich structured response envelopes instead of flattening everything into text.
+- Solve-time control decisions become predictor-backed, uncertainty-aware, and auditable from runtime traces and workspace artifacts.
+
+## Prerequisites
+
+- Workstream 1 freezes the runtime boundary and export contract.
+- Workstream 2 freezes orchestration, checkpoint, and receipt semantics.
+- Workstream 3 provides durable state, replay, and recovery records.
+- Workstream 4 provides serious held-out evidence and resumable search state.
+
+## Sequence Position
+
+- This workstream starts after Workstream 1 freezes the runtime boundary, Workstream 2 freezes orchestration and receipt semantics, Workstream 3 provides durable state, and Workstream 4 provides serious evaluation signals.
+- This workstream is last on purpose. Tool/provider/control modernization should consume a stable runtime architecture and real evaluation evidence instead of moving targets.
 
 ## Boundaries
 
-- Own the runtime-side tool lifecycle, generated tool validation, promoted-tool materialization, per-tool sandbox policy, async tool-job lifecycle, provider adapters and wrappers, runtime-side provider environment handling, predictor utility plumbing, and solve-time control behavior inside the runtime execution layer.
-- Own the runtime-facing schemas and manifests for `ToolSpec`, `AsyncHandle`, tool execution results, provider requests and responses, promoted-tool records, and any adjacent sandbox or job-state contracts introduced for this workstream.
-- Keep runtime-wide container isolation, branch scheduling, checkpoint timing, and request execution flow outside this workstream. This workstream owns per-tool isolation and provider/runtime execution semantics, not the global runtime scheduler.
-- Keep durable storage, checkpoint persistence, replay indexing, and long-term memory durability outside this workstream. This workstream defines which tool and provider records must be serializable, but not the storage engine.
-- Keep benchmark checker ladders, predictor label extraction policy, archive scoring, scope credit, and mutation acceptance outside this workstream. This workstream consumes frozen signals at solve time; it does not own search accounting.
-- Keep build-time provider planning, export bundle wiring, deployment-contract packaging, and CLI solve surface changes outside this workstream. This workstream owns the runtime-owned tool and provider assets consumed at solve time.
+- Own runtime-side tool contracts, promoted-tool lifecycle, per-tool sandbox policy, tool execution lifecycle, hosted provider request and response contracts, provider retry and replay classification, async job records, and solve-time control behavior.
+- Own runtime-facing schemas such as:
+  - tool manifests
+  - promoted-tool records
+  - sandbox policy
+  - async job state
+  - hosted response envelopes
+  - decision records
+- Keep runtime-wide branch scheduling, checkpoint timing, durable store implementation, benchmark policy, archive accounting, and export packaging outside this workstream.
+- Keep factory-owned scheduler responsibilities out of solve-time control entirely.
 
 ## Non-Goals
 
-- Do not turn the MVP into an unbounded package manager, external-service mesh, or general tool marketplace.
-- Do not expand the mutable runtime search surface beyond the existing tool and control policy files plus adjacent runtime-owned support modules.
-- Do not let the exported runtime own archive credit, objective selection, benchmark planning, or any other factory scheduler state.
-- Do not require full hosted-provider feature parity before the local, replay, and primary OpenAI path are stable.
-- Do not make multi-language tool synthesis part of the MVP critical path. The first milestone is a durable, bounded, inspectable tool system with stable runtime contracts.
+- Replacing Agintor's internal runtime protocol with MCP
+- Turning provider-native tool ecosystems into the canonical tool model
+- Open-ended remote tool registries or cross-runtime tool sharing
+- Broad multi-language generated-tool runtimes in the MVP
 
 ## Baseline
 
-- `agintor/tool_runtime.py` provides a tool lifecycle: category-first discovery inputs, built-in registry entries, generated tool registration, validation, synchronous execution, async handle launch, waiting, and task-local tool reset.
-- Generated tools undergo validation: permission checks, AST and import checks, signature validation, `py_compile`, import-resolution checks, timeout runs, smoke tests, and deterministic replay trials.
-- Sandbox reuse is content-addressed through `SandboxManager.sandbox_hash(...)`, which hashes tool source identity, runtime, dependencies, permissions, base image inputs, and test digests.
-- The tool safety model is lightweight. `SafetyGuard` is primarily static AST and import filtering plus a permission denylist, not a hardened execution boundary with explicit filesystem, network, CPU, memory, or process controls.
-- Async tool handles are runtime objects, but `runner.py` usually launches a handle and waits on it immediately. That limits overlap and makes background work more constrained than its interface suggests.
-- Generated tools are task-local Python assets under `generated/local`. Promotion updates the in-memory registry, but promoted tools do not become stable runtime-owned assets with manifests, rollback state, or export hooks.
-- `agintor/templates/baseline_runtime/control_policy.py` implements `assign_model`, `request_checks`, and `stop_policy`, and also carries `score_interface_scope` and `update_scope_credit`, which are factory-owned responsibilities.
-- `agintor/predictors.py` contains a `DecisionFamilyModelBank`, bootstrapped probability models, positive-value models, ranking mixers, freezing, and retraining thresholds, but solve-time control and tooling rely mainly on heuristics.
-- `runner.py` computes best-next-action utility with hand-written constants instead of routing decisions through shared predictor utilities and uncertainty-aware action scoring.
-- `agintor/providers.py` supports local deterministic, replay, retry, failover, OpenAI, and MiniMax providers. Provider payloads serialize across Docker boundaries, including mounted key files and replay files.
-- `agintor/provider_openai.py` uses the Responses client, supports reasoning-effort mapping, max-output-token handling, and cost accounting, but the runtime-facing contract flattens hosted responses down to `ModelResponse.text` plus a small raw metadata map.
-- `runner.py` scrubs unrelated provider environment variables before runtime execution, which separates runtime-visible secrets from unrelated host configuration.
-- `container_runtime.py` serializes provider payloads and mounted files into Docker execution, but the provider contract is shaped around simple buffered requests and responses rather than a richer hosted response envelope.
-- Tooling and provider execution depend on a solve-time kernel that lives in the Agintor package. Exported runtimes do not ship a self-contained runtime-owned tool or provider layer that can execute without importing host implementation modules.
+- `agintor/tool_runtime.py` already has category-first discovery, generated-tool validation, sync execution, async handle launch, and task-local cleanup.
+- Tool validation is already stronger than the old workstream docs implied, but promoted tools still behave more like registry mutations than durable runtime assets.
+- `SandboxManager.sandbox_hash(...)` already gives a good content-addressed reuse foundation.
+- `agintor/providers.py` already supports local deterministic, replay, retry, failover, OpenAI, and MiniMax providers.
+- `provider_openai.py` already uses the Responses path, but the runtime-facing abstraction still collapses too much of the response into flat text.
+- `control_policy.py` still carries factory-owned methods that do not belong to solve-time control.
+- `runner.py` still relies too heavily on hand-written decision heuristics rather than shared predictor-backed utilities.
+- The local tool registry is still canonical today. Remote MCP tools or provider-side tool search do not yet exist as explicit optional boundaries.
 
-## Contract Decisions
+## Contract Inventory
 
-- Use a Responses-style hosted-provider contract as the primary abstraction for hosted models. The runtime may expose a flat-text adapter, but hosted adapters must preserve richer response structure.
-- Preserve structured-output metadata, request identifiers, reasoning settings, itemized tool-call records, usage, latency, and cost in runtime-visible provider responses even when the immediate consumer only needs text.
-- Treat tool and provider contracts as runtime-owned protocol payloads. The host may transport them, but their semantics, validation, and execution must live in the runtime execution layer rather than in shared host modules.
-- Treat pinned snapshot model identifiers as the default for evaluation and replay paths when hosted providers are used. Aliases may remain opt-in for interactive or development runs, but evaluation must prefer stable model identities.
-- Keep the local deterministic provider mandatory and the replay provider first-class. The runtime factory must be able to run bounded search and regression tests without live hosted-model dependence.
-- Keep tool synthesis bounded and inspectable. The MVP should strengthen tool manifests, sandbox policy, and promotion durability before broadening the runtime or language surface of generated tools.
+- Make runtime-owned types explicit under the runtime boundary:
+  - `HostedResponse`
+  - `HostedResponseItem`
+  - `ToolManifest`
+  - `PromotedToolRecord`
+  - `ToolSandboxPolicy`
+  - `AsyncJobRecord`
+  - `DecisionRecord`
+  - `RetryClassification`
+  - `FailoverRecord`
 
-## Phase 1: Rehome Tooling And Provider Contracts Into The Runtime Boundary
+## Core Decisions
 
-- Move runtime-owned tool and provider execution contracts behind the runtime entry interface.
-- Ensure the solve-time runtime kernel includes the provider adapters, tool registry, sandbox policy types, and control-surface contracts required to execute solves without importing host implementation modules.
-- Separate transport concerns from runtime execution concerns. The host may pass request payloads, mounted file references, and environment allowlists, but the runtime kernel must own interpretation and execution of tool and provider contracts.
-- Make runtime-owned manifests and schemas self-sufficient so exported runtimes can validate promoted tools, background handles, and hosted-provider responses on a fresh machine.
-- Keep explicit adapters at the boundary rather than hidden dependencies on host-side classes.
+- Keep the local deterministic provider mandatory and the replay provider first-class.
+- Use rich hosted-response envelopes as the primary hosted-provider abstraction. Flat text remains a convenience view only.
+- Keep MCP and remote tool interoperability optional at the tool edge, not as the runtime's internal protocol.
+- Distinguish task-local tools from promoted reusable tools explicitly in runtime state and on-disk asset layout.
+- Promote only deterministic or environment-deterministic tools in the MVP. Replayable nondeterministic tools may remain task-local. Side-effectful tools remain non-promotable unless later work explicitly broadens that boundary.
+- Unify tool handles and provider background jobs under one async job model tied to receipts, recovery, and environment fingerprints.
 
-`Exit gate:` exported runtimes carry a self-contained runtime-owned tool and provider layer, and the host is not the implicit implementation of those solve-time contracts.
+## Phase 1: Move Tooling, Provider, and Control Contracts into the Runtime Boundary
 
-## Phase 2: Remove Factory Leakage And Freeze Runtime-Owned Contracts
+- Rehome runtime-owned solve-time schemas and logic under the bundled runtime boundary, including:
+  - tool specs
+  - tool execution results
+  - hosted provider request and response envelopes
+  - async job records
+  - sandbox policy
+  - control decision records
+- Remove remaining solve-time dependence on host-side implementation classes.
+- Freeze solve-time control to:
+  - `assign_model`
+  - `request_checks`
+  - `stop_policy`
+- Keep factory scheduler logic out of runtime control permanently.
+- Keep `runtime_profile.json` limited to solve-time provider, tooling, and control settings only.
 
-- Remove `score_interface_scope` and `update_scope_credit` from `agintor/templates/baseline_runtime/control_policy.py`.
-- Update `agintor/prompt_builder.py` so the `ctl` mutator contract contains only solve-time methods: `assign_model`, `request_checks`, and `stop_policy`.
-- Expand or split runtime-owned contracts in `agintor/schemas.py` so this workstream has explicit types for:
-  hosted provider requests,
-  hosted provider response envelopes,
-  promoted tool manifests,
-  sandbox policy,
-  and background-job state.
-- Provide explicit adapters from flat `ModelRequest` and `ModelResponse` paths while the richer contract lands.
-- Keep `runtime_profile.json` runtime-owned for provider, tooling, and control settings only. Factory planning and evaluation knobs remain outside this workstream.
+## Phase 2: Materialize the Promoted-Tool Lifecycle
 
-`Exit gate:` the exported runtime control surface contains only solve-time behavior, and the runtime-owned tool and provider contracts are explicit enough that later phases stop overloading `ModelResponse.text` and ad hoc registry state.
+- Add an on-disk promoted-tool asset format that includes at least:
+  - tool manifest
+  - source digest
+  - validation evidence
+  - determinism class
+  - permission scope
+  - sandbox fingerprint
+  - version metadata
+  - provenance
+  - state
+  - reuse evidence count
+- Use explicit states such as:
+  - `active`
+  - `quarantined`
+  - `disabled`
+  - `rolled_back`
+- Add determinism classes:
+  - `pure_deterministic`
+  - `environment_deterministic`
+  - `replayable_nondeterministic`
+  - `side_effectful`
+- Promotion rules for the MVP:
+  - allow `pure_deterministic`
+  - allow `environment_deterministic`
+  - keep `replayable_nondeterministic` task-local
+  - keep `side_effectful` non-promotable
+- Require repeated success across distinct tasks before promotion.
 
-## Phase 3: Materialize The Promoted-Tool Lifecycle
+## Phase 3: Harden Per-Tool Sandbox Policy
 
-- Add a promoted-tool asset format that includes at least:
-  tool manifest,
-  source file digest,
-  validation results,
-  determinism class,
-  permission set,
-  sandbox fingerprint,
-  version metadata,
-  provenance,
-  and rollback or disable state.
-- Distinguish task-local generated tools from promoted reusable tools in both runtime state and on-disk asset layout.
-- Make promoted tools loadable as runtime-owned assets during runtime startup without reopening factory history or evaluation traces.
-- Keep promotion conservative:
-  local validation must pass,
-  determinism must be stable,
-  safety checks must pass,
-  and repeated distinct-task reuse must be required before promotion.
-- Add rollback or quarantine semantics for promoted tools that later fail validation, drift, or fall outside the runtime contract.
-- Coordinate asset references with export hooks and persistence surfaces, but keep the manifest and loading semantics owned here.
+- Introduce a typed `ToolSandboxPolicy` that covers:
+  - runtime or backend
+  - dependency digest or lock data
+  - filesystem policy
+  - mount policy
+  - network policy
+  - timeout
+  - CPU ceiling
+  - memory ceiling
+  - PID limit
+  - required permissions
+  - user, capability, and seccomp settings where supported
+- Make the default sandbox posture:
+  - read-only root
+  - tmpfs scratch
+  - explicit writable mounts only
+  - no network
+  - non-root
+  - cap-drop-all
+  - bounded CPU, memory, and PID use
+- Keep platform-specific hardening behind typed policy rather than implicit subprocess behavior.
 
-`Exit gate:` a promoted tool can survive beyond the task that created it, reload as a runtime-owned asset, and carry enough validation and provenance metadata to be inspected or disabled without reopening code.
+## Phase 4: Unify Tool Handles and Provider Background Jobs
 
-## Phase 4: Harden Per-Tool Sandbox Policy And Background Jobs
+- Add a shared `AsyncJobRecord` for both tool and provider background operations.
+- `AsyncJobRecord` must carry at least:
+  - job ID
+  - job kind
+  - owner branch
+  - backend
+  - lifecycle state
+  - cancel support
+  - resume policy
+  - receipt linkage
+  - environment fingerprint
+  - result refs
+- Extend runtime execution with first-class lifecycle operations:
+  - launch
+  - poll
+  - await
+  - cancel
+  - timeout
+  - orphan cleanup
+  - crash recovery
+- Persist enough state that Workstream 3 can restore or reconcile both tool and provider jobs through one model.
 
-- Introduce an explicit per-tool sandbox policy object covering:
-  runtime,
-  dependency digest or lock data,
-  filesystem policy,
-  network policy,
-  timeout,
-  CPU and memory ceilings,
-  process limits,
-  mount policy,
-  and required permissions.
-- Keep the first implementation bounded. The MVP needs a pluggable sandbox interface with a strong local baseline and optional container-backed execution where available, not a platform-specific syscall framework in the first pass.
-- Extend `ToolExecutor` so background jobs have first-class lifecycle operations:
-  launch,
-  poll,
-  await,
-  cancel,
-  timeout,
-  orphan cleanup,
-  and crash-state reporting.
-- Expose non-blocking handle lifecycle primitives to the orchestration layer. This workstream must stop forcing immediate wait semantics as the only practical path.
-- Record environment and sandbox fingerprints from real tool execution so persisted runtime state and exported runtime assets can refer to them directly.
-- Tighten failure semantics so tool faults, sandbox policy failures, timeout failures, and background-job recovery failures are distinguishable in traces and results.
+## Phase 5: Modernize Hosted Provider Adapters
 
-`Exit gate:` tool execution always runs through an explicit sandbox and job-state contract, and every handle or tool run leaves behind enough structured metadata to explain what backend ran, what policy was applied, and why it succeeded or failed.
+- Refactor hosted provider adapters around a richer `HostedResponse` contract that preserves:
+  - response ID
+  - model identity
+  - status
+  - output item array
+  - structured-output payloads
+  - previous-response or conversation linkage
+  - tool-call items and linkage IDs
+  - usage
+  - latency
+  - cost
+  - retry and failover lineage
+  - background state
+  - normalized streaming event log
+- Keep flat text as a convenience projection, not the primary contract.
+- Use pinned snapshot model IDs by default for evaluation and replay lanes.
+- Replace generic exception-text handling with typed retry and failover classes:
+  - auth or config
+  - rate limit
+  - transient network
+  - overload
+  - invalid request
+  - non-retryable contract parse
+- Link provider background jobs into the unified `AsyncJobRecord` model instead of treating them as adapter-local state.
 
-## Phase 5: Modernize Hosted Provider Adapters And Replay
+## Phase 6: Put Solve-Time Decisions on Shared Utility Models
 
-- Refactor the provider layer around a richer hosted response contract instead of a text-only abstraction.
-- Preserve itemized hosted response data such as:
-  structured-output payloads,
-  request IDs,
-  response status,
-  reasoning settings,
-  tool-call items,
-  tool-call linkage IDs,
-  usage,
-  latency,
-  and cost.
-- Keep `OpenAIProvider` centered on the Responses API path. Chat-style flat responses may exist as a fallback transport, not the primary abstraction.
-- Add a streaming-ready interface even if the CLI initially consumes buffered text. Replay capture should be able to store normalized stream or item events so hosted behavior can be reconstructed without live API access.
-- Replace generic exception-text retry and failover heuristics with provider-aware classification of:
-  auth or configuration errors,
-  rate limits,
-  transient network failures,
-  provider overload,
-  deterministic bad requests,
-  and non-retryable contract errors.
-- Strengthen provider observability so retries, failover hops, health state, and replay lineage become runtime-visible structured artifacts instead of remaining local wrapper details.
-- Support container payload serialization with mounted key files, replay files, and provider environment allowlists, and continue avoiding live secret embedding in runtime-owned artifacts.
+- Add explicit feature extraction for solve-time families such as:
+  - category ranking
+  - tool ranking
+  - build versus reuse
+  - model assignment
+  - check selection
+  - stop policy
+- Use shared decision utilities with two heads:
+  - conservative utility for irreversible or externally visible actions
+  - exploratory utility for optional probes and speculative actions
+- Replace local heuristic constants in runtime decision flow with predictor-backed utilities plus deterministic fallback.
+- Emit decision records containing:
+  - selected action
+  - estimated utility
+  - uncertainty
+  - fallback reason
+  - discarded alternatives
+- Keep predictor retraining policy and label harvesting outside this workstream. This workstream consumes frozen predictor state at solve time.
 
-`Exit gate:` hosted-provider execution and replay capture preserve enough response structure to debug a run, compare providers, and reproduce containerized execution without reducing everything to raw prompt text and flat output strings.
+## Optional External Tool Interop
 
-## Phase 6: Move Tooling And Control Onto Predictor Utilities
+- Keep the local tool registry canonical.
+- Add optional, bounded interop surfaces for:
+  - remote MCP tools
+  - connectors
+  - provider-side dynamic tool search where supported
+- Apply the same category-first discovery and permission checks to remote or provider-side tools that local tools already obey.
+- Keep deterministic local fallback paths for providers or environments that do not support these integrations.
+- Do not let external tool interop become the internal runtime protocol.
 
-- Add explicit feature extraction for:
-  tool category ranking,
-  tool ranking,
-  build-vs-reuse decisions,
-  model assignment,
-  checker selection,
-  and stop policy.
-- Route irreversible or externally visible decisions through conservative utility estimates, and route exploratory or optional actions through optimistic utility estimates with uncertainty penalties or bonuses.
-- Use `DecisionFamilyModelBank` as the shared utility engine for tooling and control decisions, with deterministic heuristic fallback when observation counts are too low or the predictor family is untrained.
-- Move `runner.py` off the current hand-written next-action utility constants and onto shared predictor-backed utility helpers.
-- Add calibration summaries, uncertainty diagnostics, and family-level observation reporting so the runtime can explain when it trusted learned estimates versus when it fell back to heuristics.
-- Keep predictor freeze behavior intact during evaluation. This workstream owns solve-time consumption of frozen predictor state, not label harvesting or retraining cadence.
+## Phase 7: Tighten Observability and Runtime Tests
 
-`Exit gate:` runtime traces and decision records show utility, uncertainty, and fallback reason for major tooling and control decisions, and solve-time behavior is driven by shared utility estimates rather than ad hoc local constants.
+- Add stable structured events for:
+  - category selection
+  - reusable-tool ranking
+  - synthesis proposal
+  - validation outcome
+  - promotion or quarantine
+  - sandbox launch
+  - async job transition
+  - provider request
+  - retry
+  - failover
+  - model assignment
+  - check request
+  - stop reason
+- Keep live-provider tests opt-in and bounded.
+- Keep the default regression lane local or replay-backed.
+- Add deterministic tests for:
+  - promoted-tool reload and quarantine
+  - sandbox policy enforcement
+  - async job recovery
+  - hosted response capture
+  - provider replay
+  - retry and failover classification
+  - MCP and tool-search boundary handling
+  - predictor fallback behavior
 
-## Phase 7: Tighten Execution-Time Observability And Test Coverage
+## Acceptance Gates
 
-- Add stable trace events for:
-  category slice selection,
-  reusable tool ranking,
-  tool synthesis proposal,
-  validation outcome,
-  promotion decision,
-  sandbox launch,
-  handle-state transitions,
-  provider request,
-  retry,
-  failover,
-  model assignment,
-  check request,
-  and stop reason.
-- Keep those events bounded and structured so they are useful to CLI users, runtime debugging, and evaluator reporting without turning traces into unbounded logs.
-- Expand targeted tests across:
-  promoted-tool manifests,
-  sandbox policy enforcement,
-  handle lifecycle,
-  provider payload serialization,
-  hosted response contract behavior,
-  retry and failover classification,
-  predictor utility fallback behavior,
-  and control-surface cleanup.
-- Keep live-provider tests opt-in and bounded. The default regression path must stay local and replay-capable.
-
-`Exit gate:` the runtime leaves behind enough structured evidence to explain tool, provider, sandbox, and control decisions without reopening source code, and the main failure paths are covered by deterministic tests.
-
-## MVP Acceptance Sequence
-
-1. Exported runtimes carry a self-contained runtime-owned tool and provider layer rather than depending on host implementation modules for solve-time execution.
-2. The exported runtime control surface contains only solve-time methods and no factory scheduler hooks.
-3. Generated tools remain task-local unless they pass promotion requirements and are materialized as runtime-owned promoted-tool assets with manifests and validation metadata.
-4. Every tool run and background job executes through an explicit sandbox and lifecycle contract with auditable permissions, policy, and failure state.
-5. Hosted provider adapters preserve structured response metadata, request identity, reasoning settings, usage, and replayable item records across local and Docker execution without embedding secrets.
-6. Tooling and control decisions consume shared predictor utilities with deterministic fallback when families are cold or untrained.
-7. Runtime traces and workspace artifacts clearly expose tool, provider, sandbox, and control decisions well enough to debug a run without re-reading the implementation.
+1. Exported runtimes carry a self-contained tool, provider, and control layer under the runtime boundary.
+2. Solve-time control contains no factory scheduler hooks.
+3. Promoted tools are real runtime assets with manifests, validation evidence, determinism classification, and rollback state.
+4. Every tool run and provider background operation executes through an explicit async job and sandbox contract.
+5. Hosted provider responses preserve structured runtime-visible metadata instead of collapsing to text only.
+6. Optional MCP and provider-side tool-search interop remain bounded extensions rather than the internal runtime architecture.
+7. Tooling and control decisions use shared utility estimates with deterministic fallback and emit decision records.
+8. Runtime traces and persisted artifacts explain tool, provider, sandbox, and control behavior from the workspace alone.
 
 ## File Ownership
 
-- `agintor/tool_runtime.py`: tool registry, generated tool materialization, validation pipeline, sandbox policy and backend plumbing, tool execution, background-job lifecycle.
-- `agintor/providers.py`: provider assembly, retry and failover wrappers, payload serialization, replay wiring, environment-name discovery, provider observability surfaces.
-- `agintor/provider_common.py`: runtime-neutral provider base classes, request and response adapters, local deterministic provider, pricing and accounting helpers.
-- `agintor/provider_openai.py`: Responses-native OpenAI adapter, reasoning-effort handling, structured hosted response capture, snapshot-model defaults for evaluation.
-- `agintor/provider_minimax.py`: MiniMax adapter and alignment with the shared hosted-provider contract.
-- `agintor/runtime_sdk/` or equivalent bundled solve-time kernel package: runtime-owned tool, provider, and control execution surfaces shipped with exported runtimes.
-- `agintor/predictors.py`: shared predictor bank, uncertainty and utility helpers, calibration summaries, solve-time predictor consumption surfaces.
-- `agintor/runtime_profile.py`: runtime-owned provider, tooling, and control profile fields plus serialization rules.
-- `agintor/schemas.py` or adjacent runtime-owned contract modules: `ToolSpec`, `AsyncHandle`, tool execution results, provider request and response envelopes, promoted-tool manifests, sandbox or job-state records.
-- `agintor/templates/baseline_runtime/tool_policy.py`: solve-time category ranking, tool ranking, build-vs-reuse, validation opinion, promotion decision, dispatch metadata.
-- `agintor/templates/baseline_runtime/control_policy.py`: solve-time model assignment, checker requests, and stop policy only.
-- `agintor/runner.py`: integration points for tool selection, sandbox and handle lifecycle, provider response handling, predictor-backed utility use, and execution-time observability.
-- `agintor/container_runtime.py` and `agintor/container_entry.py`: provider payload rehydration, mounted key-file paths, replay files, and runtime-visible hosted-provider contract transport across Docker execution.
-- `tests/test_algorithms.py`, `tests/test_core.py`, `tests/test_runtime_spec.py`, `tests/test_live_openai.py`, and adjacent targeted new tests: deterministic tool and control behavior, provider transport, replay behavior, and live hosted smoke checks.
+- `agintor/tool_runtime.py`: tool registry, validation pipeline, promoted-tool lifecycle, sandbox policy, async job integration
+- `agintor/providers.py`: provider assembly, retry and failover policy, replay wiring, transport adapters
+- `agintor/provider_common.py`: shared provider contracts and deterministic or replay providers
+- `agintor/provider_openai.py`: Responses-native hosted adapter and rich hosted-response capture
+- `agintor/provider_minimax.py`: hosted adapter alignment with shared response contracts
+- `agintor/predictors.py`: solve-time utility helpers and predictor-backed decision surfaces
+- `agintor/runtime_sdk/`: runtime-owned tool, provider, and control execution surfaces
+- `agintor/runtime_profile.py`: runtime-owned provider, tooling, and control profile fields plus serialization rules
+- `templates/baseline_runtime/tool_policy.py`: solve-time tool ranking, build-versus-reuse, validation opinion, promotion decision
+- `templates/baseline_runtime/control_policy.py`: solve-time model assignment, checker request, stop policy
+- `agintor/schemas.py` or adjacent runtime-contract modules: tool manifests, hosted responses, sandbox policy, async job records, decision records
+- `tests/test_core.py`, `tests/test_runtime_spec.py`, `tests/test_live_openai.py`, and adjacent new tests: promoted-tool lifecycle, provider transport, async-job, sandbox, and control regression coverage
 
-## Deferred Until Post-MVP
+## Deferred
 
-- Multi-language generated-tool runtimes beyond the bounded Python-first tool path.
-- Remote promoted-tool registries, signed tool packages, and cross-runtime sharing infrastructure.
-- Adaptive multi-provider routing based on live regional health or price arbitration.
-- Rich streaming UIs or long-running provider dashboards beyond structured workspace artifacts.
-- Provider-specific native tool ecosystems beyond the shared hosted-provider contract once the core runtime abstraction is stable.
+- Multi-language generated-tool runtimes beyond the bounded Python-first lane
+- Remote promoted-tool registries
+- Dynamic live price or region routing across hosted providers
+- Rich streaming UIs beyond structured runtime artifacts

@@ -1,144 +1,258 @@
-# Workstream 4: Benchmarks, Evaluation, And Search
+# Workstream 4: Benchmarks, Evaluation, and Search
 
 ## Outcome
 
-- `build-runtime` must evolve against a persisted `BenchmarkPlan` and `VerifierBundle`, not an in-memory demo suite assembled ad hoc inside the build path.
-- Benchmark pressure must grow from toy structured tasks into a bounded ladder of serious families: repo editing first, then browser workflows, then stateful tool and service tasks, then multimodal and longer-horizon tasks.
-- Evaluation must become an inspectable factory surface with frozen benchmark provenance, stage-failure reporting, validation history, leaderboard snapshots, and contamination-controlled held-out measurement.
-- Search must remain bounded but become operationally usable: resumable state, adaptive objective and operator selection, simplification and refactoring operators, and optional distributed execution after the local deterministic lane is stable.
-- MVP success is demonstrated by measurable improvement on held-out serious suites, not by archive mechanics alone.
+- Factory evaluation consumes frozen `BenchmarkPlan` and `VerifierBundle` artifacts through the same runtime entrypoint used by exported-runtime solve execution.
+- Benchmark pressure graduates from demo-shaped structured tasks to serious local task families that can actually justify runtime claims.
+- Evaluation becomes a durable factory surface with stage-failure ledgers, validation history, leaderboard snapshots, contamination tracking, and held-out reports.
+- Search becomes resumable and auditable, with persisted archive state, scheduler state, operator history, and deterministic reporting.
+- MVP success is demonstrated by held-out improvement on serious bounded suites, not by archive mechanics alone.
+
+## Prerequisites
+
+- Workstream 1 freezes the build artifact chain and host/runtime boundary.
+- Workstream 2 freezes solve-time execution semantics.
+- Workstream 3 provides durable run, checkpoint, and replay artifacts.
+
+## Sequence Position
+
+- This workstream starts after Workstream 1 freezes planning artifacts, Workstream 2 freezes runtime execution semantics, and Workstream 3 provides a durable runtime-state substrate.
+- Workstream 5 depends on held-out reports and stage-failure ledgers from this workstream before it upgrades runtime-side tooling and control policy.
 
 ## Boundaries
 
-- Own benchmark and verifier content, benchmark/task adapters, staged evaluation, validation reporting, held-out policy, archive and search policy, and search-state persistence.
-- Own the contents of `BenchmarkPlan`, `VerifierBundle`, `validation_history.json`, `stage_failures.json`, `leaderboard.json`, and the evaluation code that consumes them.
-- Keep runtime execution semantics, task-time orchestration, shell invariants, and solve-time kernel implementation outside this workstream. This workstream may require telemetry or adapter hooks from runtime execution, but it does not own the runtime host.
-- Keep memory-specific benchmark pressure bounded to benchmark content and evaluation pressure. Runtime-state semantics and memory-graph behavior remain outside this workstream.
-- Keep provider integration, task-time predictor semantics, tool/runtime sandboxing, and control-surface behavior outside this workstream. This workstream owns only evaluation-time predictor use, retraining cadence, freezing, and search decisions.
+- Own benchmark content, typed task adapters, verifier catalogs, staged evaluation, robustness measurement, contamination control, search policy, search-state persistence, validation reporting, and held-out reporting.
+- Keep runtime-state semantics, orchestration mechanics, tool sandbox internals, provider transport behavior, and solve-time policy implementation outside this workstream.
+- Keep open-ended benchmark invention, free-form grader generation, and internet-dependent benchmark lanes outside the MVP lane.
 
 ## Planning Constraints
 
-- Keep MVP benchmark growth bounded and locally judgeable. Do not introduce open-ended benchmark synthesis or unverifiable graders in v1.
-- Prefer typed task templates and frozen verifier templates over free-form provider-authored graders.
-- Search-state hardening follows evaluation hardening. Do not scale out a search loop that measures mostly synthetic toy tasks.
-- Validation and test traces remain mutation-invisible at every phase.
-- Determinism claims must match the stack. Hosted-provider and Docker paths may exist, but the reference evaluation lane stays local, replayable, and reproducible.
-- Factory evaluation must measure runtimes through the same runtime entrypoint used in solve-time execution. Improvements that depend on hidden direct-import execution paths do not count as valid benchmark wins.
+- `BenchmarkPlan` and `VerifierBundle` are the only legal evaluation inputs once frozen.
+- Later stages must not silently reparse the original goal or rebuild suites from scratch.
+- Fixture setup and environment digests must be frozen separately from task selection.
+- MVP proof lanes stay bounded:
+  - first serious lane: `repo_patch`
+  - second serious lane: `service_task`
+  - `browser_task` lands as scaffold, not the first gating lane
+  - `multimodal_task` stays placeholder-only until the rest of the pipeline is stable
 
 ## Baseline
 
-- `agintor/benchmarks.py` defines `BenchmarkSuite` with `train`, `val`, `test`, and `proxy` partitions, task lookup helpers, JSON loading, and plugin or module suite providers.
-- `agintor/schemas.py` gives `BenchmarkTask` support for `context_items`, `file_paths`, `operations`, `proxy_scope_tags`, `transfer_scored`, `episode_id`, and `episode_order`.
-- `agintor/verifiers.py` supports `json_exact`, `json_numeric`, `string_exact`, `number_exact`, `trace_event`, and `trace_event_count`, plus the `local`, `subtree`, `repo`, and `benchmark` checker ladder.
-- `agintor/evaluator.py` enforces Stage 0 through Stage 4 gates, deterministic smoke replay, common-random-number comparisons, reference-scale estimation, robustness scoring, CVaR tie-breaks, minibatch early rejection, and validation evaluation.
-- `agintor/archive.py` and `agintor/evolution.py` implement objective catalogs, scope scheduling, archive insertion, counterfactual singleton and pair credits, AST crossover, predictor updates, and pass-rate tightening.
-- `agintor/runtime_builder.py` goal-conditions evaluation by cloning one representative demo task per family and appending prompt emphasis. There is no persisted `BenchmarkPlan` or `VerifierBundle` consumption path.
-- Search state is mostly process-local. The durable artifact is `evolution_history.json`; there is no search checkpoint, validation history ledger, stage-failure report, or resumable archive snapshot.
-- Objective sampling is uniform random in `EvolutionEngine._select_objective()`.
-- The active suite is dominated by small synthetic structured tasks, so the evaluator is materially stronger than the benchmark pressure it measures.
-- Evaluation runs directly against loaded runtimes instead of the runtime execution entrypoint.
+- `agintor/benchmarks.py` already supports suites with `train`, `proxy`, `val`, and `test` partitions.
+- `agintor/verifiers.py` already supports exact and near-exact local verification plus the `local`, `subtree`, `repo`, and `benchmark` checker ladder.
+- `agintor/evaluator.py` already has the right staged-evaluation skeleton: patch integrity, deterministic smoke, proxy gate, local subset gate, and full-train gate.
+- `agintor/archive.py` and `agintor/evolution.py` already implement objective islands, scope scheduling, staged acceptance, and predictor updates.
+- The current suite is still dominated by small structured tasks, and evaluation is stronger than the benchmark pressure it measures.
+- Search state is still too process-local, and objective or operator policy is still too simplistic for the optimizer machinery already present.
 
 ## Reference Benchmark Ladder
 
-- `Tier 1: Repo editing`
-  - Target a SWE-bench Verified style shape: frozen repository snapshot, issue or task statement, patch artifact, and deterministic test-based grading.
-- `Tier 2: Browser workflows`
-  - Target BrowserGym-style adapters first, with bounded local environments and explicit success criteria before any open internet flows.
-- `Tier 3: Stateful tool and service tasks`
-  - Target ToolSandbox-style stateful scenarios with simulated services, intermediate milestones, and replayable state transitions.
-- `Tier 4: Multimodal and longer-horizon tasks`
-  - Add GAIA-style multimodal and tool-use pressure, and later bounded dynamic scenarios, only after the first three tiers are stable, locally judgeable, and contamination-controlled.
+- `structured_ops`: deterministic local computational and structured-output pressure
+- `repo_patch`: repository editing, patch application, and local test execution under frozen fixtures
+- `service_task`: bounded stateful tool or service workflows with deterministic fixture state transitions
+- `browser_task`: scaffolded DOM or state assertions under frozen local fixtures
+- `multimodal_task`: placeholder only until the rest of the runtime and evaluator stack are stable
 
-## Phase 1: Freeze Benchmark And Verifier Consumption
+## Core Decisions
 
-- Add concrete `BenchmarkPlan` and `VerifierBundle` loading and consumption paths so `agintor/runtime_builder.py`, `agintor/evaluator.py`, and `agintor/evolution.py` run from frozen planning artifacts instead of ad hoc suite assembly.
-- Refactor suite construction so benchmark selection, cloning, bounded synthesis, and verifier freeze occur before any candidate evolution begins.
-- Persist benchmark provenance with at least suite name, task source, fixture digest, environment digest, benchmark-plan ID, verifier-bundle ID, and generation timestamp.
-- Route evaluation through the runtime execution entrypoint rather than relying on direct imports as the hidden execution path.
-- Add `validation_history.json`, `stage_failures.json`, and `leaderboard.json` outputs aligned with the target-spec workspace plan.
-- Keep the content conservative in this phase. The demo suite may remain the only active content while the frozen-artifact contract lands.
+- Treat frozen `BenchmarkPlan` and `VerifierBundle` as the only legal evaluation inputs.
+- Measure runtimes through the runtime entrypoint, not through hidden direct imports.
+- Keep benchmark growth bounded and locally judgeable.
+- Make repo editing the first serious proof lane.
+- Make stateful service tasks the second serious proof lane.
+- Build `browser_task` support in the adapter registry, but do not make browser flows an MVP gating lane before repo and service tasks are stable.
+- Keep `multimodal_task` as a later adapter slot, not an MVP proof target.
+- Add a simplification or refactoring operator to the search portfolio so the system can improve by getting smaller and cleaner, not only by getting more elaborate.
+- Fix the signal bottleneck explicitly. Search policy must preserve enough full-train and held-out evidence to justify archive, scheduler, and predictor complexity.
 
-`Exit gate:` a successful `build-runtime` run writes frozen benchmark and verifier artifacts, and the evaluator can be rerun from those artifacts without reopening the raw goal prompt or reconstructing the suite implicitly.
+## Phase 1: Make Frozen Planning Artifacts Authoritative
 
-## Phase 2: Replace Toy Benchmark Assembly With Typed Adapters
+- Make `BenchmarkPlan` and `VerifierBundle` the only legal inputs to:
+  - `runtime_builder.py`
+  - `evaluator.py`
+  - `evolution.py`
+- Remove hidden suite reconstruction from later stages.
+- Route all evaluation through the runtime execution entrypoint created in Workstream 2.
+- Persist at least:
+  - `validation_history.json`
+  - `stage_failures.json`
+  - `leaderboard.json`
+  - `evolution_history.json`
+  - `benchmark_provenance.json`
+- Record enough provenance to rerun evaluation from disk without reopening the raw goal prompt or implicitly rebuilding the suite.
 
-- Introduce a typed benchmark-adapter registry in `agintor/benchmarks.py` for task families such as `structured_ops`, `repo_patch`, `browser_task`, `service_task`, and `multimodal_task`.
-- Separate benchmark fixtures from benchmark selection. A benchmark plan should choose tasks and fixtures by ID, not embed loose task construction logic inside the build path.
-- Add local fixture contracts for repository snapshots, browser environments, service simulators, and multimodal assets so every serious task has explicit setup and teardown requirements.
-- Keep benchmark planning conservative: selection first, template cloning second, bounded synthesis last.
-- Require every synthetic or adapted task to declare why its correctness is deterministically and locally judgeable.
+## Phase 2: Build a Typed Benchmark Adapter Registry
 
-`Exit gate:` the benchmark plan can mix demo tasks with at least one serious non-demo family while freezing all task IDs, fixtures, and verifier references before evolution starts.
+- Add a typed adapter registry in `agintor/benchmarks.py` for at least:
+  - `structured_ops`
+  - `repo_patch`
+  - `service_task`
+  - `browser_task`
+  - `multimodal_task`
+- Separate fixtures from selection. `BenchmarkPlan` must reference:
+  - task IDs
+  - fixture IDs
+  - environment digests
+  - verifier IDs
+  - contamination flags
+  - provenance fields
+- Keep benchmark planning conservative:
+  - select existing tasks first
+  - clone or adapt bounded templates second
+  - synthesize only when deterministic local grading remains possible
+- Require every benchmark family to declare why it is locally judgeable and reproducible.
 
-## Phase 3: Expand The Verifier Ladder With Typed Local Graders
+## Phase 3: Expand Verifiers into Typed Local Graders
 
-- Extend `agintor/verifiers.py` from compact artifact checks into a typed verifier catalog that includes patch validity, repository test execution, diff-shape checks, browser state assertions, service-state transitions, artifact-schema checks, and milestone verifiers.
-- Add a serialized `VerifierSpec` layer so each benchmark task points to a frozen verifier contract instead of only a string verifier name.
-- Keep verifier adaptation bounded. MVP verifier generation should be template-driven from typed contracts rather than free-form provider-written grading code.
-- Add richer verifier evidence payloads so failures can be reported, replayed, and inspected without exposing validation or test traces to the mutator.
-- Extend checker-ladder defaults by family so `local`, `subtree`, `repo`, and `benchmark` checks remain coherent when task types become more diverse.
+- Replace loose verifier naming with serialized `VerifierSpec` objects.
+- Add typed local verifier families for:
+  - patch applicability
+  - repository test execution
+  - diff-shape constraints
+  - service-state transitions
+  - artifact-schema checks
+  - milestone checks
+  - browser assertions later
+- Keep verifier creation template-driven and typed. Do not allow free-form provider-authored grading code into the MVP evaluation path.
+- Persist replayable verifier evidence for every serious verifier family.
+- Keep validation and test verifier outputs mutation-invisible.
 
-`Exit gate:` repo tasks and one interactive family both have local deterministic graders, serialized verifier specs, and replayable verifier evidence.
+## Phase 4: Harden Evaluation, Held-Out Policy, and Contamination Control
 
-## Phase 4: Harden Evaluation And Held-Out Measurement
+- Add family-specific held-out rules:
+  - fixed train, validation, and test for deterministic local tasks
+  - freshness-controlled held-out lanes for repo tasks where feasible
+  - environment fingerprints for service and browser tasks
+  - contamination flags for cloned or synthesized descendants
+- Persist stage-failure rows with:
+  - stage
+  - candidate hash
+  - touched scope
+  - operator type
+  - benchmark refs
+  - verifier refs
+  - failure reason
+  - rerun eligibility
+- Persist validation history as a ledger rather than as an internal tie-break artifact.
+- Add held-out report artifacts that tie runtime claims to exact benchmark and verifier inputs.
 
-- Add benchmark-family-specific held-out policies:
-  - static train, validation, and test for local deterministic tasks,
-  - hidden or private-answer lanes where feasible,
-  - freshness-controlled or time-split held-out sets for repo tasks,
-  - environment fingerprints for browser and service tasks.
-- Persist stage-failure rows with stage number, candidate hash, touched scope, failure reason, and benchmark or verifier references.
-- Persist validation history as a leaderboard ledger rather than only an internal tie-break calculation.
-- Add explicit contamination flags and data lineage fields to benchmark provenance so benchmark reuse, cloning, and synthesis remain auditable.
-- Introduce a worker-queue evaluation harness only after the single-node deterministic lane is stable. Keep family-specific environments isolated even when parallelized.
+## Phase 5: Make Search State Resumable and Operator Policy Deliberate
 
-`Exit gate:` held-out evaluation can be rerun from disk with frozen inputs, validation history is inspectable, stage failures are queryable, and benchmark provenance makes train, validation, and test isolation auditable.
+- Persist search state including:
+  - archive
+  - scope scheduler
+  - objective history
+  - predictor snapshots
+  - current phase budgets
+  - leader set
+  - RNG state
+  - operator history
+  - lineage
+- Replace uniform-random objective selection with deterministic scoring over:
+  - archive under-coverage
+  - family underrepresentation
+  - uncertainty
+  - stagnation age
+  - recent acceptance rate
+- Add an operator portfolio manager over:
+  - heuristic mutation
+  - provider-assisted mutation
+  - crossover
+  - simplification or refactoring
+- Record why each operator and objective were chosen.
 
-## Phase 5: Mature Search State And Operator Policy
+## Phase 6: Fix the Evaluation-Signal Bottleneck
 
-- Persist the archive, scope scheduler, predictor snapshots, current phase budgets, leader set, and RNG state so evolution can checkpoint and resume.
-- Replace uniform-random objective selection with archive-need, uncertainty, stagnation, and under-covered-family aware sampling.
-- Add an operator portfolio manager that can choose among heuristic mutation, provider mutation, crossover, and a dedicated simplification or refactoring operator.
-- Add champion promotion and rollback flows so validation winners and exported leaders are tracked explicitly instead of only copied at export time.
-- Add lineage outputs that make parentage, touched scope, operator type, and acceptance reason inspectable from the workspace.
-- Add distributed island execution only after checkpoint and resume are stable on a single machine.
+- Keep the staged evaluator, but make signal sufficiency an explicit requirement.
+- Persist full-train and held-out evidence often enough that:
+  - archive credit is not driven only by a tiny handful of Stage 4 survivors
+  - predictor families can be retrained on meaningful fully evaluated samples
+  - stage tightening does not silently starve the optimizer
+- Add reporting that exposes:
+  - Stage 0 to Stage 4 pass rates
+  - full-train evaluation counts
+  - accepted-elite counts
+  - predictor retraining triggers
+  - objective coverage by family and scope
+- If the search loop is not generating enough fully evaluated evidence to support the current archive and predictor design, the search policy must tighten scope, simplify objectives, or expand the serious proxy layer instead of pretending the signal is sufficient.
 
-`Exit gate:` interrupted evolution can resume from disk without losing archive or scheduler state, under-served objectives receive explicit search pressure, and the operator mix is inspectable in the workspace.
+## Phase 7: Run MVP Proof Campaigns on Serious Suites
 
-## Phase 6: Prove Improvement On Serious Held-Out Suites
+- Freeze before long runs:
+  - baseline runtime
+  - benchmark plan
+  - verifier bundle
+  - seed budget
+  - held-out criteria
+  - reporting format
+- Make `repo_patch` the first serious proof lane.
+- Make `service_task` the second serious proof lane.
+- Keep `browser_task` implemented as a scaffolded adapter, but do not gate MVP claims on it.
+- Require every exported leader claim to cite:
+  - benchmark plan ID
+  - verifier bundle ID
+  - held-out report ID
+  - runtime hash
+- Report by family:
+  - train score
+  - validation score
+  - held-out score
+  - robustness
+  - cost
+  - latency
+  - fault rate
+  - verifier coverage
+  - checkpoint or resume stability where relevant
 
-- Choose two serious benchmark tracks for MVP proof, not all four. The recommended order is repo editing first, then either browser workflows or stateful service tasks.
-- Define baseline, seed budget, held-out win criteria, and reporting format before running long search campaigns.
-- Add CLI-readable reports that summarize per-family train score, validation score, held-out score, robustness, cost, latency, fault rate, and verifier coverage.
-- Require exported-runtime claims to cite the exact benchmark plan, verifier bundle, and held-out report used to justify them.
-- Do not treat benchmark-family expansion as complete until the seeded baseline and exported leader are compared on serious held-out tasks, not only on goal-conditioned demo clones.
+## Regression Gates
 
-`Exit gate:` a reproducible report shows that the exported leader beats the seeded runtime on at least one serious held-out suite while preserving deterministic evaluation and trace isolation rules.
+- Add tests proving:
+  - evaluation reruns from frozen disk artifacts
+  - typed adapters resolve fixtures deterministically
+  - verifier evidence bundles replay cleanly
+  - contamination flags are preserved
+  - validation and test traces never enter mutation context
+  - search state resumes consistently
+  - operator choice and lineage are logged
+  - leader export references the correct held-out report
+- Keep all default evaluation tests offline and deterministic.
 
-## MVP Acceptance Sequence
+## Handoff to Workstream 5
 
-1. `build-runtime` consumes persisted `BenchmarkPlan` and `VerifierBundle` artifacts instead of reconstructing the suite implicitly.
-2. The workspace contains `benchmark_plan.json`, `verifier_bundle.json`, `validation_history.json`, `stage_failures.json`, `leaderboard.json`, and `evolution_history.json`.
-3. At least one serious non-demo benchmark family is active with typed fixtures and local deterministic graders.
-4. Validation and test traces remain excluded from mutation prompts and mutation heuristics after the new reporting surfaces land.
-5. Evolution can resume from a persisted archive and scheduler snapshot without rebuilding the search state from scratch.
-6. An exported leader is backed by a reproducible held-out report on a serious suite rather than only by synthetic demo-task scores.
+- Workstream 5 receives:
+  - typed benchmark families
+  - typed verifier evidence
+  - durable evaluation ledgers
+  - contamination controls
+  - resumable search state
+  - serious held-out reports
+- Workstream 5 must use that evidence to decide which tooling, provider, and control decisions deserve runtime-owned contracts and predictor-backed policies.
+
+## Acceptance Gates
+
+1. `build-runtime` and `evolution` consume frozen `BenchmarkPlan` and `VerifierBundle` artifacts rather than reconstructing suites implicitly.
+2. Evaluation runs through the runtime entrypoint rather than hidden direct-import execution paths.
+3. The workspace contains durable evaluation artifacts, including validation history, stage failures, leaderboard snapshots, and benchmark provenance.
+4. At least one serious non-demo benchmark family is active with typed fixtures and typed local verifiers.
+5. Search can resume from persisted archive and scheduler state without rebuilding the world from scratch.
+6. Search reporting exposes whether the optimizer has enough full-train evidence to justify its current complexity.
+7. An exported leader is backed by a reproducible held-out report on a serious suite, not only by structured-demo improvements.
 
 ## File Ownership
 
-- `agintor/benchmarks.py`: suite registry, typed adapter loading, plan consumption, benchmark provenance, fixture references.
-- `agintor/verifiers.py`: verifier catalog, checker-ladder defaults, verifier evidence serialization, typed local graders.
-- `agintor/evaluator.py`: stage gates, stage-failure reporting, validation history emission, held-out isolation, evaluation-worker integration.
-- `agintor/archive.py`: archive descriptors, objective islands, scope-scheduler persistence inputs, lineage metadata.
-- `agintor/evolution.py`: objective selection policy, operator portfolio, checkpoint and resume, champion tracking, leaderboard writes.
-- `agintor/mutator.py`: operator hooks for simplification, refactoring, and bounded family-aware mutations.
-- `agintor/crossover.py`: whole-method crossover and donor-selection constraints.
-- `agintor/predictors.py`: retraining cadence, freezing during evaluation, serialized snapshots, and search-side summaries.
+- `agintor/benchmarks.py`: adapter registry, fixture references, benchmark provenance
+- `agintor/verifiers.py`: typed verifier catalog and evidence serialization
+- `agintor/evaluator.py`: staged evaluation, failure ledgers, validation history, held-out policy
+- `agintor/archive.py`: archive descriptors and persisted archive state
+- `agintor/evolution.py`: objective selection, operator portfolio, resume support, leader tracking
+- `agintor/mutator.py`: simplification and refactoring operator hooks
+- `agintor/crossover.py`: bounded whole-method crossover
+- `agintor/predictors.py`: predictor snapshot persistence and search-side summaries
+- `tests/test_runtime_builder.py`, `tests/test_evolution.py`, `tests/test_benchmarks_plugin.py`, and adjacent new tests: benchmark, verifier, contamination, and search-resume regression coverage
 
-## Deferred Until Post-MVP
+## Deferred
 
-- Open-ended benchmark synthesis from raw goals without typed templates and frozen local verifiers.
-- Open internet browser benchmarks as the default evaluation lane.
-- Cloud-first or multi-cluster search as the primary execution mode.
-- Public benchmark-hosting infrastructure or a public leaderboard service.
-- Multimodal dynamic environments as the main MVP proof target before repo and one interactive family are stable.
+- Open internet benchmark lanes
+- Free-form grader generation
+- Cloud-first distributed search as the primary lane
+- Multimodal proof campaigns before repo and service lanes are stable
