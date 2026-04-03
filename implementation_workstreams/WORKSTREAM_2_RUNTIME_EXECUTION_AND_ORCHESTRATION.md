@@ -1,182 +1,289 @@
-# Workstream 2: Runtime Execution, Orchestration, And Isolation
+# Workstream 2: Runtime Execution, Orchestration, and Isolation
 
 ## Outcome
 
-- The runtime host must execute both benchmark tasks and bounded user-request solves through one orchestration path instead of assuming benchmark-only `task_id` execution.
-- Single, vertical, and horizontal solve modes must remain, but horizontal mode must become real concurrent branch execution with deterministic merge, cancellation, and branch-level budget control.
-- Checkpoints must become restartable runtime artifacts rather than summary-only byproducts. A stopped run must be resumable from serialized runtime state, not only replayable from scratch.
-- Runtime-wide isolation must become part of the runtime contract. Local execution remains available for development, while Docker execution becomes a bounded, auditable runtime envelope with explicit resource and privilege limits.
+- The exported runtime owns a real solve-time kernel instead of borrowing host-package internals.
+- Benchmark tasks and bounded user requests execute through one runtime state machine built around a shared `ExecutionPlan` contract.
+- Horizontal mode becomes true concurrent branch execution with deterministic merge, explicit cancellation, and branch-level publication semantics.
+- Checkpoints become restartable runtime artifacts with defined side-effect and recovery behavior.
+- Docker becomes an enforceable runtime boundary with explicit resource, privilege, filesystem, and network policy.
+
+## Prerequisites
+
+- Workstream 1 exit gates are complete.
+- The exported runtime already carries a bundled kernel, a versioned protocol, split profiles, and a validated deployment contract.
+- Host responsibilities are limited to launch, request transport, capability inspection, and result collection.
+
+## Sequence Position
+
+- This workstream starts only after Workstream 1 freezes the host/runtime boundary, export contract, and bundled runtime kernel.
+- Workstream 3 assumes that checkpoint boundaries, branch semantics, and side-effect semantics are already defined here.
+- Workstreams 4 and 5 depend on the runtime entrypoint and orchestration semantics created here.
 
 ## Boundaries
 
-- Own the solve-time runtime kernel, runtime state machine, branch scheduler, runtime-side request adaptation, checkpoint publication, resume semantics, and runtime-wide container isolation.
-- Keep scheduling, objective selection, archive credit, interface scoring, and mutation acceptance outside this workstream. The runtime may emit telemetry for those systems, but it must not update scheduler state directly.
-- Keep durable storage backends, long-term memory persistence internals, and replay database design outside this workstream. This workstream defines which runtime objects must be serializable and when checkpoints must be emitted.
-- Keep per-tool sandbox hardening, promoted-tool asset lifecycle, and provider/runtime environment internals outside this workstream. This workstream owns runtime-wide execution boundaries, not per-tool OS isolation.
-- Keep the public CLI solve surface, export composition, and exported-runtime contract outside this workstream. This workstream owns the runtime-side kernel and adapter that execute solve requests.
+- Own the solve-time runtime kernel, runtime state machine, request hydration, execution-plan loading, branch orchestration, checkpoint publication semantics, side-effect receipt semantics, runtime event model, and runtime-wide isolation policy.
+- Keep archive scheduling, objective selection, phase control, benchmark planning, verifier definition, and leader selection outside this workstream.
+- Keep durable storage implementation details outside this workstream. This workstream defines what must be serializable and when checkpoints must be emitted, not how long-term storage is indexed.
+- Keep per-tool asset packaging and provider feature completion outside this workstream. This workstream provides orchestration contracts those later systems consume.
 
 ## Non-Goals
 
-- Do not expand the mutable runtime search surface beyond the four policy files. Runtime profiles, benchmark adapters, verifier bundles, and export assets are not solve-time mutation surfaces.
-- Do not move benchmark planning, verifier adaptation, archive insertion, or phase scheduling into the runtime host.
-- Do not start with distributed orchestration, cluster scheduling, or process-image checkpointing. The MVP must first stabilize single-host deterministic orchestration with serializable runtime state.
+- Distributed multi-host orchestration
+- Open-ended interactive replanning outside bounded request adaptation
+- Remote job queues or cloud schedulers
+- Provider and tool lifecycle unification beyond the receipt and checkpoint semantics introduced here
 
 ## Baseline
 
-- `agintor/runner.py` runs a task-time state machine with queue-driven execution, single/vertical/horizontal modes, deterministic merge, verification requests, controlled failure, and checkpoint publication.
-- `agintor/runtime_api.py` defines `AgentFrame`, `RuntimeBudget`, `RuntimeState`, and `PolicyContext`, which form the nucleus of runtime-side orchestration state.
-- `agintor/shell.py` owns the canonical agent pool, short-term graph, long-term memory, message board, open-handle table, tool registry, tool executor, predictors, and runtime invariants.
-- `agintor/templates/baseline_runtime/topology_policy.py` chooses mode, proposes children, assigns tool scope, selects horizontal workers, merges worker outputs, and creates checkpoint objects.
-- `agintor/templates/baseline_runtime/control_policy.py` exposes factory-adjacent methods `score_interface_scope` and `update_scope_credit`, which sit outside the exported runtime control surface.
-- Horizontal workers execute sequentially. `_execute_isolated_frame(..., isolate_runtime_state=True)` deep-copies runtime state and restores snapshots after each worker rather than running real overlapping branches.
-- Async tool handles exist, but the runner usually waits immediately after launch, which limits branch overlap and long-lived background work.
-- `agintor/container_runtime.py` runs runtimes inside Docker and acts as a packaging wrapper around the entire runtime batch rather than a hardened isolation policy with quotas and privilege restrictions.
-- `agintor solve` is benchmark-only, and `runner.py` assumes execution starts from `BenchmarkTask.operations` rather than from a bounded runtime request envelope.
-- The solve-time engine lives inside the host package. Exported runtimes do not ship a self-contained runtime kernel or runtime entrypoint, so execution depends on importing shared host implementation modules.
+- `agintor/runner.py` already runs a queue-driven solve loop with `single`, `vertical`, and `horizontal` modes.
+- `agintor/runtime_api.py` already defines core runtime objects such as `RuntimeState`, `RuntimeBudget`, and `PolicyContext`.
+- `agintor/runtime_api.py` already defines `SolveRequest` and `SolveResult`, but prompt-mode adaptation is still too close to benchmark-task compilation details.
+- `agintor/shell.py` already owns the canonical solve-time substrate: message board, handles, memory, tools, predictors, and invariants.
+- Horizontal execution is still effectively sequential because isolated workers run one after another with deep-copied state.
+- Async handles exist, but most runtime flows immediately wait on them instead of exploiting overlap.
+- Runtime-wide Docker execution exists, but it behaves more like packaging than like a strict execution policy.
+- The control policy still exposes factory-owned methods that do not belong to solve-time runtime control.
 
-## Execution Model Decisions
+## Core Decisions
 
-- Keep the fixed shell and four mutable runtime policies as the core solve-time architecture, but package that kernel as a runtime-owned SDK or kernel payload shipped with exported runtimes rather than leaving it as a shared implementation detail.
-- Solve-time execution must enter through the runtime entrypoint instead of importing shared `agintor/*` implementation modules directly into exported-runtime execution.
-- Use structured concurrency semantics for horizontal work. Branches should be launched, cancelled, and joined as a unit, and branch failure must trigger deterministic sibling cancellation and cleanup.
-- Use serialized runtime-state checkpoints, not whole-process snapshots. Resume must reconstruct queued frames, branch state, handle state, verifier state, and budget state from durable artifacts.
-- Keep deterministic merge independent of wall-clock completion order. Execution may become concurrent, but final merge order must remain a pure function of branch results and stable sort keys.
-- Treat Docker as an execution boundary, not only a transport wrapper. Resource limits, privilege reduction, filesystem policy, environment allowlists, and network policy belong in the runtime execution contract.
+- Keep the fixed shell plus four mutable policy files as the solve-time architecture. The change is to move the kernel under the bundled runtime boundary and make its semantics explicit.
+- Use one runtime-native `ExecutionPlan` contract for both benchmark tasks and user requests.
+- Use structured concurrency for horizontal work. Branch groups launch, cancel, and join as one unit.
+- Use copy-in, publication-out semantics for branch isolation:
+  - each branch starts from an isolated branch state snapshot
+  - branches do not mutate parent shell state directly
+  - branches may publish only typed outputs
+  - parent merge happens once and in deterministic order
+- Define side-effect receipts before the durable store lands. Every non-deterministic or externally meaningful action must have replay or reconciliation semantics.
+- Make Docker contract enforcement fail closed. The runtime must not silently downgrade to weaker isolation than the deployment contract allows.
 
-## Phase 1: Extract The Solve-Time Kernel From The Host Package
+## Phase 1: Move Solve-Time Execution Behind the Runtime Kernel
 
-- Refactor the solve-time engine into a runtime-owned kernel or SDK that can be bundled into exported runtimes without pulling in factory search, archive, mutator, or benchmark-planning code.
-- Move the runtime execution entrypoint onto a stable runtime entry interface.
-- Keep the runtime kernel narrow: request hydration, orchestration, shell state, tool/runtime integration, verification hooks, checkpoint publication, and container-side execution only.
-- Stop depending on direct imports from host package implementation modules at runtime-export load time. The bundled runtime kernel should be sufficient to load runtime policies and execute solves on a fresh machine.
-- Ensure the four mutable policy files sit above the kernel as the runtime's editable decision layer, not as replacements for the kernel itself.
-- Keep runtime-kernel versioning explicit and tied to runtime ABI or adjacent protocol versioning so mismatches fail closed.
+- Move solve-time implementation ownership under the bundled runtime boundary, including:
+  - runtime entrypoint
+  - runner
+  - shell
+  - memory-graph integration points
+  - runtime-side verifier execution hooks
+  - tool and provider bridge hooks required for solve-time execution
+- Keep the host responsible only for:
+  - runtime launch
+  - capability inspection
+  - request transport
+  - result collection
+  - backend preflight
+- Make the runtime entrypoint the only legal solve-time execution path for:
+  - benchmark mode
+  - prompt mode
+  - resume mode
 
-`Exit gate:` the solve-time runtime kernel can be bundled with an exported runtime and invoked through the runtime entrypoint without importing shared host implementation modules.
+## Phase 2: Remove Factory Leakage from Runtime Control
 
-## Phase 2: Remove Factory Leakage From The Runtime Control Surface
+- Delete `score_interface_scope` and `update_scope_credit` from `templates/baseline_runtime/control_policy.py`.
+- Update `agintor/prompt_builder.py` so the `ctl` contract contains only:
+  - `assign_model`
+  - `request_checks`
+  - `stop_policy`
+- Ensure solve-time runtime code no longer imports or depends on:
+  - archive state
+  - scope scheduler state
+  - leader-selection logic
+  - counterfactual credit logic
+- Keep runtime telemetry rich enough that the factory can still compute those quantities outside the runtime boundary.
 
-- Remove `score_interface_scope` and `update_scope_credit` from `agintor/templates/baseline_runtime/control_policy.py`.
-- Update `agintor/prompt_builder.py` so the `ctl` method contract contains only solve-time methods: `assign_model`, `request_checks`, and `stop_policy`.
-- Ensure the exported runtime does not import or depend on `ScopeScheduler` or any other scheduler type outside the solve-time control surface.
-- Keep runtime telemetry rich enough that factory scoring can continue computing scope credit and counterfactual deltas outside the runtime.
-- Verify that staged mutation, crossover, and runtime loading work after the control-surface contraction.
+## Phase 3: Introduce a Runtime-Native Execution Plan
 
-`Exit gate:` runtime control policies own only solve-time behavior, mutator contracts match the target spec, and evolution runs without runtime-owned scheduler writes.
+- Replace benchmark-task-first execution with explicit runtime plan objects such as:
+  - `ExecutionPlan`
+  - `PlanNode`
+  - `VerificationPlan`
+  - `PlanOrigin`
+  - `ExecutionFlags`
+- Compile both entry modes into the same contract:
+  - `BenchmarkTask -> ExecutionPlan`
+  - `SolveRequest -> ExecutionPlan`
+- The plan must carry at least:
+  - origin kind
+  - objective text
+  - context references
+  - file references
+  - bounded operation nodes
+  - verification mode
+  - allowed tool categories
+  - budget overrides
+  - external-visibility flags
+- For user requests, keep plan compilation bounded to validated templates such as:
+  - direct answer
+  - structured computation
+  - file inspection
+  - bounded repo patch
+  - bounded service action
+- If a model helps compile an execution plan, require schema validation before the plan enters the runtime state machine.
 
-## Phase 3: Add Runtime-Side Request Adaptation
+## Phase 4: Replace Sequential Horizontal Mode with Real Branch Concurrency
 
-- Introduce a bounded runtime execution-plan contract that can be created from both benchmark tasks and user-request solves.
-- Keep benchmark execution on the `BenchmarkTask` path, but stop treating benchmark operations as the only entry format the runner can consume.
-- Add a runtime-side adapter that converts a normalized solve request into:
-  prompt/objective text,
-  context items and file references,
-  bounded operation steps or execution-plan nodes,
-  verification preference,
-  allowed tool categories,
-  budget overrides,
-  and external-visibility flags.
-- Keep this adapter narrow. It should translate requests into the runtime's bounded operation model, not create a second benchmark-planning system inside solve.
-- Thread verification mode through the execution loop so user-request solves can honestly report verified, partially checked, or best-effort outcomes.
+- Add branch-level runtime objects such as:
+  - `BranchPlan`
+  - `BranchState`
+  - `BranchBudget`
+  - `BranchResult`
+  - `BranchPublication`
+  - `CancellationRecord`
+- Refactor horizontal mode so branches run concurrently rather than as a sequential loop over isolated frames.
+- Define publication types branches may emit:
+  - candidate artifact
+  - verifier evidence
+  - proposed long-term-memory writes
+  - proposed promoted-tool records
+  - trace rows
+  - budget usage
+  - handle or job references
+- Preserve deterministic merge by sorting publications on stable keys such as:
+  - explicit merge priority
+  - verifier support
+  - unresolved critical count
+  - branch rank
+  - branch ID
+- Add explicit cancellation reasons:
+  - fatal branch fault
+  - budget exhaustion
+  - superior branch dominance
+  - verification failure
+  - parent stop policy
+  - external interrupt
 
-`Exit gate:` the runner can execute both benchmark-originated and user-request-originated plans through the same state machine without requiring a benchmark `task_id`.
+## Phase 5: Define Checkpoints and Side-Effect Receipts
 
-## Phase 4: Replace Sequential Horizontal Mode With Real Concurrent Branch Execution
-
-- Add explicit branch-level runtime objects in `agintor/runtime_api.py` or an adjacent runtime module:
-  `BranchPlan`,
-  `BranchState`,
-  `BranchResult`,
-  and `CancellationRecord`.
-- Refactor `agintor/runner.py` so horizontal workers are scheduled concurrently instead of in a for-loop that executes isolated branches one at a time.
-- Introduce branch-level budget slices and cancellation reasons so orchestration can stop low-value or failed branches without corrupting global runtime state.
-- Let async tool handles overlap with branch work. The scheduler must own when to poll, await, cancel, or fail branch-local background work instead of immediately waiting after launch.
-- Preserve deterministic merge by sorting completed branch outputs on stable fields such as verifier support, predicted solve, unresolved-critical count, and worker ID, not on completion order.
-- Extend trace rows so branch launch, cancellation, completion, merge inputs, and merge decisions are all inspectable.
-
-`Exit gate:` horizontal mode runs real concurrent branches, failures cancel sibling work predictably, and repeated smoke runs normalize to identical merge outputs and traces.
-
-## Phase 5: Promote Checkpoints Into Resumeable Runtime State
-
-- Expand checkpoints from summary objects into restartable runtime snapshots that include:
-  queued frames,
-  unresolved goals,
-  visible tool names,
-  branch status,
-  artifact refs,
-  open-handle refs,
-  budget state,
-  verifier state,
-  and enough trace metadata to resume deterministically.
-- Add a checkpoint manager that writes these snapshots to the runtime workspace and reloads them after interruption.
-- Emit checkpoints at deterministic orchestration boundaries:
-  before launching branch groups,
-  after branch completion,
-  before awaiting long-lived handles,
-  after handle resolution,
-  before irreversible verification,
-  and on controlled stop/failure.
-- Add resume reconciliation rules for async handles: completed, timed out, failed, orphaned, and non-resumable states must each have explicit behavior.
-- Keep the first MVP recovery path filesystem-backed and local. A later durability track can move the same state contract onto a more durable store.
-
-`Exit gate:` an interrupted run can reload checkpoint artifacts, rebuild runtime state, and either continue safely or fail closed with a precise recovery reason.
+- Expand checkpoints from summary objects into restartable `CheckpointEnvelope` contracts that cover:
+  - queued frames
+  - branch state
+  - unresolved goals
+  - artifact refs
+  - handle or job refs
+  - budget state
+  - verifier state
+  - working memory summary
+  - trace cursor
+- Emit checkpoints at deterministic boundaries:
+  - before branch fan-out
+  - after branch-plan creation
+  - after tool or provider launch
+  - after tool or provider completion
+  - before merge
+  - after merge
+  - before terminal result
+- Define side-effect receipts for every non-deterministic or externally meaningful action:
+  - `side_effect_id`
+  - action kind
+  - request digest
+  - backend
+  - success receipt
+  - replay or reconciliation policy
+- Add `resume` as a first-class runtime entrypoint that consumes checkpoint references instead of relying on ad hoc host-side restore behavior.
+- On resume, the runtime must:
+  - reuse the recorded receipt or result
+  - reconcile via handle or job status
+  - or fail closed with a typed recovery reason
 
 ## Phase 6: Harden Runtime-Wide Isolation
 
-- Extend `agintor/container_runtime.py` and `agintor/container_entry.py` so Docker runs apply explicit runtime isolation policy rather than bare `docker run` defaults.
-- Add runtime-wide controls for:
-  CPU and memory quotas,
-  PID limits,
-  runtime timeout envelopes,
-  read-only root filesystem plus explicit writable mounts,
-  environment-variable allowlists,
-  capability dropping,
-  seccomp policy,
-  no-new-privileges,
-  and non-root or user-namespace execution where supported.
-- Separate development and hardened execution clearly:
-  `local` remains the developer convenience backend,
-  `docker` becomes the bounded execution backend with declared isolation guarantees.
-- Ensure mounted provider files, runtime bundles, and workspace paths remain minimal and explicit so exported runtimes do not inherit broad host filesystem visibility.
-- Surface backend capability failures as contract errors instead of silent downgrade behavior.
+- Add a `RuntimeIsolationPolicy` to the runtime plan and deployment contract. Runtime execution must either satisfy it or fail before solve begins.
+- The runtime-wide contract must cover:
+  - pinned image or base digest
+  - CPU ceiling
+  - memory ceiling
+  - timeout envelope
+  - PID limit
+  - read-only root filesystem
+  - explicit writable mounts only
+  - environment allowlist
+  - `no-new-privileges`
+  - capability dropping
+  - seccomp profile
+  - non-root execution
+  - network policy with `none` as the default
+- Keep `local` as the development backend.
+- Make `docker` the auditable bounded backend.
+- If a backend cannot honor the declared isolation policy, the runtime must reject execution with a contract error.
 
-`Exit gate:` Docker execution runs under explicit quotas and privilege restrictions, and exported runtimes can declare which isolation guarantees they require from the host backend.
+## Phase 7: Freeze Runtime Event and Failure Semantics
 
-## Phase 7: Tighten Orchestration Observability And Failure Semantics
+- Add stable runtime events for:
+  - `run_started`
+  - `plan_loaded`
+  - `branch_started`
+  - `branch_cancelled`
+  - `branch_completed`
+  - `side_effect_recorded`
+  - `checkpoint_published`
+  - `checkpoint_restored`
+  - `side_effect_reconciled`
+  - `merge_started`
+  - `merge_completed`
+  - `terminal_emitted`
+- Distinguish failure classes in runtime results and traces:
+  - branch fault
+  - controlled failure
+  - verification failure
+  - checkpoint failure
+  - isolation failure
+  - receipt reconciliation failure
+  - recovery incompatibility
+  - recovery failure
+  - protocol failure
+  - external interrupt
+- Keep events bounded and structured so later workstreams can persist and analyze them without relying on raw logs.
 
-- Add stable orchestration events for branch launch, branch cancellation, checkpoint publish, checkpoint restore, handle reconciliation, and resume outcome.
-- Distinguish controlled failure, verification failure, isolation failure, and recovery failure in runtime results and traces.
-- Make cancellation and resume decisions inspectable from trace artifacts without requiring the reader to infer them from low-level shell state.
-- Keep observability payloads bounded and structured so they can feed evaluator reporting without leaking validation/test data into mutation prompts.
+## Regression Gates
 
-`Exit gate:` runtime traces and checkpoint artifacts are sufficient to explain why a run branched, stopped, resumed, or failed without reopening code.
+- Add runtime tests that prove:
+  - benchmark and prompt mode use the same state machine
+  - concurrent branch execution is real
+  - merge results are deterministic across completion-order variation
+  - sibling cancellation works
+  - checkpoints can be resumed after interruption
+  - receipt-backed side effects are not re-executed on resume
+  - Docker policy violations fail clearly
+- Extend runtime-loader and protocol tests so isolation and capability mismatches fail before execution starts.
 
-## MVP Acceptance Sequence
+## Handoff to Workstream 3
 
-1. The solve-time runtime kernel is bundled with exported runtimes and can be invoked through the runtime entrypoint without depending on shared host modules.
-2. The runtime control surface is reduced to solve-time methods only, and factory scheduler ownership is fully removed from exported runtime policies.
-3. The runtime host can execute a bounded user-request plan and a benchmark task through the same orchestration path.
-4. Horizontal mode runs concurrent branches with deterministic merge and explicit cancellation semantics.
-5. Checkpoints are written as restartable runtime-state artifacts, and interrupted runs can resume from them.
-6. Docker execution enforces explicit resource and privilege boundaries instead of acting only as a packaging shell.
-7. Runtime traces and results expose branch, checkpoint, and failure semantics in a stable, machine-readable form.
+- Workstream 3 receives:
+  - a runtime-owned solve kernel
+  - typed execution and branch contracts
+  - checkpoint envelopes
+  - side-effect receipts
+  - structured runtime events
+  - a fail-closed isolation contract
+- Workstream 3 must persist these objects without changing their solve-time meaning.
+
+## Acceptance Gates
+
+1. Benchmark-mode and prompt-mode execution flow through the same runtime state machine and entrypoint.
+2. The exported runtime kernel executes without importing shared host implementation modules.
+3. Horizontal mode runs concurrent branches and yields deterministic merge outputs across repeated runs.
+4. Branch cancellation is explicit and sibling cleanup leaves no orphaned runtime state.
+5. Checkpoints are restartable artifacts rather than summary-only objects.
+6. Side-effect receipts prevent blind re-execution of non-deterministic actions on resume.
+7. Docker execution enforces explicit runtime-wide policy and fails closed on unsupported guarantees.
+8. Runtime traces explain branching, checkpointing, merge, and failure behavior from structured events alone.
 
 ## File Ownership
 
-- `agintor/runner.py`: runtime state machine, branch scheduler, checkpoint boundaries, async-handle orchestration, resume hooks.
-- `agintor/runtime_api.py`: runtime execution-plan, branch-state, checkpoint-state, and cancellation-state contracts.
-- `agintor/shell.py`: message-board/open-handle integration points, invariant checks, and runtime-state restore boundaries.
-- `agintor/runtime_sdk/` or equivalent solve-time kernel package: bundled runtime execution kernel shipped with exported runtimes.
-- `agintor/container_entry.py`: runtime entrypoint, request hydration, and checkpoint-aware execution inside the runtime boundary.
-- `agintor/templates/baseline_runtime/topology_policy.py`: solve-mode selection, child/worker proposal, deterministic merge logic, checkpoint construction inputs.
-- `agintor/templates/baseline_runtime/control_policy.py`: solve-time model/check/stop policy only.
-- `agintor/prompt_builder.py`: mutator-visible method contracts after the control-surface cleanup.
-- `agintor/container_runtime.py`: runtime-wide Docker execution policy, quotas, mounts, backend preflight, isolation contract.
+- `agintor/runner.py`: runtime state machine, branch scheduler, checkpoint boundaries, receipt integration
+- `agintor/runtime_api.py`: execution-plan, branch, checkpoint, and cancellation contracts
+- `agintor/shell.py`: solve-time state integration points and invariant checks
+- `agintor/runtime_sdk/`: bundled solve-time kernel modules
+- `agintor/container_entry.py`: runtime entrypoint and resume entrypoint
+- `agintor/container_runtime.py`: runtime-wide backend isolation policy and backend preflight
+- `templates/baseline_runtime/topology_policy.py`: solve-mode selection, branch proposal, deterministic merge hooks
+- `templates/baseline_runtime/control_policy.py`: solve-time-only control methods
+- `agintor/prompt_builder.py`: mutator-visible contract cleanup
 
-## Deferred Until Post-MVP
+## Deferred
 
-- Multi-host or distributed branch orchestration.
-- Process-image checkpointing or CRIU-style runtime capture.
-- Fine-grained per-branch container execution beyond runtime-wide isolation.
-- Rich orchestration UI or long-running service control plane.
-- Cross-machine checkpoint portability beyond the bounded runtime/export contract.
+- Multi-host orchestration
+- Process-image checkpointing
+- Per-branch container orchestration beyond the runtime-wide boundary
+- Service-style long-lived orchestration control planes
