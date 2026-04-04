@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from agintor.schemas import Checkpoint, ChildSpec, SummaryRecord
-from agintor.utils import jaccard, lexical_overlap
+from agintor_runtime.schemas import Checkpoint, ChildSpec, SummaryRecord
+from agintor_runtime.utils import jaccard, lexical_overlap
 
 
 class TopologyPolicy:

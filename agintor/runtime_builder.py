@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .artifacts import ArtifactMode
 from .benchmarks import BenchmarkSuite, build_demo_suite
 from .evolution import EvolutionEngine
 from .goal_rubric import build_goal_spec, build_success_criteria_bundle, canonical_goal_prompt
@@ -16,9 +17,11 @@ from .providers import ModelProvider
 from .pydantic_compat import model_copy, model_dump, model_validate
 from .runtime_loader import (
     DEPLOYMENT_CONTRACT_FILE,
+    KERNEL_VERSION,
     RUNTIME_ABI_VERSION,
     RUNTIME_EXPORT_BUNDLE_FILE,
     RUNTIME_PROVENANCE_BUNDLE_FILE,
+    STORAGE_SCHEMA_VERSION,
     load_runtime,
     runtime_identity_inputs,
 )
@@ -30,14 +33,28 @@ from .runtime_profile import (
     profile_to_json,
     runtime_profile_payload,
 )
+from .runtime_sdk import (
+    KERNEL_BUNDLE_DIR,
+    KERNEL_CAPABILITY_FLAGS,
+    KERNEL_MANIFEST_FILE,
+    bundle_runtime_kernel,
+    preview_kernel_manifest,
+)
 from .schemas import (
     ArchiveEntry,
     ArchiveRecord,
     BenchmarkPlan,
     BuildSummary,
     DeploymentContract,
+    ExportSummary,
     FactoryProfile,
+    GoalAssumption,
     GoalSpec,
+    PlanningDiagnostics,
+    PlanningIssue,
+    ProviderPlan,
+    ProviderRole,
+    ReplanContract,
     RuntimeManifest,
     RuntimePlan,
     SuccessCriteriaBundle,
@@ -142,13 +159,48 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _with_artifact_metadata(
+    value: Any,
+    *,
+    artifact_id: str,
+    schema_version: str,
+    creation_stage: str,
+):
+    if not hasattr(value, "artifact_metadata"):
+        return value
+    payload = model_dump(value)
+    payload.pop("artifact_metadata", None)
+    payload["artifact_metadata"] = {
+        "artifact_id": artifact_id,
+        "schema_version": schema_version,
+        "content_digest": stable_hash(payload),
+        "creation_stage": creation_stage,
+    }
+    return model_validate(type(value), payload)
+
+
 def _write_json(path: Path, payload: Any) -> Path:
     ensure_directory(path.parent)
     path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True), encoding="utf-8")
     return path
 
 
-def _persist_model(path: Path, model_cls: type[Any], value: Any):
+def _persist_model(
+    path: Path,
+    model_cls: type[Any],
+    value: Any,
+    *,
+    artifact_id: str | None = None,
+    schema_version: str | None = None,
+    creation_stage: str | None = None,
+):
+    if artifact_id and schema_version and creation_stage:
+        value = _with_artifact_metadata(
+            value,
+            artifact_id=artifact_id,
+            schema_version=schema_version,
+            creation_stage=creation_stage,
+        )
     _write_json(path, value)
     return model_validate(model_cls, json.loads(path.read_text(encoding="utf-8")))
 
@@ -357,19 +409,33 @@ def _build_verifier_bundle(plan: BenchmarkPlan, suite: BenchmarkSuite) -> Verifi
 
 
 def _build_deployment_contract(goal_spec: GoalSpec, profile: RuntimeProfile) -> DeploymentContract:
+    kernel_manifest = preview_kernel_manifest(runtime_abi=RUNTIME_ABI_VERSION)
     notes = list(goal_spec.assumptions)
     if profile.runtime_provider.api_key_file_env:
         notes.append(
             f"{profile.runtime_provider.api_key_file_env} may be used as a key-file alternative for the default runtime provider."
         )
+    environment_allowlist = sorted(
+        {
+            *[str(name).strip() for name in _required_runtime_env_names(profile)],
+            str(profile.runtime_provider.base_url_env or "").strip(),
+            str(profile.runtime_provider.pricing_env or "").strip(),
+        }
+    )
+    environment_allowlist = [name for name in environment_allowlist if name]
     return DeploymentContract(
         entry_command='agintor solve <runtime_dir> --prompt "<request>"',
         runtime_abi=RUNTIME_ABI_VERSION,
+        kernel_version=KERNEL_VERSION,
+        storage_schema_version=STORAGE_SCHEMA_VERSION,
         python_version=">=3.11",
         supported_backends=list(goal_spec.deployment_preferences.get("supported_backends", ["local", "docker"])),
         required_env_names=_required_runtime_env_names(profile),
+        environment_allowlist=environment_allowlist,
         network_policy=str(goal_spec.constraints.get("network_policy", "provider-only")),
         filesystem_policy=str(goal_spec.constraints.get("filesystem_policy", "workspace-read-write")),
+        dependency_digest_set=sorted(set(kernel_manifest.files.values())),
+        capability_flags=[*KERNEL_CAPABILITY_FLAGS, "benchmark_mode", "prompt_mode"],
         notes=notes,
     )
 
@@ -422,24 +488,28 @@ def _build_runtime_plan(
     del verifier_bundle
     manifest = _load_template_manifest()
     deployment_contract = _build_deployment_contract(goal_spec, profile)
+    provider_plan = ProviderPlan(
+        plan_id=f"providers.{stable_hash(goal_spec.goal_id, agintor_provider, profile.runtime_provider.name)[:12]}",
+        agintor_provider=ProviderRole(name=agintor_provider),
+        runtime_provider=ProviderRole(
+            name=profile.runtime_provider.name,
+            api_key_env=profile.runtime_provider.api_key_env,
+            api_key_file_env=profile.runtime_provider.api_key_file_env,
+            model_map=dict(profile.runtime_provider.model_map),
+        ),
+        runtime_backend=runtime_backend,
+    )
     return RuntimePlan(
         plan_id=f"runtime.{stable_hash(goal_spec.goal_id, benchmark_plan.plan_id)[:12]}",
         goal_id=goal_spec.goal_id,
         runtime_abi=RUNTIME_ABI_VERSION,
+        kernel_version=KERNEL_VERSION,
+        storage_schema_version=STORAGE_SCHEMA_VERSION,
         seed_template=str(baseline_template_dir()),
         mutable_files=list(manifest.mutable_files),
         immutable_manifest=list(manifest.immutable_manifest),
         runtime_profile=runtime_profile_payload(profile),
-        provider_plan={
-            "agintor_provider": {"name": agintor_provider},
-            "runtime_provider": {
-                "name": profile.runtime_provider.name,
-                "api_key_env": profile.runtime_provider.api_key_env,
-                "api_key_file_env": profile.runtime_provider.api_key_file_env,
-                "model_map": dict(profile.runtime_provider.model_map),
-            },
-            "factory_runtime_backend": runtime_backend,
-        },
+        provider_plan=provider_plan,
         tooling_scope=_tooling_scope_from_suite(suite),
         deployment_contract=deployment_contract,
     )
@@ -502,6 +572,95 @@ def _score_rows_for_candidates(
     )
 
 
+def _persist_benchmark_suite(path: Path, suite: BenchmarkSuite) -> BenchmarkSuite:
+    payload = {
+        "schema_version": "agintor.benchmark.v1",
+        "name": suite.name,
+        "train": [model_dump(task) for task in suite.train],
+        "val": [model_dump(task) for task in suite.val],
+        "test": [model_dump(task) for task in suite.test],
+        "proxy": [model_dump(task) for task in suite.proxy],
+    }
+    _write_json(path, payload)
+    reloaded = json.loads(path.read_text(encoding="utf-8"))
+    return BenchmarkSuite(
+        name=reloaded["name"],
+        train=[model_validate(type(suite.train[0]), item) for item in reloaded["train"]] if suite.train else [],
+        val=[model_validate(type(suite.val[0]), item) for item in reloaded["val"]] if suite.val else [],
+        test=[model_validate(type(suite.test[0]), item) for item in reloaded["test"]] if suite.test else [],
+        proxy=[model_validate(type(suite.proxy[0]), item) for item in reloaded["proxy"]] if suite.proxy else [],
+    )
+
+
+def _assumption_register(goal_spec: GoalSpec) -> list[GoalAssumption]:
+    return [
+        GoalAssumption(
+            assumption_id=f"{goal_spec.goal_id}.assumption.{index}",
+            statement=statement,
+        )
+        for index, statement in enumerate(goal_spec.assumptions, start=1)
+    ]
+
+
+def _plan_consistency_check(
+    goal_spec: GoalSpec,
+    suite: BenchmarkSuite,
+    verifier_bundle: VerifierBundle,
+    runtime_plan: RuntimePlan,
+) -> tuple[PlanningDiagnostics, ReplanContract]:
+    issues: list[PlanningIssue] = []
+    requested_backend = str(goal_spec.constraints.get("runtime_backend", "")).strip().lower()
+    supported_backends = {backend.strip().lower() for backend in runtime_plan.deployment_contract.supported_backends}
+    if requested_backend and supported_backends and requested_backend not in supported_backends:
+        issues.append(
+            PlanningIssue(
+                issue_id=f"{goal_spec.goal_id}.backend",
+                severity="error",
+                message=f"requested runtime backend {requested_backend!r} is not supported by the deployment contract",
+                repair_action="align deployment contract supported_backends with the requested backend",
+                artifact_refs=["goal/goal_spec.json", "planning/runtime_plan.json"],
+            )
+        )
+    if goal_spec.constraints.get("network_policy") == "restricted" and "tool" in goal_spec.target_families:
+        issues.append(
+            PlanningIssue(
+                issue_id=f"{goal_spec.goal_id}.network",
+                severity="warning",
+                message="tool-oriented goals are constrained by restricted network access; only local tooling paths remain valid",
+                repair_action="keep benchmark pressure on deterministic local tools only",
+                artifact_refs=["planning/benchmark_suite.json"],
+            )
+        )
+    task_ids_with_verifiers = {spec.artifact_contract.get("task_id") for spec in verifier_bundle.verifiers}
+    for task in [*suite.train, *suite.proxy, *suite.val, *suite.test]:
+        if task.task_id not in task_ids_with_verifiers:
+            issues.append(
+                PlanningIssue(
+                    issue_id=f"{goal_spec.goal_id}.verifier.{task.task_id}",
+                    severity="error",
+                    message=f"benchmark task {task.task_id!r} is missing from the verifier bundle",
+                    repair_action="regenerate the verifier bundle from the frozen benchmark suite",
+                    artifact_refs=["planning/benchmark_plan.json", "planning/verifier_bundle.json"],
+                )
+            )
+    diagnostics = PlanningDiagnostics(
+        diagnostics_id=f"diagnostics.{stable_hash(goal_spec.goal_id, [issue.issue_id for issue in issues])[:12]}",
+        goal_id=goal_spec.goal_id,
+        issues=issues,
+        repaired=False,
+        blocked=any(issue.severity == "error" for issue in issues),
+    )
+    replan_contract = ReplanContract(
+        contract_id=f"replan.{stable_hash(goal_spec.goal_id, diagnostics.diagnostics_id)[:12]}",
+        goal_id=goal_spec.goal_id,
+        repairable_artifacts=["planning/benchmark_plan.json", "planning/verifier_bundle.json", "planning/runtime_plan.json"],
+        blocked_stages=["seed_runtime_materialization"] if diagnostics.blocked else [],
+        raw_goal_reparse_allowed=False,
+        status="repair_required" if diagnostics.issues else "stable",
+    )
+    return diagnostics, replan_contract
+
+
 def build_runtime_from_goal(
     goal_prompt: str,
     *,
@@ -512,8 +671,8 @@ def build_runtime_from_goal(
     mutator_type: str = "heuristic",
     profile_path: str | Path | None = None,
     runtime_backend: str | None = None,
+    artifact_mode: str | ArtifactMode | None = None,
     force: bool = False,
-    retain_artifacts: bool = True,
 ) -> BuiltRuntimeResult:
     clean_goal = canonical_goal_prompt(goal_prompt)
     if not clean_goal:
@@ -529,6 +688,7 @@ def build_runtime_from_goal(
     agintor_provider = getattr(provider, "provider_name", provider.__class__.__name__.lower())
     effective_runtime_backend = (runtime_backend or "local").strip().lower()
     merged_profile = load_runtime_profile(profile_path=profile_path)
+    (goal_dir / "raw_goal.txt").write_text(clean_goal, encoding="utf-8")
 
     goal_spec = _persist_model(
         goal_dir / "goal_spec.json",
@@ -538,22 +698,45 @@ def build_runtime_from_goal(
             runtime_provider_name=merged_profile.runtime_provider.name,
             default_runtime_backend=effective_runtime_backend,
         ),
+        artifact_id=f"goal-spec.{build_id}",
+        schema_version="agintor.goal_spec.v1",
+        creation_stage="goal_normalization",
+    )
+    assumption_register = _assumption_register(goal_spec)
+    _write_json(
+        planning_dir / "assumption_register.json",
+        {
+            "goal_id": goal_spec.goal_id,
+            "assumptions": [model_dump(item) for item in assumption_register],
+        },
     )
     success_bundle = _persist_model(
         goal_dir / "success_criteria.json",
         SuccessCriteriaBundle,
         build_success_criteria_bundle(goal_spec),
+        artifact_id=f"success-criteria.{goal_spec.goal_id}",
+        schema_version="agintor.success_criteria.v1",
+        creation_stage="success_criteria_extraction",
     )
-    goal_suite = build_goal_conditioned_suite(goal_spec, merged_profile)
+    goal_suite = _persist_benchmark_suite(
+        planning_dir / "benchmark_suite.json",
+        build_goal_conditioned_suite(goal_spec, merged_profile),
+    )
     benchmark_plan = _persist_model(
         planning_dir / "benchmark_plan.json",
         BenchmarkPlan,
         _build_benchmark_plan(goal_spec, goal_suite),
+        artifact_id=f"benchmark-plan.{goal_spec.goal_id}",
+        schema_version="agintor.benchmark_plan.v1",
+        creation_stage="benchmark_planning",
     )
     verifier_bundle = _persist_model(
         planning_dir / "verifier_bundle.json",
         VerifierBundle,
         _build_verifier_bundle(benchmark_plan, goal_suite),
+        artifact_id=benchmark_plan.verifier_bundle_id,
+        schema_version="agintor.verifier_bundle.v1",
+        creation_stage="verifier_freeze",
     )
     goal_keys = _goal_score_keys(goal_spec, goal_suite)
     factory_profile = _persist_model(
@@ -568,6 +751,9 @@ def build_runtime_from_goal(
             benchmark_plan=benchmark_plan,
             goal_keys=goal_keys,
         ),
+        artifact_id=f"factory-profile.{goal_spec.goal_id}",
+        schema_version="agintor.factory_profile.v1",
+        creation_stage="runtime_planning",
     )
     runtime_plan = _persist_model(
         planning_dir / "runtime_plan.json",
@@ -581,7 +767,51 @@ def build_runtime_from_goal(
             agintor_provider=agintor_provider,
             runtime_backend=effective_runtime_backend,
         ),
+        artifact_id=f"runtime-plan.{goal_spec.goal_id}",
+        schema_version="agintor.runtime_plan.v1",
+        creation_stage="runtime_planning",
     )
+    deployment_contract = _persist_model(
+        planning_dir / DEPLOYMENT_CONTRACT_FILE,
+        DeploymentContract,
+        runtime_plan.deployment_contract,
+        artifact_id=f"deployment-contract.{goal_spec.goal_id}",
+        schema_version="agintor.deployment_contract.v1",
+        creation_stage="runtime_planning",
+    )
+    runtime_plan = _persist_model(
+        planning_dir / "runtime_plan.json",
+        RuntimePlan,
+        runtime_plan.copy(update={"deployment_contract": deployment_contract}),
+        artifact_id=f"runtime-plan.{goal_spec.goal_id}",
+        schema_version="agintor.runtime_plan.v1",
+        creation_stage="runtime_planning",
+    )
+    planning_diagnostics, replan_contract = _plan_consistency_check(
+        goal_spec,
+        goal_suite,
+        verifier_bundle,
+        runtime_plan,
+    )
+    planning_diagnostics = _persist_model(
+        planning_dir / "planning_diagnostics.json",
+        PlanningDiagnostics,
+        planning_diagnostics,
+        artifact_id=planning_diagnostics.diagnostics_id,
+        schema_version="agintor.planning_diagnostics.v1",
+        creation_stage="runtime_planning",
+    )
+    replan_contract = _persist_model(
+        planning_dir / "replan_contract.json",
+        ReplanContract,
+        replan_contract,
+        artifact_id=replan_contract.contract_id,
+        schema_version="agintor.replan_contract.v1",
+        creation_stage="runtime_planning",
+    )
+    if planning_diagnostics.blocked:
+        issues = "; ".join(issue.message for issue in planning_diagnostics.issues)
+        raise RuntimeError(f"planning diagnostics blocked build before seed materialization: {issues}")
 
     _write_seed_runtime(seed_runtime_dir, runtime_plan, merged_profile)
     engine = EvolutionEngine(
@@ -594,7 +824,7 @@ def build_runtime_from_goal(
         runtime_backend=effective_runtime_backend,
         runtime_profile=merged_profile,
         profile_path=Path(profile_path) if profile_path is not None else None,
-        retain_artifacts=retain_artifacts,
+        artifact_mode=artifact_mode or ArtifactMode.ALWAYS,
     )
     summary = engine.run(steps=steps)
     candidates = _export_candidate_records(engine, goal_keys)
@@ -623,7 +853,8 @@ def build_runtime_from_goal(
         profile_to_json(merged_profile, runtime_only=True),
         encoding="utf-8",
     )
-    _write_json(destination_path / DEPLOYMENT_CONTRACT_FILE, runtime_plan.deployment_contract)
+    _write_json(destination_path / DEPLOYMENT_CONTRACT_FILE, deployment_contract)
+    bundle_runtime_kernel(destination_path, runtime_abi=RUNTIME_ABI_VERSION, force=True)
     with _without_bytecode_writes():
         exported_runtime = load_runtime(
             destination_path,
@@ -639,6 +870,8 @@ def build_runtime_from_goal(
     export_bundle = {
         "schema_version": "agintor.runtime.export.v1",
         "runtime_abi": RUNTIME_ABI_VERSION,
+        "kernel_version": KERNEL_VERSION,
+        "storage_schema_version": STORAGE_SCHEMA_VERSION,
         "runtime_hash": runtime_hash,
         "code_hash": code_hash,
         "manifest_version": manifest_version,
@@ -652,6 +885,7 @@ def build_runtime_from_goal(
         "selection_policy": "goal_score_mean_then_validation",
         "runtime_profile_file": str(destination_path / RUNTIME_PROFILE_FILE),
         "deployment_contract_file": str(destination_path / DEPLOYMENT_CONTRACT_FILE),
+        "kernel_manifest_file": str(destination_path / KERNEL_BUNDLE_DIR / KERNEL_MANIFEST_FILE),
         "export_bundle_file": str(export_bundle_path),
         "provenance_bundle_file": str(destination_path / RUNTIME_PROVENANCE_BUNDLE_FILE),
     }
@@ -666,24 +900,33 @@ def build_runtime_from_goal(
         runtime_identity=identity_inputs,
     )
 
-    export_summary_payload = {
-        "build_id": build_id,
-        "goal_id": goal_spec.goal_id,
-        "goal_prompt": clean_goal,
-        "runtime_hash": runtime_hash,
-        "code_hash": code_hash,
-        "source_runtime_dir": str(leader.runtime_dir),
-        "source_runtime_hash": leader.entry.runtime_hash,
-        "agintor_provider": agintor_provider,
-        "runtime_provider": merged_profile.runtime_provider.name,
-        "runtime_profile_path": str(destination_path / RUNTIME_PROFILE_FILE),
-        "deployment_contract_path": str(destination_path / DEPLOYMENT_CONTRACT_FILE),
-        "export_bundle_path": str(export_bundle_path),
-        "provenance_bundle_path": str(destination_path / RUNTIME_PROVENANCE_BUNDLE_FILE),
-        "leaderboard_path": str(leaderboard_path),
-        "runtime_plan_path": str(planning_dir / "runtime_plan.json"),
-    }
-    export_summary_path = _write_json(export_dir / "export_summary.json", export_summary_payload)
+    export_summary = _persist_model(
+        export_dir / "export_summary.json",
+        ExportSummary,
+        ExportSummary(
+            export_id=f"export.{build_id}",
+            build_id=build_id,
+            goal_id=goal_spec.goal_id,
+            goal_prompt=clean_goal,
+            runtime_hash=runtime_hash,
+            code_hash=code_hash,
+            runtime_id=runtime_id,
+            runtime_abi=RUNTIME_ABI_VERSION,
+            kernel_version=KERNEL_VERSION,
+            storage_schema_version=STORAGE_SCHEMA_VERSION,
+            source_runtime_dir=str(leader.runtime_dir),
+            source_runtime_hash=leader.entry.runtime_hash,
+            runtime_profile_path=str(destination_path / RUNTIME_PROFILE_FILE),
+            deployment_contract_path=str(destination_path / DEPLOYMENT_CONTRACT_FILE),
+            export_bundle_path=str(export_bundle_path),
+            provenance_bundle_path=str(destination_path / RUNTIME_PROVENANCE_BUNDLE_FILE),
+            leaderboard_path=str(leaderboard_path),
+            runtime_plan_path=str(planning_dir / "runtime_plan.json"),
+        ),
+        artifact_id=f"export-summary.{build_id}",
+        schema_version="agintor.export_summary.v1",
+        creation_stage="export",
+    )
     build_summary = _persist_model(
         export_dir / "build_summary.json",
         BuildSummary,
@@ -697,6 +940,10 @@ def build_runtime_from_goal(
             benchmark_plan_path=str(planning_dir / "benchmark_plan.json"),
             verifier_bundle_path=str(planning_dir / "verifier_bundle.json"),
             runtime_plan_path=str(planning_dir / "runtime_plan.json"),
+            factory_profile_path=str(planning_dir / "factory_profile.json"),
+            deployment_contract_path=str(planning_dir / DEPLOYMENT_CONTRACT_FILE),
+            planning_diagnostics_path=str(planning_dir / "planning_diagnostics.json"),
+            replan_contract_path=str(planning_dir / "replan_contract.json"),
             workspace=str(build_root),
             output_runtime_dir=str(destination_path),
             history_path=getattr(summary, "history_path", ""),
@@ -713,8 +960,11 @@ def build_runtime_from_goal(
             runtime_provider=merged_profile.runtime_provider.name,
             export_bundle_file=RUNTIME_EXPORT_BUNDLE_FILE,
             provenance_bundle_file=RUNTIME_PROVENANCE_BUNDLE_FILE,
-            export_summary_path=str(export_summary_path),
+            export_summary_path=str(export_dir / "export_summary.json"),
         ),
+        artifact_id=f"build-summary.{build_id}",
+        schema_version="agintor.build_summary.v1",
+        creation_stage="export",
     )
     return BuiltRuntimeResult(
         build_id=build_id,
@@ -737,6 +987,6 @@ def build_runtime_from_goal(
         accepted_mutations=summary.accepted,
         export_bundle_file=RUNTIME_EXPORT_BUNDLE_FILE,
         provenance_bundle_file=RUNTIME_PROVENANCE_BUNDLE_FILE,
-        export_summary_path=str(export_summary_path),
+        export_summary_path=str(export_dir / "export_summary.json"),
         summary_path=str(export_dir / "build_summary.json"),
     )

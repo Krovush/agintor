@@ -224,6 +224,10 @@ _RUNTIME_ONLY_KEYS = ("prompts", "runtime_provider", "execution", "topology", "m
 _RUNTIME_PROMPT_KEYS = ("memory_summary", "tool_spec")
 
 
+def _resource_package() -> str:
+    return (__package__ or "agintor").split(".", 1)[0]
+
+
 def runtime_profile_path(runtime_dir: str | Path) -> Path:
     return Path(runtime_dir) / RUNTIME_PROFILE_FILE
 
@@ -235,7 +239,7 @@ def runtime_has_embedded_profile(runtime_dir: str | Path | None) -> bool:
 
 
 def _default_profile_dict() -> dict[str, Any]:
-    path = resources.files("agintor").joinpath("templates", "baseline_runtime", RUNTIME_PROFILE_FILE)
+    path = resources.files(_resource_package()).joinpath("templates", "baseline_runtime", RUNTIME_PROFILE_FILE)
     return json.loads(path.read_text(encoding="utf-8"))
 
 

@@ -11,7 +11,7 @@ METHOD_CONTRACTS = {
     "top": ["score_agent", "select_mode", "propose_children", "select_workers", "assign_scope", "merge_ensemble", "make_checkpoint"],
     "mem": ["select_spans_for_compaction", "summarize_span", "retrieve_long_term", "score_memory_unit", "should_promote", "dedup_candidates", "upsert_memory"],
     "tool": ["rank_categories", "rank_tools", "should_create_tool", "propose_tool_spec", "validate_tool", "promote_tool", "dispatch_tool"],
-    "ctl": ["assign_model", "request_checks", "stop_policy", "score_interface_scope", "update_scope_credit"],
+    "ctl": ["assign_model", "request_checks", "stop_policy"],
 }
 
 

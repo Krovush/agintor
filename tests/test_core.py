@@ -14,6 +14,7 @@ from agintor.evaluator import RuntimeEvaluator
 from agintor.exceptions import HardInvalidation, PatchApplyError, SafetyViolation, ValidationError
 from agintor.memory_graph import LongTermGraph, ShortTermGraph
 from agintor.patches import apply_patch_to_text, build_patch
+from agintor.pydantic_compat import model_dump
 from agintor.providers import (
     LocalDeterministicProvider,
     MiniMaxProvider,
@@ -32,6 +33,7 @@ from agintor.schemas import (
     ArchiveEntry,
     AsyncHandle,
     BenchmarkTask,
+    CapabilityExchange,
     Checkpoint,
     ChildSpec,
     EdgeType,
@@ -43,6 +45,9 @@ from agintor.schemas import (
     NodeType,
     OperationSpec,
     RunResult,
+    RuntimeBatchRequest,
+    RuntimeBatchResponse,
+    RuntimeTaskInvocation,
     SuiteEvaluation,
     SummaryRecord,
     ToolSpec,
@@ -705,7 +710,7 @@ def test_minimax_provider_uses_separate_runtime_environment_defaults(monkeypatch
     provider = build_provider("minimax")
     assert isinstance(provider, MiniMaxProvider)
     assert provider.base_url == "https://api.minimax.io/anthropic"
-    assert provider.resolve_model("small") == "MiniMax-M2.5"
+    assert provider.resolve_model("small") == "MiniMax-M2.7-Flash"
 
 
 def test_minimax_provider_uses_anthropic_messages_endpoint() -> None:
@@ -736,7 +741,7 @@ def test_minimax_provider_uses_anthropic_messages_endpoint() -> None:
     response = provider.generate(ModelRequest(instructions="system", prompt="hello", model_class="medium", seed=0, metadata={"max_output_tokens": 5}))
 
     assert response.text == "hi"
-    assert observed[0]["model"] == "MiniMax-M2.5"
+    assert observed[0]["model"] == "MiniMax-M2.7-Flash"
     assert observed[0]["max_tokens"] == 5
     assert observed[0]["system"] == "system"
     assert observed[0]["messages"] == [
@@ -809,6 +814,87 @@ def test_docker_executor_mounts_key_file_from_provider_env(monkeypatch: pytest.M
                 mounts.append(str(command[index + 1]))
     assert any(str(key_file.resolve()) in mount and "/mnt/provider_files/" in mount for mount in mounts)
     assert any(mount.endswith(":/mnt/provider.json:ro") for mount in mounts)
+
+
+def test_docker_executor_sets_runtime_sdk_pythonpath_and_rewrites_workspace_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    executor = DockerRuntimeExecutor(tmp_path / "docker_ws", repo_root=Path.cwd())
+    monkeypatch.setattr(DockerRuntimeExecutor, "ensure_image", lambda self: None)
+    task = build_demo_suite().train[0]
+    request = RuntimeBatchRequest(
+        request_id="docker.runtime_sdk",
+        runtime_backend="docker",
+        invocations=[RuntimeTaskInvocation(seed=0, task=task)],
+    )
+    captured_commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured_commands.append(list(command))
+        output_mount = None
+        workspace_mount = None
+        for index, item in enumerate(command):
+            if item != "-v":
+                continue
+            mount = str(command[index + 1])
+            if mount.endswith(":/mnt/output"):
+                output_mount = mount.split(":/mnt/output", 1)[0]
+            if mount.endswith(":/mnt/workspace"):
+                workspace_mount = mount.split(":/mnt/workspace", 1)[0]
+        assert output_mount is not None
+        assert workspace_mount is not None
+        response = RuntimeBatchResponse(
+            request_id="docker.runtime_sdk",
+            capability_exchange=CapabilityExchange(
+                runtime_abi="agintor-runtime-abi-v3",
+                kernel_version="agintor-kernel-v1",
+                storage_schema_version="agintor-storage-v1",
+                supported_backends=["docker"],
+                tool_runtimes=["python"],
+                checkpoint_support=True,
+                runtime_asset_capabilities={"traces": True, "checkpoints": True, "runtime_sdk": True},
+                side_effect_receipts=False,
+                required_env_names=[],
+                capability_flags=["inspect", "run_batch"],
+            ),
+            run_results=[
+                RunResult(
+                    task_id=task.task_id,
+                    seed=0,
+                    artifact=task.expected,
+                    verifier_score=1.0,
+                    cost=0.0,
+                    latency=0.0,
+                    faults=0,
+                    trace_path="/mnt/workspace/traces/top.sum_product_0.json",
+                    checkpoint_ref="/mnt/workspace/checkpoints/top.sum_product_0.json",
+                )
+            ],
+            provider_usage={"calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "dollar_cost": 0.0},
+        )
+        output_path = Path(output_mount) / "run_result.json"
+        output_path.write_text(json.dumps(model_dump(response), indent=2, sort_keys=True), encoding="utf-8")
+
+        class Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Completed()
+
+    monkeypatch.setattr(container_runtime_module.subprocess, "run", fake_run)
+
+    response = executor.run_batch_protocol(
+        runtime_dir,
+        request,
+        provider=LocalDeterministicProvider(),
+    )
+
+    flattened = [item for command in captured_commands for item in command]
+    assert "PYTHONPATH=/mnt/runtime/runtime_sdk" in flattened
+    host_workspace = next(path for path in (tmp_path / "docker_ws").rglob("workspace") if path.is_dir())
+    assert response.run_results[0].trace_path == str((host_workspace / "traces" / "top.sum_product_0.json").resolve())
+    assert response.run_results[0].checkpoint_ref == str((host_workspace / "checkpoints" / "top.sum_product_0.json").resolve())
 
 
 def test_evaluator_docker_batches_ordered_task_runs_once(runtime_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

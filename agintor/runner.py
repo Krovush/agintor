@@ -328,6 +328,7 @@ class TaskRuntime:
         invalid_reason: str | None,
     ) -> RunResult:
         trace_path = self.shell.save_trace(task.task_id, seed, trace)
+        checkpoint_ref = self.shell.save_checkpoints(task.task_id, seed, state.checkpoints)
         return RunResult(
             task_id=task.task_id,
             seed=seed,
@@ -338,6 +339,7 @@ class TaskRuntime:
             faults=faults,
             trace=[dict(row) for row in trace],
             trace_path=str(trace_path) if trace_path is not None else None,
+            checkpoint_ref=checkpoint_ref.ref if checkpoint_ref is not None else None,
             hard_invalid=hard_invalid,
             invalid_reason=invalid_reason,
             mode=state.mode,

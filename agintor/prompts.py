@@ -19,8 +19,12 @@ class PromptSpec(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+def _resource_package() -> str:
+    return (__package__ or "agintor").split(".", 1)[0]
+
+
 def _prompt_path(prompt_id: str):
-    return resources.files("agintor").joinpath("templates", "prompts", f"{prompt_id}.json")
+    return resources.files(_resource_package()).joinpath("templates", "prompts", f"{prompt_id}.json")
 
 
 def load_prompt_spec(prompt_id: str) -> PromptSpec:

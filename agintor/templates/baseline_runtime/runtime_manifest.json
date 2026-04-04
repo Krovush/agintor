@@ -14,18 +14,15 @@
     "control_policy.py"
   ],
   "immutable_manifest": [
-    "agintor/shell.py",
-    "agintor/runner.py",
-    "agintor/archive.py",
-    "agintor/evaluator.py",
-    "agintor/mutator.py",
-    "agintor/tool_runtime.py",
-    "agintor/memory_graph.py",
-    "agintor/verifiers.py",
+    "runtime_sdk/kernel_manifest.json",
+    "deployment_contract.json",
     "runtime_profile.json"
   ],
   "metadata": {
     "template": "baseline_runtime",
-    "runtime_abi": "agintor-runtime-abi-v2"
+    "runtime_abi": "agintor-runtime-abi-v3",
+    "kernel_version": "agintor-kernel-v1",
+    "storage_schema_version": "agintor-storage-v1",
+    "kernel_manifest_file": "runtime_sdk/kernel_manifest.json"
   }
 }

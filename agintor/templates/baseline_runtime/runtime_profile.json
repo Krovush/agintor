@@ -54,65 +54,6 @@
       "require_verified_terminal": true
     }
   },
-  "evaluation": {
-    "delta_rej": 0.01,
-    "epsilon_full": 0.05,
-    "epsilon_part": 0.01,
-    "epsilon_proxy": 0.01,
-    "full_train_seeds": [
-      0,
-      1,
-      2
-    ],
-    "family_weights": {
-      "e2e": 0.25,
-      "mem": 0.25,
-      "tool": 0.25,
-      "top": 0.25
-    },
-    "lambdas": {
-      "cost": 0.08,
-      "fault": 0.12,
-      "latency": 0.05
-    },
-    "pass_rate_caps": {
-      "stage1": 0.35,
-      "stage2": 0.15,
-      "stage3": 0.05
-    },
-    "proxy_seeds": [
-      0
-    ],
-    "reference_scale_seeds": [
-      0
-    ],
-    "robustness": {
-      "alpha": 0.3333333333333333,
-      "eta_sigma": 0.35,
-      "kappa_b": 0.25,
-      "kappa_u": 0.3
-    },
-    "stage1_replays": 2,
-    "stage4_minibatch_size": 4,
-    "subset_seeds": [
-      0
-    ],
-    "validation_seeds": [
-      0,
-      1,
-      2,
-      3,
-      4
-    ]
-  },
-  "evolution": {
-    "crossover_probability": 0.15,
-    "phase_budgets": {
-      "joint": 300,
-      "local": 1200,
-      "pair": 600
-    }
-  },
   "execution": {
     "checks_max": 16,
     "context_window_tokens": 768,
@@ -175,9 +116,9 @@
     "base_url": "https://api.minimax.io/anthropic",
     "base_url_env": "AGINTOR_MAS_MINIMAX_BASE_URL",
     "model_map": {
-      "large": "MiniMax-M2.5",
-      "medium": "MiniMax-M2.5",
-      "small": "MiniMax-M2.5"
+      "large": "MiniMax-M2.7-Flash",
+      "medium": "MiniMax-M2.7-Flash",
+      "small": "MiniMax-M2.7-Flash"
     },
     "name": "minimax",
     "pricing_env": "AGINTOR_MAS_MINIMAX_PRICING",

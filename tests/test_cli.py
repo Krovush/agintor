@@ -2,21 +2,35 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
 import agintor.cli as cli_module
 
+from agintor.artifacts import ArtifactMode, is_path_within
 from agintor.cli import app
 from agintor.providers import LocalDeterministicProvider
 from agintor.runtime_profile import HostedProviderProfile, RuntimeProfile
 from agintor.schemas import RunResult, SuiteEvaluation
 
 pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 runner = CliRunner()
+
+
+def _repo_scratch_entries() -> set[str]:
+    prefixes = (".tmp", "tmp", ".agintor")
+    names: set[str] = set()
+    for entry in PROJECT_ROOT.iterdir():
+        if entry.name.startswith(prefixes):
+            names.add(entry.name)
+        if entry.name.startswith("pytest-cache-files-"):
+            names.add(entry.name)
+    return names
 
 
 
@@ -47,18 +61,18 @@ def test_cli_default_solve_eval_do_not_create_repo_workspace_dirs(tmp_path: Path
     suite_path = tmp_path / "demo_suite.json"
     init_result = runner.invoke(app, ["init-runtime", str(runtime_dir), "--write-demo-suite", str(suite_path)])
     assert init_result.exit_code == 0, init_result.output
+    before = _repo_scratch_entries()
 
     solve = runner.invoke(app, ["solve", str(runtime_dir), "top.sum_product", "--suite", str(suite_path), "--provider", "local"])
     assert solve.exit_code == 0, solve.output
     solve_payload = json.loads(solve.output)
     assert solve_payload["result"]["trace_path"] is None
-    assert (Path.cwd() / ".agintor_runs").exists() is False
 
     evaluation = runner.invoke(app, ["eval", str(runtime_dir), "--suite", str(suite_path), "--partition", "train", "--seeds", "0", "--provider", "local"])
     assert evaluation.exit_code == 0, evaluation.output
     eval_payload = json.loads(evaluation.output)
     assert all(run["trace_path"] is None for run in eval_payload["run_results"])
-    assert (Path.cwd() / ".agintor_runs").exists() is False
+    assert _repo_scratch_entries() == before
 
 
 def test_cli_solve_supports_prompt_mode_with_verified_result(tmp_path: Path) -> None:
@@ -110,9 +124,10 @@ def test_cli_solve_prompt_mode_reports_best_effort_for_generic_requests(tmp_path
     assert solve.exit_code == 0, solve.output
     payload = json.loads(solve.output)
     assert payload["mode"] == "user_request"
-    assert payload["solve_result"]["status"] == "best_effort"
+    assert payload["solve_result"]["status"] == "partially_checked"
+    assert payload["solve_result"]["verification_status"] == "partially_checked"
     assert payload["solve_result"]["verified"] is False
-    assert payload["solve_result"]["best_effort"] is True
+    assert payload["solve_result"]["best_effort"] is False
     assert payload["solve_result"]["artifact"]
 
 
@@ -176,6 +191,100 @@ def test_cli_solve_prompt_mode_passes_budget_overrides_to_evaluator(tmp_path: Pa
 
     assert solve.exit_code == 0, solve.output
     assert captured["budget_overrides"] == {"M_max": 3, "Q_max": 1}
+
+
+def test_cli_build_runtime_keeps_external_implicit_workspace_and_valid_artifact_paths(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_build_runtime_from_goal(
+        prompt_text,
+        *,
+        destination,
+        workspace,
+        provider,
+        steps=10,
+        mutator_type="heuristic",
+        profile_path=None,
+        runtime_backend="docker",
+        artifact_mode=ArtifactMode.ALWAYS,
+        force=False,
+    ):
+        del provider, steps, mutator_type, profile_path, runtime_backend, force
+        workspace_path = Path(workspace)
+        goal_dir = workspace_path / "goal"
+        planning_dir = workspace_path / "planning"
+        export_dir = workspace_path / "export"
+        goal_dir.mkdir(parents=True, exist_ok=True)
+        planning_dir.mkdir(parents=True, exist_ok=True)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        goal_spec_path = goal_dir / "goal_spec.json"
+        success_path = goal_dir / "success_criteria.json"
+        benchmark_path = planning_dir / "benchmark_plan.json"
+        verifier_path = planning_dir / "verifier_bundle.json"
+        runtime_plan_path = planning_dir / "runtime_plan.json"
+        export_summary_path = export_dir / "export_summary.json"
+        summary_path = export_dir / "build_summary.json"
+        for path in [
+            goal_spec_path,
+            success_path,
+            benchmark_path,
+            verifier_path,
+            runtime_plan_path,
+            export_summary_path,
+            summary_path,
+        ]:
+            path.write_text(prompt_text, encoding="utf-8")
+        captured["artifact_mode"] = artifact_mode.value if isinstance(artifact_mode, ArtifactMode) else str(artifact_mode)
+        return SimpleNamespace(
+            build_id="build-id",
+            goal_id="goal-id",
+            goal_prompt=prompt_text,
+            goal_spec_path=str(goal_spec_path),
+            success_criteria_path=str(success_path),
+            benchmark_plan_path=str(benchmark_path),
+            verifier_bundle_path=str(verifier_path),
+            runtime_plan_path=str(runtime_plan_path),
+            output_runtime_dir=str(destination),
+            workspace=str(workspace_path),
+            agintor_provider="local",
+            runtime_provider="minimax",
+            mutator_type="heuristic",
+            best_train_score=0.0,
+            best_goal_score=0.0,
+            best_val_score=0.0,
+            archive_cells=0,
+            accepted_mutations=0,
+            export_bundle_file="",
+            provenance_bundle_file="",
+            export_summary_path=str(export_summary_path),
+            summary_path=str(summary_path),
+        )
+
+    monkeypatch.setattr(cli_module, "build_runtime_from_goal", fake_build_runtime_from_goal)
+
+    result = runner.invoke(
+        app,
+        [
+            "build-runtime",
+            "Build a runtime specialized for exact retrieval.",
+            "--destination",
+            str(tmp_path / "exported"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    workspace_path = Path(payload["workspace"])
+    assert captured["artifact_mode"] == ArtifactMode.ALWAYS.value
+    assert workspace_path.exists()
+    assert is_path_within(workspace_path, PROJECT_ROOT) is False
+    assert Path(payload["goal_spec_path"]).exists()
+    assert Path(payload["success_criteria_path"]).exists()
+    assert Path(payload["benchmark_plan_path"]).exists()
+    assert Path(payload["verifier_bundle_path"]).exists()
+    assert Path(payload["runtime_plan_path"]).exists()
+    assert Path(payload["summary_path"]).exists()
+    assert Path(payload["export_summary_path"]).exists()
 
 
 def test_cli_solve_prompt_mode_returns_controlled_failure_when_tool_scope_blocks_exact_path(tmp_path: Path) -> None:

@@ -6,10 +6,10 @@ import math
 import sys
 from typing import Any, Sequence
 
-from agintor.prompts import load_prompt_spec
-from agintor.schemas import ToolSpec
-from agintor.tool_runtime import RegisteredTool, validate_expression_tool, validate_tool_candidate
-from agintor.utils import lexical_overlap, stable_hash
+from agintor_runtime.prompts import load_prompt_spec
+from agintor_runtime.schemas import ToolSpec
+from agintor_runtime.tool_runtime import RegisteredTool, validate_expression_tool, validate_tool_candidate
+from agintor_runtime.utils import lexical_overlap, stable_hash
 
 
 class ToolPolicy:

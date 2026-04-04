@@ -11,20 +11,19 @@ import inspect
 from .artifacts import ArtifactMode, ArtifactPolicy
 from .archive import objective_specs_from_suite
 from .benchmarks import BenchmarkSuite
-from .container_runtime import DockerRuntimeExecutor
-from .exceptions import HardInvalidation, PatchApplyError
+from .exceptions import PatchApplyError
 from .mutator import MutationCandidate
 from .patches import parse_patch
 from .predictors import DecisionFamilyModelBank
 from .prompt_builder import METHOD_CONTRACTS
 from .providers import ModelProvider
 from .runtime_loader import load_runtime
+from .runtime_host import RuntimeHost
 from .runtime_profile import RuntimeProfile, resolve_runtime_profile
-from .runner import TaskRuntime
 from .pydantic_compat import model_dump
+from .runner import TaskRuntime as TaskRuntime
 from .scoring import ScoreCalculator, estimate_reference_scales, mean_improvement
 from .schemas import EvaluationStageResult, ObjectiveKind, ObjectiveSpec, SuiteEvaluation
-from .shell import FixedShell
 from .utils import ensure_directory, stable_hash
 
 
@@ -42,14 +41,12 @@ class RuntimeEvaluator:
         profile_path: Path | None = None,
         artifact_mode: str | ArtifactMode | None = None,
         sandbox_root: Path | None = None,
-        retain_artifacts: bool = False,
     ) -> None:
         self.suite = suite
         self.workspace = Path(workspace)
         self.provider = provider
         self.artifact_policy = ArtifactPolicy.resolve(
             artifact_mode=artifact_mode,
-            retain_artifacts=retain_artifacts,
             sandbox_root=sandbox_root,
         )
         self.retain_artifacts = self.artifact_policy.keep_successes
@@ -64,15 +61,11 @@ class RuntimeEvaluator:
             profile_path=self.profile_path,
         )
         self.runtime_backend = (runtime_backend or os.environ.get("AGINTOR_RUNTIME_BACKEND", "local")).strip().lower()
-        self.container_executor = (
-            DockerRuntimeExecutor(
-                self.workspace / ".runtime_container_cache",
-                artifact_mode=self.artifact_policy.mode,
-                sandbox_root=self.artifact_policy.sandbox_root,
-                retain_artifacts=retain_artifacts,
-            )
-            if self.runtime_backend == "docker"
-            else None
+        self.runtime_host = RuntimeHost(
+            self.workspace,
+            runtime_backend=self.runtime_backend,
+            artifact_mode=self.artifact_policy.mode,
+            sandbox_root=self.artifact_policy.sandbox_root,
         )
         self.stage1_replays = self.reference_profile.evaluation.stage1_replays
         self.epsilon_proxy = self.reference_profile.evaluation.epsilon_proxy
@@ -82,6 +75,7 @@ class RuntimeEvaluator:
         self.delta_rej = self.reference_profile.evaluation.delta_rej
         self.cache: dict[tuple[str, str, tuple[int, ...], tuple[str, ...]], SuiteEvaluation] = {}
         self.reference_scales = ({}, {})
+        self.last_provider_usage: dict[str, Any] = {}
  
 
     def prepare_reference_scales(self, force: bool = False) -> None:
@@ -272,48 +266,24 @@ class RuntimeEvaluator:
         tasks = list(tasks_override) if tasks_override is not None else self.suite.all_tasks(partition)
         units = self._evaluation_units(tasks)
         run_results = []
-        shell_workspaces: list[Path] = []
         self.predictors.freeze()
         try:
-            if self.runtime_backend == "docker" and self.container_executor is not None:
-                task_runs = [
-                    (task, int(seed))
-                    for seed in seeds
-                    for unit in units
-                    for task in unit
-                ]
-                run_results.extend(
-                    self.container_executor.run_batch(
-                        runtime_dir,
-                        task_runs,
-                        provider=self.provider,
-                        runtime_profile=runtime_profile,
-                    )
-                )
-            else:
-                for seed in seeds:
-                    shell_workspace = self.workspace / f"ev_{runtime.runtime_hash[:8]}_{partition[:1]}_{seed}"
-                    shell_workspaces.append(shell_workspace)
-                    shell = FixedShell(
-                        shell_workspace,
-                        predictors=self.predictors,
-                        artifact_mode=self.artifact_policy.mode,
-                        sandbox_root=self.artifact_policy.sandbox_root,
-                        retain_artifacts=self.retain_artifacts,
-                    )
-                    runner = TaskRuntime(
-                        runtime,
-                        shell,
-                        self.provider,
-                        budget_overrides=self.budget_overrides,
-                        runtime_profile=runtime_profile,
-                    )
-                    for unit in units:
-                        for task in unit:
-                            run_results.append(runner.run_task(task, int(seed)))
+            task_runs = [
+                (task, int(seed))
+                for seed in seeds
+                for unit in units
+                for task in unit
+            ]
+            batch_response = self.runtime_host.run_batch(
+                runtime_dir,
+                task_runs,
+                provider=self.provider,
+                runtime_profile=runtime_profile,
+                budget_overrides=self.budget_overrides,
+            )
+            self.last_provider_usage = dict(batch_response.provider_usage)
+            run_results.extend(batch_response.run_results)
         except Exception:
-            for shell_workspace in shell_workspaces:
-                self._cleanup_path(shell_workspace, failed=True)
             raise
         finally:
             self.predictors.unfreeze()
@@ -323,9 +293,6 @@ class RuntimeEvaluator:
             task_family_map,
             run_results,
         )
-        if not evaluation.invalid:
-            for shell_workspace in shell_workspaces:
-                self._cleanup_path(shell_workspace)
         if use_cache:
             self.cache[cache_key] = evaluation
         return evaluation

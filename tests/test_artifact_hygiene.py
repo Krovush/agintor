@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from agintor.artifacts import resolve_recent_timestamped_subfolder
+from agintor.artifacts import ArtifactAllocator, WorkspaceOrigin, is_path_within, resolve_recent_timestamped_subfolder
 from agintor.benchmarks import BenchmarkSuite, build_demo_suite
 from agintor.evaluator import RuntimeEvaluator
 from agintor.providers import LocalDeterministicProvider
 from agintor.schemas import BenchmarkTask, OperationSpec
 
 pytestmark = pytest.mark.usefixtures("module_failure_artifact_bucket")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_resolve_recent_timestamped_subfolder_reuses_bucket_within_one_hour(tmp_path: Path) -> None:
@@ -43,6 +47,74 @@ def test_resolve_recent_timestamped_subfolder_rolls_after_one_hour(tmp_path: Pat
     assert first is not None
     assert second is not None
     assert second != first
+
+
+def test_artifact_allocator_places_implicit_workspaces_outside_repo_and_releases_them(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    artifact_root = tmp_path / "external_artifacts"
+    repo_root.mkdir()
+    allocator = ArtifactAllocator.resolve(repo_root=repo_root, artifact_root=artifact_root)
+
+    lease = allocator.workspace(None, purpose="solve", mode="none", prefix="solve")
+
+    assert lease.origin == WorkspaceOrigin.IMPLICIT
+    assert lease.path.exists()
+    assert str(lease.path.resolve()).startswith(str((artifact_root / "solve").resolve()))
+    lease.release()
+    assert lease.path.exists() is False
+
+
+def test_artifact_allocator_allows_explicit_repo_local_workspaces(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    allocator = ArtifactAllocator.resolve(repo_root=repo_root, artifact_root=tmp_path / "external_artifacts")
+
+    lease = allocator.workspace(repo_root / "user_workspace", purpose="build", mode="always")
+
+    assert lease.origin == WorkspaceOrigin.EXPLICIT
+    assert lease.path == repo_root / "user_workspace"
+
+
+def test_artifact_allocator_rejects_repo_local_implicit_artifact_roots_without_creating_them(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    artifact_root = repo_root / ".tmp_artifacts"
+    repo_root.mkdir()
+    allocator = ArtifactAllocator.resolve(repo_root=repo_root, artifact_root=artifact_root)
+
+    with pytest.raises(ValueError):
+        allocator.workspace(None, purpose="eval", mode="none", prefix="eval")
+
+    assert artifact_root.exists() is False
+    assert (artifact_root / "eval").exists() is False
+
+
+def test_pytest_temp_and_artifact_roots_are_external(external_pytest_basetemp: Path, external_artifact_root: Path) -> None:
+    assert is_path_within(external_pytest_basetemp, PROJECT_ROOT) is False
+    assert is_path_within(external_artifact_root, PROJECT_ROOT) is False
+    assert str(external_artifact_root).startswith(str(external_pytest_basetemp.resolve()))
+
+
+def test_pytest_repo_local_basetemp_is_rewritten_outside_repo() -> None:
+    requested = PROJECT_ROOT / f".tmp_pytest_rewrite_probe_{os.getpid()}"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--basetemp",
+            str(requested),
+            "tests/test_artifact_hygiene.py::test_resolve_recent_timestamped_subfolder_reuses_bucket_within_one_hour",
+        ],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert requested.exists() is False
 
 
 def test_runtime_evaluator_constructor_is_side_effect_free(runtime_dir: Path, tmp_path: Path) -> None:

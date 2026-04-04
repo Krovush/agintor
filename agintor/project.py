@@ -8,6 +8,8 @@ from importlib import resources
 
 from .benchmarks import build_demo_suite
 from .pydantic_compat import model_dump
+from .runtime_loader import RUNTIME_ABI_VERSION
+from .runtime_sdk import bundle_runtime_kernel
 from .utils import ensure_directory
 
 
@@ -27,6 +29,7 @@ def init_runtime(destination: str | Path, force: bool = False) -> Path:
     template_root = resources.files("agintor").joinpath("templates", "baseline_runtime")
     with resources.as_file(template_root) as template_dir:
         shutil.copytree(template_dir, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+    bundle_runtime_kernel(dest, runtime_abi=RUNTIME_ABI_VERSION, force=True)
     return dest
 
 
