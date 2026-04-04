@@ -13,17 +13,18 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS_ROOT = ROOT / "tests"
-TEST_ARTIFACT_ROOT = TESTS_ROOT / "_artifacts"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 sys.dont_write_bytecode = True
 
-from agintor.artifacts import resolve_recent_timestamped_subfolder
+from agintor.artifacts import ArtifactAllocator
 from agintor.benchmarks import build_demo_suite
 from agintor.project import init_runtime
 from agintor.providers import LocalDeterministicProvider
+
+TEST_ARTIFACT_ALLOCATOR = ArtifactAllocator.resolve(repo_root=ROOT)
 
 
 def _cleanup_repo_artifacts() -> None:
@@ -111,8 +112,8 @@ class FailureArtifactManager:
         self.failures_by_module.setdefault(module_path, []).append(failure)
 
     def finalize(self) -> None:
-        recent_dir = resolve_recent_timestamped_subfolder(
-            TEST_ARTIFACT_ROOT,
+        recent_dir = TEST_ARTIFACT_ALLOCATOR.timestamped_bucket(
+            purpose="test_failures",
             prefix="run",
             within=timedelta(hours=1),
             create=bool(self.failures_by_module),

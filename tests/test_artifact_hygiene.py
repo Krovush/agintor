@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agintor.artifacts import resolve_recent_timestamped_subfolder
+from agintor.artifacts import ArtifactAllocator, WorkspaceOrigin, resolve_recent_timestamped_subfolder
 from agintor.benchmarks import BenchmarkSuite, build_demo_suite
 from agintor.evaluator import RuntimeEvaluator
 from agintor.providers import LocalDeterministicProvider
@@ -43,6 +43,41 @@ def test_resolve_recent_timestamped_subfolder_rolls_after_one_hour(tmp_path: Pat
     assert first is not None
     assert second is not None
     assert second != first
+
+
+def test_artifact_allocator_places_implicit_workspaces_outside_repo_and_releases_them(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    artifact_root = tmp_path / "external_artifacts"
+    repo_root.mkdir()
+    allocator = ArtifactAllocator.resolve(repo_root=repo_root, artifact_root=artifact_root)
+
+    lease = allocator.workspace(None, purpose="solve", prefix="solve")
+
+    assert lease.origin == WorkspaceOrigin.IMPLICIT
+    assert lease.path.exists()
+    assert str(lease.path.resolve()).startswith(str((artifact_root / "solve").resolve()))
+    lease.release()
+    assert lease.path.exists() is False
+
+
+def test_artifact_allocator_allows_explicit_repo_local_workspaces(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    allocator = ArtifactAllocator.resolve(repo_root=repo_root, artifact_root=tmp_path / "external_artifacts")
+
+    lease = allocator.workspace(repo_root / "user_workspace", purpose="build")
+
+    assert lease.origin == WorkspaceOrigin.EXPLICIT
+    assert lease.path == repo_root / "user_workspace"
+
+
+def test_artifact_allocator_rejects_repo_local_implicit_artifact_roots(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    allocator = ArtifactAllocator.resolve(repo_root=repo_root, artifact_root=repo_root / ".tmp_artifacts")
+
+    with pytest.raises(ValueError):
+        allocator.workspace(None, purpose="eval", prefix="eval")
 
 
 def test_runtime_evaluator_constructor_is_side_effect_free(runtime_dir: Path, tmp_path: Path) -> None:

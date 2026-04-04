@@ -178,6 +178,77 @@ def test_cli_solve_prompt_mode_passes_budget_overrides_to_evaluator(tmp_path: Pa
     assert captured["budget_overrides"] == {"M_max": 3, "Q_max": 1}
 
 
+def test_cli_build_runtime_uses_external_implicit_workspace_and_cleans_it(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_build_runtime_from_goal(
+        prompt_text,
+        *,
+        destination,
+        workspace,
+        provider,
+        steps=10,
+        mutator_type="heuristic",
+        profile_path=None,
+        runtime_backend="docker",
+        force=False,
+        retain_artifacts=True,
+    ):
+        del provider, steps, mutator_type, profile_path, runtime_backend, force
+        workspace_path = Path(workspace)
+        captured["workspace"] = workspace_path
+        captured["retain_artifacts"] = retain_artifacts
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        (workspace_path / "build_marker.txt").write_text(prompt_text, encoding="utf-8")
+        return type(
+            "BuildResult",
+            (),
+            {
+                "build_id": "build-id",
+                "goal_id": "goal-id",
+                "goal_prompt": prompt_text,
+                "goal_spec_path": "",
+                "success_criteria_path": "",
+                "benchmark_plan_path": "",
+                "verifier_bundle_path": "",
+                "runtime_plan_path": "",
+                "output_runtime_dir": str(destination),
+                "workspace": str(workspace_path),
+                "agintor_provider": "local",
+                "runtime_provider": "minimax",
+                "mutator_type": "heuristic",
+                "best_train_score": 0.0,
+                "best_goal_score": 0.0,
+                "best_val_score": 0.0,
+                "archive_cells": 0,
+                "accepted_mutations": 0,
+                "export_bundle_file": "",
+                "provenance_bundle_file": "",
+                "export_summary_path": "",
+                "summary_path": "",
+            },
+        )()
+
+    monkeypatch.setattr(cli_module, "build_runtime_from_goal", fake_build_runtime_from_goal)
+
+    result = runner.invoke(
+        app,
+        [
+            "build-runtime",
+            "Build a runtime specialized for exact retrieval.",
+            "--destination",
+            str(tmp_path / "exported"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    workspace_path = captured["workspace"]
+    assert isinstance(workspace_path, Path)
+    assert captured["retain_artifacts"] is False
+    assert Path.cwd() not in workspace_path.resolve().parents
+    assert workspace_path.exists() is False
+
+
 def test_cli_solve_prompt_mode_returns_controlled_failure_when_tool_scope_blocks_exact_path(tmp_path: Path) -> None:
     runtime_dir = tmp_path / "runtime"
     init_result = runner.invoke(app, ["init-runtime", str(runtime_dir)])
