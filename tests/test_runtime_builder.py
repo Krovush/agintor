@@ -207,7 +207,8 @@ def test_build_runtime_exports_highest_goal_score_before_validation(tmp_path: Pa
     assert provenance["runtime_abi"] == RUNTIME_ABI_VERSION
     assert provenance["attestation_hash"]
     assert "marker.txt" in provenance["artifact_file_digests"]
-    assert "agintor/shell.py" in provenance["runtime_identity_inputs"]["immutable_files"]
+    assert "runtime_sdk/agintor_runtime/shell.py" in provenance["runtime_identity_inputs"]["immutable_files"]
+    assert "agintor/shell.py" not in provenance["runtime_identity_inputs"]["immutable_files"]
 
 
 def test_build_runtime_uses_validation_only_to_break_goal_ties(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -615,9 +616,14 @@ def test_build_runtime_writes_frozen_workspace_artifact_chain_and_runtime_only_e
     assert (workspace_root / "goal" / "goal_spec.json").exists()
     assert (workspace_root / "goal" / "success_criteria.json").exists()
     assert (workspace_root / "planning" / "benchmark_plan.json").exists()
+    assert (workspace_root / "planning" / "benchmark_suite.json").exists()
     assert (workspace_root / "planning" / "verifier_bundle.json").exists()
     assert (workspace_root / "planning" / "runtime_plan.json").exists()
     assert (workspace_root / "planning" / "factory_profile.json").exists()
+    assert (workspace_root / "planning" / "deployment_contract.json").exists()
+    assert (workspace_root / "planning" / "assumption_register.json").exists()
+    assert (workspace_root / "planning" / "planning_diagnostics.json").exists()
+    assert (workspace_root / "planning" / "replan_contract.json").exists()
     assert (workspace_root / "export" / "build_summary.json").exists()
     assert (workspace_root / "export" / "export_summary.json").exists()
     assert (workspace_root / "export" / "leaderboard.json").exists()
@@ -629,6 +635,7 @@ def test_build_runtime_writes_frozen_workspace_artifact_chain_and_runtime_only_e
     assert "evaluation" not in exported_profile
     assert "evolution" not in exported_profile
     assert exported_profile["execution"]["max_steps"] == 64
+    assert (tmp_path / "exported" / "runtime_sdk" / "kernel_manifest.json").exists()
 
     build_summary = json.loads((workspace_root / "export" / "build_summary.json").read_text(encoding="utf-8"))
     assert build_summary["goal_spec_path"] == str(workspace_root / "goal" / "goal_spec.json")
@@ -636,6 +643,14 @@ def test_build_runtime_writes_frozen_workspace_artifact_chain_and_runtime_only_e
     assert build_summary["benchmark_plan_path"] == str(workspace_root / "planning" / "benchmark_plan.json")
     assert build_summary["verifier_bundle_path"] == str(workspace_root / "planning" / "verifier_bundle.json")
     assert build_summary["runtime_plan_path"] == str(workspace_root / "planning" / "runtime_plan.json")
+    assert build_summary["deployment_contract_path"] == str(workspace_root / "planning" / "deployment_contract.json")
+    assert build_summary["planning_diagnostics_path"] == str(workspace_root / "planning" / "planning_diagnostics.json")
+    manifest = json.loads((tmp_path / "exported" / "runtime_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["immutable_manifest"] == [
+        "runtime_sdk/kernel_manifest.json",
+        "deployment_contract.json",
+        "runtime_profile.json",
+    ]
 
 
 def test_build_runtime_freezes_explicit_runtime_backend_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

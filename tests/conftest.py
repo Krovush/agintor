@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import atexit
 import json
+import os
 import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,32 +14,49 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS_ROOT = ROOT / "tests"
-TEST_ARTIFACT_ROOT = TESTS_ROOT / "_artifacts"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
-from agintor.artifacts import resolve_recent_timestamped_subfolder
+from agintor.artifacts import ArtifactAllocator, is_path_within
 from agintor.benchmarks import build_demo_suite
 from agintor.project import init_runtime
 from agintor.providers import LocalDeterministicProvider
 
 
-def _cleanup_repo_artifacts() -> None:
-    cleanup_paths = [
-        ROOT / "__pycache__",
-        ROOT / ".pytest_cache",
-        ROOT / "agintor" / "__pycache__",
-        ROOT / "tests" / "__pycache__",
-    ]
-    for path in cleanup_paths:
-        if path.exists():
-            shutil.rmtree(path, ignore_errors=True)
-    for path in ROOT.glob("pytest-cache-files-*"):
-        if path.exists():
-            shutil.rmtree(path, ignore_errors=True)
+def _bootstrap_allocator() -> ArtifactAllocator:
+    return ArtifactAllocator.resolve(
+        repo_root=ROOT,
+        artifact_root=Path(tempfile.gettempdir()) / "agintor",
+    )
+
+
+def _test_artifact_allocator() -> ArtifactAllocator:
+    return ArtifactAllocator.resolve(repo_root=ROOT)
+
+
+def _configure_pytest_artifact_roots(config: pytest.Config) -> None:
+    pytest_root = _bootstrap_allocator().ensure_purpose_root("pytest")
+    requested = getattr(config.option, "basetemp", None)
+    if requested:
+        requested_path = Path(str(requested))
+        if is_path_within(requested_path, ROOT):
+            basetemp = pytest_root / "basetemp_rewritten"
+        else:
+            basetemp = requested_path
+    else:
+        basetemp = pytest_root / "basetemp"
+    config.option.basetemp = str(basetemp.resolve())
+    os.environ["AGINTOR_ARTIFACT_ROOT"] = str((basetemp.resolve() / "agintor_artifacts"))
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+
+
+def _failure_artifacts_enabled() -> bool:
+    raw = str(os.environ.get("AGINTOR_TEST_FAILURE_ARTIFACTS", "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _local_timestamp() -> str:
@@ -111,8 +129,10 @@ class FailureArtifactManager:
         self.failures_by_module.setdefault(module_path, []).append(failure)
 
     def finalize(self) -> None:
-        recent_dir = resolve_recent_timestamped_subfolder(
-            TEST_ARTIFACT_ROOT,
+        if not _failure_artifacts_enabled():
+            return
+        recent_dir = _test_artifact_allocator().timestamped_bucket(
+            purpose="test_failures",
             prefix="run",
             within=timedelta(hours=1),
             create=bool(self.failures_by_module),
@@ -140,23 +160,22 @@ def _failure_artifact_manager(config: pytest.Config) -> FailureArtifactManager:
     return config._agintor_failure_artifact_manager
 
 
-atexit.register(_cleanup_repo_artifacts)
-
-
 def pytest_sessionstart(session) -> None:
     del session
     sys.dont_write_bytecode = True
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:
     _failure_artifact_manager(session.config).finalize()
     del session, exitstatus
     sys.dont_write_bytecode = True
-    _cleanup_repo_artifacts()
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 
 def pytest_configure(config) -> None:
     sys.dont_write_bytecode = True
+    _configure_pytest_artifact_roots(config)
     config._agintor_failure_artifact_manager = FailureArtifactManager()
 
 
@@ -183,8 +202,20 @@ def sandbox_cache_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(autouse=True)
 def _artifact_mode_env(monkeypatch: pytest.MonkeyPatch, sandbox_cache_root: Path) -> None:
+    monkeypatch.setenv("AGINTOR_ARTIFACT_ROOT", os.environ["AGINTOR_ARTIFACT_ROOT"])
     monkeypatch.setenv("AGINTOR_SANDBOX_CACHE_ROOT", str(sandbox_cache_root))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     sys.dont_write_bytecode = True
+
+
+@pytest.fixture(scope="session")
+def external_pytest_basetemp(pytestconfig: pytest.Config) -> Path:
+    return Path(str(pytestconfig.option.basetemp))
+
+
+@pytest.fixture(scope="session")
+def external_artifact_root() -> Path:
+    return Path(os.environ["AGINTOR_ARTIFACT_ROOT"])
 
 
 @pytest.fixture(scope="module")
