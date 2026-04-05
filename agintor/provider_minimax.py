@@ -19,9 +19,9 @@ MINIMAX_PROVIDER_DEFAULTS: dict[str, Any] = {
     "api_key_env": "AGINTOR_MAS_MINIMAX_API_KEY",
     "api_key_file_env": "AGINTOR_MAS_MINIMAX_KEY_FILE",
     "default_models": {
-        "small": "MiniMax-M2.5",
-        "medium": "MiniMax-M2.5",
-        "large": "MiniMax-M2.5",
+        "small": "MiniMax-M2.7-Flash",
+        "medium": "MiniMax-M2.7-Flash",
+        "large": "MiniMax-M2.7-Flash",
     },
     "model_envs": {
         "small": "AGINTOR_MAS_MINIMAX_SMALL_MODEL",

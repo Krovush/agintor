@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
-from .artifacts import ArtifactAllocator
+from .artifacts import ArtifactPolicy
 from .exceptions import SafetyViolation, ValidationError
 from .pydantic_compat import model_copy
 from .schemas import AsyncHandle, ToolExecutionResult, ToolSpec
@@ -177,7 +177,7 @@ def _async_artifact_stem(tool_name: str, handle_id: str) -> str:
 
 
 def _validation_temp_base() -> Path:
-    return ensure_directory(ArtifactAllocator.resolve().artifact_root / "tool_validation")
+    return ensure_directory(ArtifactPolicy.resolve().tool_validation_root)
 
 
 def _materialize_generated_tool(spec: ToolSpec, source: str, sandbox_manager: SandboxManager) -> tuple[ToolSpec, Path]:

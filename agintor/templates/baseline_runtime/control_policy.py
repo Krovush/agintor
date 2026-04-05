@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-from typing import Sequence
-
-from agintor.archive import ScopeScheduler
-
-
 class ControlPolicy:
     MODEL_ORDER = ["small", "medium", "large"]
     MODEL_SPECS = {
@@ -115,12 +110,3 @@ class ControlPolicy:
         if best_optimistic_utility < 0 and previous_best_utility < 0 and unresolved_count == 0:
             return verified_terminal or not require_verified_terminal
         return False
-
-    def score_interface_scope(self, ctx, scope: Sequence[str], parent_eval, child_eval) -> float:
-        if parent_eval is None or child_eval is None:
-            return 0.0
-        delta = child_eval.objective_scores.get("sbar:global", 0.0) - parent_eval.objective_scores.get("sbar:global", 0.0)
-        return delta / max(1, len(scope))
-
-    def update_scope_credit(self, ctx, scheduler: ScopeScheduler, objective: str, scope: Sequence[str], delta: float) -> None:
-        scheduler.update_scope_credit(objective, scope, delta)

@@ -12,11 +12,25 @@ from typing import Any, Dict
 
 from .exceptions import RuntimeLoadError
 from .pydantic_compat import model_dump, model_validate
-from .schemas import DeploymentContract, RuntimeManifest
+from .schemas import CapabilityExchange, DeploymentContract, KernelManifest, RuntimeManifest
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, profile_to_json
+try:
+    from .runtime_sdk import (
+        KERNEL_BUNDLE_DIR,
+        KERNEL_MANIFEST_FILE,
+        KERNEL_PACKAGE_NAME,
+        KERNEL_VERSION,
+        STORAGE_SCHEMA_VERSION,
+    )
+except ImportError:
+    KERNEL_BUNDLE_DIR = "runtime_sdk"
+    KERNEL_MANIFEST_FILE = "kernel_manifest.json"
+    KERNEL_PACKAGE_NAME = "agintor_runtime"
+    KERNEL_VERSION = "agintor-kernel-v1"
+    STORAGE_SCHEMA_VERSION = "agintor-storage-v1"
 from .utils import ast_node_count, file_digest, stable_hash
 
-RUNTIME_ABI_VERSION = "agintor-runtime-abi-v2"
+RUNTIME_ABI_VERSION = "agintor-runtime-abi-v3"
 DEPLOYMENT_CONTRACT_FILE = "deployment_contract.json"
 RUNTIME_EXPORT_BUNDLE_FILE = "runtime_export_bundle.json"
 RUNTIME_PROVENANCE_BUNDLE_FILE = "runtime_provenance_bundle.json"
@@ -34,11 +48,13 @@ def _validate_runtime_abi(runtime_path: Path, manifest: RuntimeManifest) -> None
 class LoadedRuntime:
     runtime_dir: Path
     manifest: RuntimeManifest
+    kernel_manifest: KernelManifest
     deployment_contract: DeploymentContract
     topology: Any
     memory: Any
     tooling: Any
     control: Any
+    capability_exchange: CapabilityExchange
     code_hash: str
     runtime_hash: str
     mutable_ast_nodes: int
@@ -63,6 +79,14 @@ def _load_deployment_contract(runtime_path: Path) -> DeploymentContract:
         raise RuntimeLoadError(
             f"deployment contract ABI mismatch for {runtime_path}: contract={contract.runtime_abi} loader={RUNTIME_ABI_VERSION}"
         )
+    if contract.kernel_version != KERNEL_VERSION:
+        raise RuntimeLoadError(
+            f"deployment contract kernel mismatch for {runtime_path}: contract={contract.kernel_version} loader={KERNEL_VERSION}"
+        )
+    if contract.storage_schema_version != STORAGE_SCHEMA_VERSION:
+        raise RuntimeLoadError(
+            f"deployment contract storage schema mismatch for {runtime_path}: contract={contract.storage_schema_version} loader={STORAGE_SCHEMA_VERSION}"
+        )
     return contract
 
 
@@ -74,6 +98,24 @@ def _without_bytecode_writes():
         yield
     finally:
         sys.dont_write_bytecode = previous
+
+
+def _clear_runtime_package_cache() -> None:
+    removable = [name for name in sys.modules if name == KERNEL_PACKAGE_NAME or name.startswith(f"{KERNEL_PACKAGE_NAME}.")]
+    for name in removable:
+        sys.modules.pop(name, None)
+
+
+@contextlib.contextmanager
+def _runtime_sdk_import_path(runtime_path: Path):
+    bundle_root = (runtime_path / KERNEL_BUNDLE_DIR).resolve()
+    previous_sys_path = list(sys.path)
+    sys.path.insert(0, str(bundle_root))
+    _clear_runtime_package_cache()
+    try:
+        yield
+    finally:
+        sys.path[:] = previous_sys_path
 
 
 def _load_module(module_name: str, path: Path) -> ModuleType:
@@ -89,19 +131,12 @@ def _load_module(module_name: str, path: Path) -> ModuleType:
 def _resolve_manifest_path(runtime_path: Path, rel_path: str) -> Path:
     candidate = Path(rel_path)
     if candidate.is_absolute():
-        if candidate.is_file():
+        if candidate.is_file() and runtime_path.resolve() in candidate.resolve().parents:
             return candidate
         raise RuntimeLoadError(f"missing immutable dependency {rel_path}")
-    package_root = Path(__file__).resolve().parent
-    search_roots = [runtime_path, package_root.parent, package_root]
-    checked: set[Path] = set()
-    for root in search_roots:
-        resolved = (root / candidate).resolve()
-        if resolved in checked:
-            continue
-        checked.add(resolved)
-        if resolved.is_file():
-            return resolved
+    resolved = (runtime_path / candidate).resolve()
+    if runtime_path.resolve() in resolved.parents and resolved.is_file():
+        return resolved
     raise RuntimeLoadError(f"missing immutable dependency {rel_path}")
 
 
@@ -170,6 +205,48 @@ def _validate_deployment_contract(
             )
 
 
+def _load_kernel_manifest(runtime_path: Path) -> KernelManifest:
+    manifest_path = runtime_path / KERNEL_BUNDLE_DIR / KERNEL_MANIFEST_FILE
+    if not manifest_path.exists():
+        raise RuntimeLoadError(f"missing {KERNEL_BUNDLE_DIR}/{KERNEL_MANIFEST_FILE} in {runtime_path}")
+    manifest = model_validate(KernelManifest, json.loads(manifest_path.read_text(encoding="utf-8")))
+    if manifest.runtime_abi != RUNTIME_ABI_VERSION:
+        raise RuntimeLoadError(
+            f"kernel ABI mismatch for {runtime_path}: kernel={manifest.runtime_abi} loader={RUNTIME_ABI_VERSION}"
+        )
+    if manifest.kernel_version != KERNEL_VERSION:
+        raise RuntimeLoadError(
+            f"kernel version mismatch for {runtime_path}: kernel={manifest.kernel_version} loader={KERNEL_VERSION}"
+        )
+    if manifest.storage_schema_version != STORAGE_SCHEMA_VERSION:
+        raise RuntimeLoadError(
+            f"storage schema mismatch for {runtime_path}: kernel={manifest.storage_schema_version} loader={STORAGE_SCHEMA_VERSION}"
+        )
+    return manifest
+
+
+def _verified_kernel_bundle_fingerprints(runtime_path: Path, kernel_manifest: KernelManifest) -> dict[str, str]:
+    bundle_root = (runtime_path / KERNEL_BUNDLE_DIR).resolve()
+    fingerprints: dict[str, str] = {}
+    for rel_path, expected_digest in sorted(kernel_manifest.files.items()):
+        relative_path = Path(rel_path)
+        if relative_path.is_absolute():
+            raise RuntimeLoadError(f"invalid kernel bundle path {rel_path!r} in {runtime_path}")
+        file_path = (bundle_root / relative_path).resolve()
+        if bundle_root != file_path.parent and bundle_root not in file_path.parents:
+            raise RuntimeLoadError(f"kernel bundle path escapes runtime bundle: {rel_path!r}")
+        if not file_path.is_file():
+            raise RuntimeLoadError(f"missing bundled kernel file {rel_path!r} in {runtime_path}")
+        actual_digest = file_digest(file_path)
+        if actual_digest != expected_digest:
+            raise RuntimeLoadError(
+                f"bundled kernel digest mismatch for {rel_path!r} in {runtime_path}: "
+                f"manifest={expected_digest} actual={actual_digest}"
+            )
+        fingerprints[f"{KERNEL_BUNDLE_DIR}/{relative_path.as_posix()}"] = actual_digest
+    return fingerprints
+
+
 def runtime_identity_inputs(
     runtime_dir: str | Path,
     *,
@@ -178,13 +255,14 @@ def runtime_identity_inputs(
 ) -> dict[str, dict[str, str]]:
     runtime_path = Path(runtime_dir)
     manifest = _load_manifest(runtime_path)
+    kernel_manifest = _load_kernel_manifest(runtime_path)
     mutable_fingerprints: dict[str, str] = {}
     for module_ref in manifest.policy_modules.values():
         rel_path, _ = module_ref.split(":", 1)
         module_path = runtime_path / rel_path
         source = module_path.read_text(encoding="utf-8")
         mutable_fingerprints[rel_path] = stable_hash(source)
-    immutable_fingerprints: dict[str, str] = {}
+    immutable_fingerprints = _verified_kernel_bundle_fingerprints(runtime_path, kernel_manifest)
     for rel_path in manifest.immutable_manifest:
         if Path(rel_path).name == RUNTIME_PROFILE_FILE:
             immutable_fingerprints[rel_path] = stable_hash(
@@ -208,6 +286,8 @@ def load_runtime(
 ) -> LoadedRuntime:
     runtime_path = Path(runtime_dir)
     manifest = _load_manifest(runtime_path)
+    kernel_manifest = _load_kernel_manifest(runtime_path)
+    _verified_kernel_bundle_fingerprints(runtime_path, kernel_manifest)
     deployment_contract = _load_deployment_contract(runtime_path)
     _validate_deployment_contract(
         runtime_path,
@@ -218,31 +298,50 @@ def load_runtime(
     policy_objects: Dict[str, Any] = {}
     ast_count = 0
     mutable_loc = 0
-    for key, module_ref in manifest.policy_modules.items():
-        rel_path, class_name = module_ref.split(":", 1)
-        module_path = runtime_path / rel_path
-        module = _load_module(f"agintor_runtime_{runtime_path.name}_{key}", module_path)
-        if not hasattr(module, class_name):
-            raise RuntimeLoadError(f"module {module_path} missing class {class_name}")
-        policy_objects[key] = getattr(module, class_name)()
-        source = module_path.read_text(encoding="utf-8")
-        ast_count += ast_node_count(source)
-        mutable_loc += len(source.splitlines())
+    with _runtime_sdk_import_path(runtime_path):
+        for key, module_ref in manifest.policy_modules.items():
+            rel_path, class_name = module_ref.split(":", 1)
+            module_path = runtime_path / rel_path
+            module = _load_module(f"agintor_runtime_{runtime_path.name}_{key}", module_path)
+            if not hasattr(module, class_name):
+                raise RuntimeLoadError(f"module {module_path} missing class {class_name}")
+            policy_objects[key] = getattr(module, class_name)()
+            source = module_path.read_text(encoding="utf-8")
+            ast_count += ast_node_count(source)
+            mutable_loc += len(source.splitlines())
     identity_inputs = runtime_identity_inputs(
         runtime_path,
         runtime_profile=runtime_profile,
         profile_path=profile_path,
     )
-    code_hash = stable_hash(identity_inputs)
-    runtime_hash = stable_hash(model_dump(manifest), code_hash)
+    code_hash = stable_hash(
+        identity_inputs,
+        kernel_manifest.kernel_version,
+        kernel_manifest.storage_schema_version,
+    )
+    runtime_hash = stable_hash(model_dump(manifest), model_dump(kernel_manifest), code_hash)
+    capability_exchange = CapabilityExchange(
+        runtime_abi=RUNTIME_ABI_VERSION,
+        kernel_version=kernel_manifest.kernel_version,
+        storage_schema_version=kernel_manifest.storage_schema_version,
+        supported_backends=list(deployment_contract.supported_backends),
+        tool_runtimes=["python"],
+        checkpoint_support=True,
+        runtime_asset_capabilities={"traces": True, "checkpoints": True, "runtime_sdk": True},
+        side_effect_receipts=False,
+        required_env_names=list(deployment_contract.required_env_names),
+        capability_flags=list(deployment_contract.capability_flags or kernel_manifest.capability_flags),
+    )
     return LoadedRuntime(
         runtime_dir=runtime_path,
         manifest=manifest,
+        kernel_manifest=kernel_manifest,
         deployment_contract=deployment_contract,
         topology=policy_objects["top"],
         memory=policy_objects["mem"],
         tooling=policy_objects["tool"],
         control=policy_objects["ctl"],
+        capability_exchange=capability_exchange,
         code_hash=code_hash,
         runtime_hash=runtime_hash,
         mutable_ast_nodes=ast_count,
@@ -252,10 +351,12 @@ def load_runtime(
 
 __all__ = [
     "DEPLOYMENT_CONTRACT_FILE",
+    "KERNEL_VERSION",
     "LoadedRuntime",
     "RUNTIME_ABI_VERSION",
     "RUNTIME_EXPORT_BUNDLE_FILE",
     "RUNTIME_PROVENANCE_BUNDLE_FILE",
+    "STORAGE_SCHEMA_VERSION",
     "load_runtime",
     "runtime_identity_inputs",
 ]

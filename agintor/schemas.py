@@ -11,6 +11,63 @@ from pydantic import BaseModel, Field, PrivateAttr, validator
 from .utils import cheap_embedding, stable_hash
 
 
+class ArtifactMetadata(BaseModel):
+    artifact_id: str
+    schema_version: str
+    content_digest: str
+    creation_stage: str
+
+
+class GoalAssumption(BaseModel):
+    assumption_id: str
+    statement: str
+    category: str = "default"
+    source: str = "goal_normalization"
+    hard_constraint: bool = False
+
+
+class PlanningIssue(BaseModel):
+    issue_id: str
+    severity: str
+    message: str
+    repair_action: Optional[str] = None
+    artifact_refs: List[str] = Field(default_factory=list)
+
+
+class PlanningDiagnostics(BaseModel):
+    diagnostics_id: str
+    goal_id: str
+    issues: List[PlanningIssue] = Field(default_factory=list)
+    repaired: bool = False
+    blocked: bool = False
+    artifact_metadata: Optional[ArtifactMetadata] = None
+
+
+class ReplanContract(BaseModel):
+    contract_id: str
+    goal_id: str
+    repairable_artifacts: List[str] = Field(default_factory=list)
+    blocked_stages: List[str] = Field(default_factory=list)
+    raw_goal_reparse_allowed: bool = False
+    status: str = "stable"
+    artifact_metadata: Optional[ArtifactMetadata] = None
+
+
+class ProviderRole(BaseModel):
+    name: str
+    api_key_env: Optional[str] = None
+    api_key_file_env: Optional[str] = None
+    model_map: Dict[str, str] = Field(default_factory=dict)
+
+
+class ProviderPlan(BaseModel):
+    plan_id: str
+    agintor_provider: ProviderRole
+    runtime_provider: ProviderRole
+    runtime_backend: str
+    artifact_metadata: Optional[ArtifactMetadata] = None
+
+
 class GoalSpec(BaseModel):
     goal_id: str
     raw_prompt: str
@@ -23,6 +80,7 @@ class GoalSpec(BaseModel):
     target_families: List[str] = Field(default_factory=list)
     deployment_preferences: Dict[str, Any] = Field(default_factory=dict)
     assumptions: List[str] = Field(default_factory=list)
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class SuccessCriterion(BaseModel):
@@ -41,6 +99,7 @@ class SuccessCriteriaBundle(BaseModel):
     goal_id: str
     criteria: List[SuccessCriterion] = Field(default_factory=list)
     assumptions: List[str] = Field(default_factory=list)
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class BenchmarkPlan(BaseModel):
@@ -54,6 +113,7 @@ class BenchmarkPlan(BaseModel):
     synthetic_task_ids: List[str] = Field(default_factory=list)
     verifier_bundle_id: str
     frozen: bool = True
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class VerifierSpec(BaseModel):
@@ -73,17 +133,25 @@ class VerifierBundle(BaseModel):
     checker_chain_defaults: List[str] = Field(default_factory=list)
     frozen: bool = True
     created_from: Dict[str, Any] = Field(default_factory=dict)
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class DeploymentContract(BaseModel):
     entry_command: str
     runtime_abi: str
+    kernel_version: str = ""
+    storage_schema_version: str = ""
     python_version: str
     supported_backends: List[str] = Field(default_factory=list)
     required_env_names: List[str] = Field(default_factory=list)
+    environment_allowlist: List[str] = Field(default_factory=list)
     network_policy: str
     filesystem_policy: str
+    dependency_digest_set: List[str] = Field(default_factory=list)
+    container_image_digest: Optional[str] = None
+    capability_flags: List[str] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class FactoryProfile(BaseModel):
@@ -94,19 +162,23 @@ class FactoryProfile(BaseModel):
     benchmark_generation: Dict[str, Any] = Field(default_factory=dict)
     leader_selection: Dict[str, Any] = Field(default_factory=dict)
     runtime_backend: str
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class RuntimePlan(BaseModel):
     plan_id: str
     goal_id: str
     runtime_abi: str
+    kernel_version: str = ""
+    storage_schema_version: str = ""
     seed_template: str
     mutable_files: List[str] = Field(default_factory=list)
     immutable_manifest: List[str] = Field(default_factory=list)
     runtime_profile: Dict[str, Any] = Field(default_factory=dict)
-    provider_plan: Dict[str, Any] = Field(default_factory=dict)
+    provider_plan: ProviderPlan
     tooling_scope: List[str] = Field(default_factory=list)
     deployment_contract: DeploymentContract
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class BuildSummary(BaseModel):
@@ -119,6 +191,10 @@ class BuildSummary(BaseModel):
     benchmark_plan_path: str
     verifier_bundle_path: str
     runtime_plan_path: str
+    factory_profile_path: str = ""
+    deployment_contract_path: str = ""
+    planning_diagnostics_path: str = ""
+    replan_contract_path: str = ""
     workspace: str
     output_runtime_dir: str
     history_path: str = ""
@@ -136,6 +212,29 @@ class BuildSummary(BaseModel):
     export_bundle_file: str
     provenance_bundle_file: str
     export_summary_path: str = ""
+    artifact_metadata: Optional[ArtifactMetadata] = None
+
+
+class ExportSummary(BaseModel):
+    export_id: str
+    build_id: str
+    goal_id: str
+    goal_prompt: str
+    runtime_hash: str
+    code_hash: str
+    runtime_id: str
+    runtime_abi: str
+    kernel_version: str
+    storage_schema_version: str
+    source_runtime_dir: str
+    source_runtime_hash: str
+    runtime_profile_path: str
+    deployment_contract_path: str
+    export_bundle_path: str
+    provenance_bundle_path: str
+    leaderboard_path: str
+    runtime_plan_path: str
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class AgentTemplate(BaseModel):
@@ -233,7 +332,7 @@ class MemoryNode(BaseModel):
     provenance: Dict[str, Any]
     tombstoned: bool = False
 
-    @validator("embedding", pre=True, always=True)
+    @validator("embedding", pre=True, always=True, allow_reuse=True)
     def default_embedding(cls, value: Any, values: Dict[str, Any]) -> List[float]:
         if value:
             return list(value)
@@ -380,13 +479,18 @@ class SolveRequest(BaseModel):
 class SolveResult(BaseModel):
     request_id: str
     runtime_hash: str
+    mode: str = "benchmark"
     artifact: Any
     status: str
+    verification_status: str = "best_effort"
     summary: str
     checks: List[Dict[str, Any]] = Field(default_factory=list)
     trace_ref: Optional[str] = None
+    checkpoint_ref: Optional[str] = None
     budget: Dict[str, Any] = Field(default_factory=dict)
+    provider_usage: Dict[str, Any] = Field(default_factory=dict)
     faults: Dict[str, Any] = Field(default_factory=dict)
+    recoverability: str = "none"
     verified: bool = False
     best_effort: bool = False
 
@@ -412,6 +516,7 @@ class RunResult(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     utility: Optional[float] = None
+    checkpoint_ref: Optional[str] = None
 
     @staticmethod
     def _inline_trace_prefix() -> str:
@@ -523,6 +628,17 @@ class RuntimeManifest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class KernelManifest(BaseModel):
+    schema_version: str
+    runtime_abi: str
+    kernel_version: str
+    storage_schema_version: str
+    package_name: str
+    entry_module: str
+    files: Dict[str, str] = Field(default_factory=dict)
+    capability_flags: List[str] = Field(default_factory=list)
+
+
 class ArchiveRecord(BaseModel):
     objective: str
     key: str
@@ -572,3 +688,56 @@ class RuntimeDescriptor(BaseModel):
             mutable_loc=mutable_loc,
             mutable_ast_nodes=mutable_ast_nodes,
         )
+
+
+class CheckpointReference(BaseModel):
+    ref: str
+    task_id: str
+    seed: int
+    checkpoint_count: int = 0
+
+
+class InspectRequest(BaseModel):
+    request_id: str
+    requested_backend: str = "local"
+    expected_runtime_abi: str
+    expected_kernel_version: Optional[str] = None
+    expected_storage_schema_version: Optional[str] = None
+
+
+class ResumeRequest(BaseModel):
+    request_id: str
+    checkpoint_ref: CheckpointReference
+    prompt: Optional[str] = None
+
+
+class CapabilityExchange(BaseModel):
+    runtime_abi: str
+    kernel_version: str
+    storage_schema_version: str
+    supported_backends: List[str] = Field(default_factory=list)
+    tool_runtimes: List[str] = Field(default_factory=list)
+    checkpoint_support: bool = True
+    runtime_asset_capabilities: Dict[str, bool] = Field(default_factory=dict)
+    side_effect_receipts: bool = False
+    required_env_names: List[str] = Field(default_factory=list)
+    capability_flags: List[str] = Field(default_factory=list)
+
+
+class RuntimeTaskInvocation(BaseModel):
+    seed: int
+    task: BenchmarkTask
+
+
+class RuntimeBatchRequest(BaseModel):
+    request_id: str
+    runtime_backend: str
+    budget_overrides: Dict[str, Any] = Field(default_factory=dict)
+    invocations: List[RuntimeTaskInvocation] = Field(default_factory=list)
+
+
+class RuntimeBatchResponse(BaseModel):
+    request_id: str
+    capability_exchange: CapabilityExchange
+    run_results: List[RunResult] = Field(default_factory=list)
+    provider_usage: Dict[str, Any] = Field(default_factory=dict)

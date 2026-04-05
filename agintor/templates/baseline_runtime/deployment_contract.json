@@ -1,13 +1,26 @@
 {
   "entry_command": "agintor solve <runtime_dir> --prompt \"<request>\"",
-  "runtime_abi": "agintor-runtime-abi-v2",
+  "runtime_abi": "agintor-runtime-abi-v3",
+  "kernel_version": "agintor-kernel-v1",
+  "storage_schema_version": "agintor-storage-v1",
   "python_version": ">=3.11",
   "supported_backends": [
     "local",
     "docker"
   ],
   "required_env_names": [],
+  "environment_allowlist": [],
   "network_policy": "provider-only",
   "filesystem_policy": "workspace-read-write",
+  "dependency_digest_set": [],
+  "container_image_digest": null,
+  "capability_flags": [
+    "inspect",
+    "run_batch",
+    "checkpoint_refs",
+    "provider_usage",
+    "benchmark_mode",
+    "prompt_mode"
+  ],
   "notes": []
 }

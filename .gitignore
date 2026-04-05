@@ -1,29 +1,6 @@
 /agintor.egg-info/
-/tests/_artifacts/
-/tests/_artifacts/**
-/tests/_artifacts/run_*/
-/.agintor_runs/
-/.agintor_evo/
-/.agintor*_tmp*/
 /.pytest_cache/
-/pytest-cache-files-*/
-/manual_*
-/_codex_tmp_*/
-/.review_*/
-/.pytest-tmp*/
-/.pytest_tmp*/
-/.tmp_pytest*/
-/.tmp/
-/.tmp_*/
-/.tmp_*
-/temp_*/
-/.temp/
-/.temp_*/
-/.temp-*/
 __pycache__/
 *.py[cod]
 OpenAI API Key.txt
 MiniMax API Key.txt
-/.codex_doc_build/
-/.codex_review_smoke*/
-/.codex_review_tmp*/

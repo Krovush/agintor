@@ -6,10 +6,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .benchmarks import BenchmarkTask
 from .providers import ModelProvider
 from .runtime_profile import RuntimeProfile, default_runtime_profile
-from .schemas import AgentTemplate, Checkpoint, ModelResponse, OperationSpec, RunResult, SolveRequest, SolveResult
+from .schemas import (
+    AgentTemplate,
+    BenchmarkTask,
+    Checkpoint,
+    InspectRequest,
+    ModelResponse,
+    OperationSpec,
+    RunResult,
+    RuntimeBatchRequest,
+    RuntimeTaskInvocation,
+    SolveRequest,
+    SolveResult,
+)
 from .utils import stable_hash
 
 
@@ -549,6 +560,58 @@ def solve_request_to_task(request: SolveRequest) -> BenchmarkTask:
 
 
 def solve_result_from_run_result(request: SolveRequest, run: RunResult, runtime_hash: str) -> SolveResult:
+    return solve_result_from_run_result_with_context(
+        request,
+        run,
+        runtime_hash,
+        mode="user_request",
+        provider_usage={},
+    )
+
+
+def inspect_request_for_runtime(
+    *,
+    request_id: str,
+    requested_backend: str,
+    runtime_abi: str,
+    kernel_version: str,
+    storage_schema_version: str,
+) -> InspectRequest:
+    return InspectRequest(
+        request_id=request_id,
+        requested_backend=requested_backend,
+        expected_runtime_abi=runtime_abi,
+        expected_kernel_version=kernel_version,
+        expected_storage_schema_version=storage_schema_version,
+    )
+
+
+def runtime_batch_request_for_tasks(
+    *,
+    request_id: str,
+    runtime_backend: str,
+    task_runs: list[tuple[BenchmarkTask, int]],
+    budget_overrides: dict[str, Any] | None = None,
+) -> RuntimeBatchRequest:
+    return RuntimeBatchRequest(
+        request_id=request_id,
+        runtime_backend=runtime_backend,
+        budget_overrides=dict(budget_overrides or {}),
+        invocations=[
+            RuntimeTaskInvocation(seed=int(seed), task=task)
+            for task, seed in task_runs
+        ],
+    )
+
+
+def solve_result_from_run_result_with_context(
+    request: SolveRequest,
+    run: RunResult,
+    runtime_hash: str,
+    *,
+    mode: str,
+    provider_usage: dict[str, Any],
+) -> SolveResult:
     trace_rows = run.trace_rows()
     checks = [
         {
@@ -558,29 +621,52 @@ def solve_result_from_run_result(request: SolveRequest, run: RunResult, runtime_
         for row in trace_rows
         if row.get("event") == "check_result"
     ]
+    benchmark_checks = [check for check in checks if check.get("checker") == "benchmark"]
     verified = run.verifier_score >= 1.0 and not run.hard_invalid
     controlled_failure = isinstance(run.artifact, dict) and run.artifact.get("error") == "controlled_failure"
-    best_effort = not verified and not controlled_failure and not run.hard_invalid
+    exact_verifier_failed = bool(benchmark_checks) and not verified and not controlled_failure and not run.hard_invalid
+    partially_checked = bool(checks) and not benchmark_checks and not verified and not controlled_failure and not run.hard_invalid
+    best_effort = not partially_checked and not exact_verifier_failed and not verified and not controlled_failure and not run.hard_invalid
     if run.hard_invalid:
         status = "failed"
+        verification_status = "failed"
         summary = run.invalid_reason or "runtime execution failed"
     elif controlled_failure:
         status = "controlled_failure"
+        verification_status = "required_but_unverified"
         summary = "No verified terminal artifact was available under the task contract."
     elif verified:
         status = "verified"
+        verification_status = "verified"
         summary = "The runtime produced a verified artifact."
+    elif exact_verifier_failed:
+        status = "unverified"
+        verification_status = "exact_verifier_failed"
+        summary = "The runtime produced an artifact, but the exact verifier rejected it."
+    elif partially_checked:
+        status = "partially_checked"
+        verification_status = "partially_checked"
+        summary = "The runtime produced an artifact with non-benchmark checks but no exact verifier."
     else:
         status = "best_effort"
+        verification_status = "best_effort"
         summary = "The runtime produced a best-effort artifact without exact verification."
+    recoverability = "none"
+    if run.checkpoint_ref:
+        recoverability = "checkpoint_available"
+    elif not run.hard_invalid and not controlled_failure:
+        recoverability = "terminal"
     return SolveResult(
         request_id=request.request_id,
         runtime_hash=runtime_hash,
+        mode=mode,
         artifact=run.artifact,
         status=status,
+        verification_status=verification_status,
         summary=summary,
         checks=checks,
         trace_ref=run.trace_ref(),
+        checkpoint_ref=run.checkpoint_ref,
         budget={
             "cost": run.cost,
             "latency": run.latency,
@@ -590,11 +676,13 @@ def solve_result_from_run_result(request: SolveRequest, run: RunResult, runtime_
             "input_tokens": run.input_tokens,
             "output_tokens": run.output_tokens,
         },
+        provider_usage=dict(provider_usage),
         faults={
             "count": run.faults,
             "hard_invalid": run.hard_invalid,
             "invalid_reason": run.invalid_reason,
         },
+        recoverability=recoverability,
         verified=verified,
         best_effort=best_effort,
     )

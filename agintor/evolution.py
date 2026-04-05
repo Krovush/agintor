@@ -52,14 +52,12 @@ class EvolutionEngine:
         profile_path: Path | None = None,
         artifact_mode: str | ArtifactMode | None = None,
         sandbox_root: Path | None = None,
-        retain_artifacts: bool = False,
     ) -> None:
         self.suite = suite
         self.workspace = Path(workspace)
         self.provider = provider
         self.artifact_policy = ArtifactPolicy.resolve(
             artifact_mode=artifact_mode,
-            retain_artifacts=retain_artifacts,
             sandbox_root=sandbox_root,
         )
         self.retain_artifacts = self.artifact_policy.keep_successes
@@ -81,7 +79,6 @@ class EvolutionEngine:
             profile_path=self.profile_path,
             artifact_mode=self.artifact_policy.mode,
             sandbox_root=self.artifact_policy.sandbox_root,
-            retain_artifacts=retain_artifacts,
         )
         self.objectives = objective_specs_from_suite(suite, partition="train")
         self.history: list[EvolutionHistoryRow] = []

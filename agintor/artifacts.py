@@ -125,19 +125,26 @@ def default_artifact_root() -> Path:
     env_root = str(os.environ.get("AGINTOR_ARTIFACT_ROOT", "")).strip()
     if env_root:
         return Path(env_root)
-    return Path(tempfile.gettempdir()) / "agintor" / "artifacts"
+    return Path(tempfile.gettempdir()) / "agintor"
 
 
-def default_sandbox_cache_root() -> Path:
+def default_sandbox_cache_root(
+    *,
+    allocator: ArtifactAllocator | None = None,
+    cache_namespace: str | None = None,
+) -> Path:
     env_root = str(os.environ.get("AGINTOR_SANDBOX_CACHE_ROOT", "")).strip()
     if env_root:
-        return ensure_directory(Path(env_root))
-    return ensure_directory(Path(tempfile.gettempdir()) / "agintor" / "sandbox_cache")
+        root = Path(env_root)
+        if cache_namespace:
+            root = root / stable_hash(cache_namespace)[:12]
+        return root
+    return (allocator or ArtifactAllocator.resolve()).sandbox_cache_root(cache_namespace)
 
 
-def _is_within(path: Path, root: Path) -> bool:
+def is_path_within(path: str | Path, root: str | Path) -> bool:
     try:
-        path.resolve().relative_to(root.resolve())
+        Path(path).resolve().relative_to(Path(root).resolve())
         return True
     except ValueError:
         return False
@@ -148,7 +155,8 @@ class WorkspaceLease:
     path: Path
     purpose: str
     origin: WorkspaceOrigin
-    cleanup_on_release: bool = False
+    cleanup_on_success: bool = False
+    cleanup_on_failure: bool = False
 
     def ensure(self) -> Path:
         return ensure_directory(self.path)
@@ -159,8 +167,9 @@ class WorkspaceLease:
     def ensure_child_dir(self, *parts: str) -> Path:
         return ensure_directory(self.child_path(*parts))
 
-    def release(self) -> None:
-        if not self.cleanup_on_release:
+    def release(self, *, failed: bool = False) -> None:
+        should_cleanup = self.cleanup_on_failure if failed else self.cleanup_on_success
+        if not should_cleanup:
             return
         shutil.rmtree(self.path, ignore_errors=True)
 
@@ -183,26 +192,45 @@ class ArtifactAllocator:
         )
 
     def _assert_implicit_path_allowed(self, path: Path) -> None:
-        if _is_within(path, self.repo_root):
+        if is_path_within(path, self.repo_root):
             raise ValueError(
                 f"implicit artifact path must not live inside repo root: path={path} repo_root={self.repo_root}"
             )
 
-    def _purpose_root(self, purpose: str) -> Path:
-        root = ensure_directory(self.artifact_root / purpose)
+    def purpose_path(self, purpose: str) -> Path:
+        path = self.artifact_root / purpose
+        self._assert_implicit_path_allowed(path)
+        return path
+
+    def ensure_purpose_root(self, purpose: str) -> Path:
+        return ensure_directory(self.purpose_path(purpose))
+
+    def sandbox_cache_root(self, cache_namespace: str | None = None) -> Path:
+        root = self.purpose_path("sandbox_cache")
+        if cache_namespace:
+            root = root / stable_hash(cache_namespace)[:12]
         self._assert_implicit_path_allowed(root)
         return root
+
+    def tool_validation_root(self) -> Path:
+        return self.purpose_path("tool_validation")
 
     def explicit_workspace(self, path: str | Path, *, purpose: str) -> WorkspaceLease:
         return WorkspaceLease(
             path=Path(path),
             purpose=purpose,
             origin=WorkspaceOrigin.EXPLICIT,
-            cleanup_on_release=False,
         )
 
-    def implicit_workspace(self, *, purpose: str, prefix: str | None = None) -> WorkspaceLease:
-        purpose_root = self._purpose_root(purpose)
+    def implicit_workspace(
+        self,
+        *,
+        purpose: str,
+        mode: str | ArtifactMode,
+        prefix: str | None = None,
+    ) -> WorkspaceLease:
+        resolved_mode = parse_artifact_mode(mode)
+        purpose_root = self.ensure_purpose_root(purpose)
         workspace = Path(
             tempfile.mkdtemp(
                 prefix=f"agintor_{(prefix or purpose).strip('_')}_",
@@ -214,13 +242,21 @@ class ArtifactAllocator:
             path=workspace,
             purpose=purpose,
             origin=WorkspaceOrigin.IMPLICIT,
-            cleanup_on_release=True,
+            cleanup_on_success=resolved_mode != ArtifactMode.ALWAYS,
+            cleanup_on_failure=resolved_mode == ArtifactMode.NONE,
         )
 
-    def workspace(self, path: str | Path | None, *, purpose: str, prefix: str | None = None) -> WorkspaceLease:
+    def workspace(
+        self,
+        path: str | Path | None,
+        *,
+        purpose: str,
+        mode: str | ArtifactMode,
+        prefix: str | None = None,
+    ) -> WorkspaceLease:
         if path is not None and str(path).strip():
             return self.explicit_workspace(path, purpose=purpose)
-        return self.implicit_workspace(purpose=purpose, prefix=prefix)
+        return self.implicit_workspace(purpose=purpose, mode=mode, prefix=prefix)
 
     def timestamped_bucket(
         self,
@@ -231,7 +267,7 @@ class ArtifactAllocator:
         now: datetime | None = None,
         create: bool = False,
     ) -> Path | None:
-        root = self._purpose_root(purpose)
+        root = self.purpose_path(purpose)
         return resolve_recent_timestamped_subfolder(
             root,
             prefix=prefix,
@@ -247,6 +283,7 @@ class ArtifactPolicy:
     repo_root: Path
     artifact_root: Path
     sandbox_root: Path
+    tool_validation_root: Path
 
     @classmethod
     def resolve(
@@ -257,15 +294,23 @@ class ArtifactPolicy:
         repo_root: Path | None = None,
         artifact_root: Path | None = None,
         sandbox_root: Path | None = None,
+        tool_validation_root: Path | None = None,
         cache_namespace: str | None = None,
     ) -> "ArtifactPolicy":
+        allocator = ArtifactAllocator.resolve(repo_root=repo_root, artifact_root=artifact_root)
         mode = parse_artifact_mode(artifact_mode, retain_artifacts=retain_artifacts)
-        repo = Path(repo_root) if repo_root is not None else default_repo_root()
-        artifact = Path(artifact_root) if artifact_root is not None else default_artifact_root()
-        root = Path(sandbox_root) if sandbox_root is not None else default_sandbox_cache_root()
-        if cache_namespace:
-            root = ensure_directory(root / stable_hash(cache_namespace)[:12])
-        return cls(mode=mode, repo_root=repo, artifact_root=artifact, sandbox_root=root)
+        sandbox = Path(sandbox_root) if sandbox_root is not None else default_sandbox_cache_root(
+            allocator=allocator,
+            cache_namespace=cache_namespace,
+        )
+        validation = Path(tool_validation_root) if tool_validation_root is not None else allocator.tool_validation_root()
+        return cls(
+            mode=mode,
+            repo_root=allocator.repo_root,
+            artifact_root=allocator.artifact_root,
+            sandbox_root=sandbox,
+            tool_validation_root=validation,
+        )
 
     def allocator(self) -> ArtifactAllocator:
         return ArtifactAllocator.resolve(repo_root=self.repo_root, artifact_root=self.artifact_root)

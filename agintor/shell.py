@@ -10,7 +10,8 @@ from .exceptions import HardInvalidation
 from .memory_graph import LongTermGraph, ShortTermGraph
 from .predictors import DecisionFamilyModelBank
 from .pydantic_compat import model_copy
-from .schemas import AgentTemplate, AsyncHandle
+from .pydantic_compat import model_dump
+from .schemas import AgentTemplate, AsyncHandle, CheckpointReference
 from .tool_runtime import SafetyGuard, SandboxManager, ToolExecutor, ToolRegistry
 from .utils import ensure_directory, now_ts, stable_hash
 
@@ -99,12 +100,10 @@ class FixedShell:
         *,
         artifact_mode: str | ArtifactMode | None = None,
         sandbox_root: Path | None = None,
-        retain_artifacts: bool = False,
     ) -> None:
         self.workspace = Path(workspace)
         self.artifact_policy = ArtifactPolicy.resolve(
             artifact_mode=artifact_mode,
-            retain_artifacts=retain_artifacts,
             sandbox_root=sandbox_root,
         )
         self.retain_artifacts = self.artifact_policy.write_traces
@@ -124,6 +123,7 @@ class FixedShell:
             persist_artifacts=self.artifact_policy.persist_tool_artifacts,
         )
         self.trace_dir = self.workspace / "traces"
+        self.checkpoint_dir = self.workspace / "checkpoints"
         self._current_task_id: str | None = None
         self._current_episode_id: str | None = None
         self._memory_scope_kind: str | None = None
@@ -152,6 +152,27 @@ class FixedShell:
         path = self.trace_dir / f"{task_id.replace('/', '_')}_{seed}.json"
         path.write_text(json.dumps(trace, indent=2, sort_keys=True), encoding="utf-8")
         return path
+
+    def save_checkpoints(self, task_id: str, seed: int, checkpoints: Mapping[str, Any]) -> CheckpointReference | None:
+        if not checkpoints:
+            return None
+        ensure_directory(self.checkpoint_dir)
+        path = self.checkpoint_dir / f"{task_id.replace('/', '_')}_{seed}.json"
+        payload = {
+            "task_id": task_id,
+            "seed": seed,
+            "checkpoints": {
+                key: model_dump(value) if hasattr(value, "model_dump") or hasattr(value, "dict") else value
+                for key, value in checkpoints.items()
+            },
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return CheckpointReference(
+            ref=str(path),
+            task_id=task_id,
+            seed=seed,
+            checkpoint_count=len(checkpoints),
+        )
 
     def validate_invariants(self, transfer_scored: bool = False) -> None:
         self.open_handles.validate()

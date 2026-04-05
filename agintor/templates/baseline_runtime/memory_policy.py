@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from agintor.prompts import load_prompt_spec
-from agintor.schemas import MemoryNode, SummaryRecord
-from agintor.utils import cheap_embedding, cosine_similarity, jaccard, lexical_overlap, sigmoid
+from agintor_runtime.prompts import load_prompt_spec
+from agintor_runtime.schemas import MemoryNode, SummaryRecord
+from agintor_runtime.utils import cheap_embedding, cosine_similarity, jaccard, lexical_overlap, sigmoid
 
 
 class MemoryPolicy:
