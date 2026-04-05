@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import inspect
 import json
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Optional
 
 import typer
 
+from .artifacts import ArtifactAllocator, WorkspaceLease, WorkspaceOrigin
 from .benchmarks import BenchmarkSuite, load_suite
 from .exceptions import AgintorError
 from .evaluator import RuntimeEvaluator
@@ -89,10 +88,10 @@ def _load_prompt_input(prompt: Optional[str], prompt_file: Optional[str]) -> str
     raise typer.BadParameter("provide either a prompt argument or --prompt-file")
 
 
-def _resolve_workspace(workspace: Optional[str], prefix: str) -> tuple[Path, bool]:
-    if workspace and workspace.strip():
-        return Path(workspace), True
-    return Path(tempfile.mkdtemp(prefix=f"agintor_{prefix}_")), False
+def _resolve_workspace(workspace: Optional[str], purpose: str) -> tuple[WorkspaceLease, bool]:
+    lease = ArtifactAllocator.resolve().workspace(workspace, purpose=purpose, prefix=purpose)
+    retain_artifacts = lease.origin == WorkspaceOrigin.EXPLICIT
+    return lease, retain_artifacts
 
 
 @app.command("init-runtime")
@@ -128,7 +127,8 @@ def solve_cmd(
     runtime = load_runtime(runtime_dir, runtime_profile=runtime_profile, runtime_backend=runtime_backend)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
     effective_provider = provider or runtime_profile.runtime_provider.name
-    workspace_path, retain_artifacts = _resolve_workspace(workspace, "runs")
+    workspace_lease, retain_artifacts = _resolve_workspace(workspace, "solve")
+    workspace_path = workspace_lease.path
     try:
         solve_request = None
         if task_id:
@@ -170,8 +170,7 @@ def solve_cmd(
             "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary()),
         }, indent=2, sort_keys=True))
     finally:
-        if not retain_artifacts:
-            shutil.rmtree(workspace_path, ignore_errors=True)
+        workspace_lease.release()
 
 
 @app.command("eval")
@@ -190,7 +189,8 @@ def eval_cmd(
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
     effective_provider = provider or runtime_profile.runtime_provider.name
-    workspace_path, retain_artifacts = _resolve_workspace(workspace, "runs")
+    workspace_lease, retain_artifacts = _resolve_workspace(workspace, "eval")
+    workspace_path = workspace_lease.path
     try:
         evaluator = RuntimeEvaluator(
             benchmark,
@@ -206,8 +206,7 @@ def eval_cmd(
         evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=_parse_seeds(seeds), use_cache=False)
         typer.echo(json.dumps({**model_dump(evaluation), "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary())}, indent=2, sort_keys=True))
     finally:
-        if not retain_artifacts:
-            shutil.rmtree(workspace_path, ignore_errors=True)
+        workspace_lease.release()
 
 
 @app.command("evolve")
@@ -225,22 +224,26 @@ def evolve_cmd(
     benchmark = load_suite(suite)
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=False)
-    workspace_path, retain_artifacts = _resolve_workspace(workspace, "evo")
-    engine = EvolutionEngine(
-        benchmark,
-        workspace_path,
-        provider_impl,
-        Path(runtime_dir),
-        mutator_type=mutator,
-        reference_runtime_dir=_reference_runtime_dir(provider, runtime_dir),
-        runtime_backend=runtime_backend,
-        artifact_mode="always" if retain_artifacts else "none",
-        retain_artifacts=retain_artifacts,
-        **_supported_kwargs(EvolutionEngine, runtime_profile=runtime_profile, profile_path=profile),
-    )
-    usage_before = provider_impl.usage_summary()
-    summary = engine.run(steps=steps)
-    typer.echo(json.dumps({**summary.__dict__, "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary())}, indent=2, sort_keys=True))
+    workspace_lease, retain_artifacts = _resolve_workspace(workspace, "evolve")
+    workspace_path = workspace_lease.path
+    try:
+        engine = EvolutionEngine(
+            benchmark,
+            workspace_path,
+            provider_impl,
+            Path(runtime_dir),
+            mutator_type=mutator,
+            reference_runtime_dir=_reference_runtime_dir(provider, runtime_dir),
+            runtime_backend=runtime_backend,
+            artifact_mode="always" if retain_artifacts else "none",
+            retain_artifacts=retain_artifacts,
+            **_supported_kwargs(EvolutionEngine, runtime_profile=runtime_profile, profile_path=profile),
+        )
+        usage_before = provider_impl.usage_summary()
+        summary = engine.run(steps=steps)
+        typer.echo(json.dumps({**summary.__dict__, "provider_usage": _usage_delta(usage_before, provider_impl.usage_summary())}, indent=2, sort_keys=True))
+    finally:
+        workspace_lease.release()
 
 
 @app.command("build-runtime")
@@ -259,7 +262,8 @@ def build_runtime_cmd(
 ) -> None:
     prompt_text = _load_prompt_input(prompt, prompt_file)
     provider_impl = _build_provider(provider, api_key_file, None, default_to_runtime_profile=False)
-    workspace_path, retain_artifacts = _resolve_workspace(workspace, "build")
+    workspace_lease, retain_artifacts = _resolve_workspace(workspace, "build")
+    workspace_path = workspace_lease.path
     try:
         result = build_runtime_from_goal(
             prompt_text,
@@ -276,6 +280,8 @@ def build_runtime_cmd(
     except (AgintorError, RuntimeError, ValueError, FileExistsError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
+    finally:
+        workspace_lease.release()
     typer.echo(json.dumps(result.__dict__, indent=2, sort_keys=True))
 
 
