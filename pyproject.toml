@@ -41,6 +41,8 @@ minversion = "8.0"
 addopts = "-q -p no:cacheprovider --assert=plain -m \"not heavy and not docker and not live_openai\""
 testpaths = ["tests"]
 norecursedirs = ["_artifacts"]
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 markers = [
   "integration: runtime-backed integration coverage that should stay in the default offline suite",
   "heavy: runtime-heavy coverage kept out of the default fast suite",
