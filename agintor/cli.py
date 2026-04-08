@@ -271,7 +271,7 @@ def build_runtime_cmd(
     destination: str = typer.Option(..., "--destination"),
     prompt_file: Optional[str] = typer.Option(None, "--prompt-file"),
     steps: int = typer.Option(10, "--steps"),
-    provider: str = typer.Option("local", "--provider", "--agintor-provider"),
+    provider: Optional[str] = typer.Option(None, "--provider", "--agintor-provider"),
     api_key_file: Optional[str] = typer.Option(None, "--api-key-file"),
     profile: Optional[str] = typer.Option(None, "--profile"),
     mutator: str = typer.Option("heuristic", "--mutator"),
@@ -281,7 +281,8 @@ def build_runtime_cmd(
     force: bool = typer.Option(False, "--force"),
 ) -> None:
     prompt_text = _load_prompt_input(prompt, prompt_file)
-    provider_impl = _build_provider(provider, api_key_file, None, default_to_runtime_profile=False)
+    runtime_profile = load_runtime_profile(profile_path=profile) if profile is not None else None
+    provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
     workspace_lease = _resolve_workspace(workspace, "build", artifact_mode)
     workspace_path = workspace_lease.path
     failed = True

@@ -26,6 +26,7 @@ _KERNEL_SOURCE_FILES = [
     "artifacts.py",
     "exceptions.py",
     "memory_graph.py",
+    "openai_trace.py",
     "provider_common.py",
     "provider_minimax.py",
     "provider_openai.py",
