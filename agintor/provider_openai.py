@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
+from .openai_trace import persist_openai_trace
 from .provider_common import (
     HostedProviderBase,
     count_tokens_rough,
@@ -20,9 +21,9 @@ OPENAI_PROVIDER_DEFAULTS: dict[str, Any] = {
     "api_key_env": "OPENAI_API_KEY",
     "api_key_file_env": "AGINTOR_OPENAI_KEY_FILE",
     "default_models": {
-        "small": "gpt-5-nano",
-        "medium": "gpt-5.4",
-        "large": "gpt-5.4",
+        "small": "gpt-5.4-mini",
+        "medium": "gpt-5.4-mini",
+        "large": "gpt-5.4-mini",
     },
     "model_envs": {
         "small": "AGINTOR_OPENAI_SMALL_MODEL",
@@ -33,9 +34,9 @@ OPENAI_PROVIDER_DEFAULTS: dict[str, Any] = {
 }
 
 OPENAI_REASONING_DEFAULTS = {
-    "small": "none",
-    "medium": "none",
-    "large": "medium",
+    "small": "high",
+    "medium": "high",
+    "large": "high",
 }
 
 
@@ -164,7 +165,28 @@ class OpenAIProvider(HostedProviderBase):
             payload["max_output_tokens"] = max_output_tokens
         payload.update(kwargs)
         method = getattr(client.responses, method_name)
-        response = method(**payload)  # pragma: no cover - live path only
+        try:
+            response = method(**payload)  # pragma: no cover - live path only
+        except Exception as exc:
+            persist_openai_trace(
+                provider=self.provider_name,
+                method_name=method_name,
+                model_class=model_class,
+                model_name=model_name,
+                reasoning_effort=reasoning_effort,
+                instructions=instructions,
+                input_value=input,
+                request_payload=payload,
+                request_metadata=metadata,
+                response=None,
+                response_text="",
+                input_tokens=count_tokens_rough(f"{instructions}\n{stringify_response_input(input)}"),
+                output_tokens=0,
+                total_tokens=0,
+                latency_s=time.perf_counter() - start,
+                error=str(exc),
+            )
+            raise
         recorded = self._response_to_model_response(
             response=response,
             model_name=model_name,
@@ -172,6 +194,24 @@ class OpenAIProvider(HostedProviderBase):
             reasoning_effort=reasoning_effort,
         )
         recorded.latency_s = time.perf_counter() - start
+        persist_openai_trace(
+            provider=self.provider_name,
+            method_name=method_name,
+            model_class=model_class,
+            model_name=model_name,
+            reasoning_effort=reasoning_effort,
+            instructions=instructions,
+            input_value=input,
+            request_payload=payload,
+            request_metadata=metadata,
+            response=response,
+            response_text=recorded.text,
+            input_tokens=recorded.input_tokens,
+            output_tokens=recorded.output_tokens,
+            total_tokens=recorded.token_estimate,
+            latency_s=recorded.latency_s,
+            error=None,
+        )
         if record_usage:
             self._record_usage(recorded)
         return response, recorded

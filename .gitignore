@@ -27,3 +27,5 @@ MiniMax API Key.txt
 /.codex_doc_build/
 /.codex_review_smoke*/
 /.codex_review_tmp*/
+/openai_api_traces/
+/agintor/templates/baseline_runtime/

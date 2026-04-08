@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,6 +132,34 @@ class ProviderPatchMutator:
     def __init__(self, provider: ModelProvider) -> None:
         self.provider = provider
 
+    @staticmethod
+    def _coerce_patch_text(text: str) -> str:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return stripped
+        try:
+            payload = json.loads(stripped)
+        except Exception:
+            return stripped
+        if isinstance(payload, dict):
+            for key in ("patch_text", "patch", "response"):
+                candidate = payload.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+        return stripped
+
+    def _request_patch(self, *, instructions: str, prompt: str, model_class: str, seed: int, mode: str) -> str:
+        response = self.provider.generate(
+            ModelRequest(
+                instructions=instructions,
+                prompt=prompt,
+                model_class=model_class,
+                seed=seed,
+                metadata={"mode": mode, "max_output_tokens": 16000},
+            )
+        )
+        return self._coerce_patch_text(response.text)
+
     def mutate(self, context: MutationContext) -> MutationCandidate:
         prompt = build_mutation_prompt(
             context.runtime_dir,
@@ -143,17 +172,37 @@ class ProviderPatchMutator:
         )
         profile = context.runtime_profile or load_runtime_profile(context.runtime_dir)
         spec = load_prompt_spec(profile.prompts.mutation_patch)
-        response = self.provider.generate(
-            ModelRequest(
-                instructions=spec.instructions,
-                prompt=prompt,
+        patch_text = self._request_patch(
+            instructions=spec.instructions,
+            prompt=prompt,
+            model_class=spec.model_class,
+            seed=context.seed,
+            mode="patch",
+        )
+        try:
+            parse_patch(patch_text)
+        except Exception:
+            repair_instructions = (
+                "Return only exact SEARCH/REPLACE blocks. "
+                "Repair the candidate answer into valid SEARCH/REPLACE blocks against the original mutation prompt. "
+                "Do not include prose or code fences."
+            )
+            repair_prompt = json.dumps(
+                {
+                    "original_prompt": prompt,
+                    "candidate_answer": patch_text,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            patch_text = self._request_patch(
+                instructions=repair_instructions,
+                prompt=repair_prompt,
                 model_class=spec.model_class,
                 seed=context.seed,
-                metadata={"mode": "patch", "max_output_tokens": 16000},
+                mode="patch_repair",
             )
-        )
-        patch_text = response.text.strip()
-        parse_patch(patch_text)
+            parse_patch(patch_text)
         return MutationCandidate(runtime_dir=str(context.runtime_dir), patch_text=patch_text, touched_scope=context.touched_scope, prompt=prompt, objective=context.objective)
 
 
