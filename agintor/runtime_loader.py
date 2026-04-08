@@ -140,6 +140,16 @@ def _resolve_manifest_path(runtime_path: Path, rel_path: str) -> Path:
     raise RuntimeLoadError(f"missing immutable dependency {rel_path}")
 
 
+def _resolve_runtime_owned_path(runtime_path: Path, rel_path: str, *, label: str) -> Path:
+    candidate = Path(rel_path)
+    if candidate.is_absolute():
+        raise RuntimeLoadError(f"{label} must be runtime-relative: {rel_path}")
+    resolved = (runtime_path / candidate).resolve()
+    if runtime_path.resolve() in resolved.parents and resolved.is_file():
+        return resolved
+    raise RuntimeLoadError(f"missing {label} {rel_path}")
+
+
 def _effective_profile_payload(
     runtime_path: Path,
     runtime_profile: RuntimeProfile | None,
@@ -203,6 +213,16 @@ def _validate_deployment_contract(
             raise RuntimeLoadError(
                 f"missing required runtime environment variables for {runtime_path}: {', '.join(sorted(missing))}"
             )
+        missing_any_of = []
+        for group in contract.required_env_any_of:
+            candidates = [str(name).strip() for name in group if str(name).strip()]
+            if candidates and not any(os.environ.get(name) for name in candidates):
+                missing_any_of.append(candidates)
+        if missing_any_of:
+            rendered = "; ".join(f"one of {', '.join(sorted(group))}" for group in missing_any_of)
+            raise RuntimeLoadError(
+                f"missing required runtime environment variables for {runtime_path}: {rendered}"
+            )
 
 
 def _load_kernel_manifest(runtime_path: Path) -> KernelManifest:
@@ -259,7 +279,7 @@ def runtime_identity_inputs(
     mutable_fingerprints: dict[str, str] = {}
     for module_ref in manifest.policy_modules.values():
         rel_path, _ = module_ref.split(":", 1)
-        module_path = runtime_path / rel_path
+        module_path = _resolve_runtime_owned_path(runtime_path, rel_path, label="policy module")
         source = module_path.read_text(encoding="utf-8")
         mutable_fingerprints[rel_path] = stable_hash(source)
     immutable_fingerprints = _verified_kernel_bundle_fingerprints(runtime_path, kernel_manifest)
@@ -301,7 +321,7 @@ def load_runtime(
     with _runtime_sdk_import_path(runtime_path):
         for key, module_ref in manifest.policy_modules.items():
             rel_path, class_name = module_ref.split(":", 1)
-            module_path = runtime_path / rel_path
+            module_path = _resolve_runtime_owned_path(runtime_path, rel_path, label="policy module")
             module = _load_module(f"agintor_runtime_{runtime_path.name}_{key}", module_path)
             if not hasattr(module, class_name):
                 raise RuntimeLoadError(f"module {module_path} missing class {class_name}")
@@ -330,6 +350,7 @@ def load_runtime(
         runtime_asset_capabilities={"traces": True, "checkpoints": True, "runtime_sdk": True},
         side_effect_receipts=False,
         required_env_names=list(deployment_contract.required_env_names),
+        required_env_any_of=[list(group) for group in deployment_contract.required_env_any_of],
         capability_flags=list(deployment_contract.capability_flags or kernel_manifest.capability_flags),
     )
     return LoadedRuntime(

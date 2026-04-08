@@ -149,7 +149,7 @@ class ProviderPatchMutator:
                 prompt=prompt,
                 model_class=spec.model_class,
                 seed=context.seed,
-                metadata={"mode": "patch"},
+                metadata={"mode": "patch", "max_output_tokens": 16000},
             )
         )
         patch_text = response.text.strip()

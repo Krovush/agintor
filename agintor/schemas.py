@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr, validator
+from pydantic import BaseModel, Field, PrivateAttr, root_validator, validator
 
 from .utils import cheap_embedding, stable_hash
 
@@ -24,6 +24,13 @@ class GoalAssumption(BaseModel):
     category: str = "default"
     source: str = "goal_normalization"
     hard_constraint: bool = False
+
+
+class AssumptionRegister(BaseModel):
+    register_id: str
+    goal_id: str
+    assumptions: List[GoalAssumption] = Field(default_factory=list)
+    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class PlanningIssue(BaseModel):
@@ -144,6 +151,7 @@ class DeploymentContract(BaseModel):
     python_version: str
     supported_backends: List[str] = Field(default_factory=list)
     required_env_names: List[str] = Field(default_factory=list)
+    required_env_any_of: List[List[str]] = Field(default_factory=list)
     environment_allowlist: List[str] = Field(default_factory=list)
     network_policy: str
     filesystem_policy: str
@@ -198,6 +206,10 @@ class BuildSummary(BaseModel):
     workspace: str
     output_runtime_dir: str
     history_path: str = ""
+    archive_index_path: str = ""
+    validation_history_path: str = ""
+    stage_failures_path: str = ""
+    leaderboard_path: str = ""
     leader_runtime_hash: str = ""
     leader_runtime_dir: str = ""
     runtime_abi: str = ""
@@ -212,6 +224,7 @@ class BuildSummary(BaseModel):
     export_bundle_file: str
     provenance_bundle_file: str
     export_summary_path: str = ""
+    export_validation_path: str = ""
     artifact_metadata: Optional[ArtifactMetadata] = None
 
 
@@ -232,8 +245,33 @@ class ExportSummary(BaseModel):
     deployment_contract_path: str
     export_bundle_path: str
     provenance_bundle_path: str
-    leaderboard_path: str
-    runtime_plan_path: str
+    leaderboard_path: str = ""
+    runtime_plan_path: str = ""
+    artifact_metadata: Optional[ArtifactMetadata] = None
+
+
+class ExportValidationCheck(BaseModel):
+    check_id: str
+    check_type: str
+    status: str
+    summary: str
+    request_mode: str = ""
+    provider_name: str = ""
+    verification_status: str = ""
+    observed_artifact: Any = None
+    observed_model_calls: int = 0
+
+
+class ExportValidationReceipt(BaseModel):
+    validation_id: str
+    build_id: str
+    goal_id: str
+    runtime_hash: str
+    runtime_id: str
+    runtime_abi: str
+    certified_properties: List[str] = Field(default_factory=list)
+    uncertified_properties: List[str] = Field(default_factory=list)
+    checks: List[ExportValidationCheck] = Field(default_factory=list)
     artifact_metadata: Optional[ArtifactMetadata] = None
 
 
@@ -495,6 +533,27 @@ class SolveResult(BaseModel):
     best_effort: bool = False
 
 
+class RuntimeSolveRequest(BaseModel):
+    request_id: str
+    runtime_backend: str
+    mode: Literal["benchmark", "user_request"]
+    seed: int = 0
+    task: Optional["BenchmarkTask"] = None
+    solve_request: Optional[SolveRequest] = None
+    budget_overrides: Dict[str, Any] = Field(default_factory=dict)
+
+    @root_validator(pre=False, allow_reuse=True)
+    def validate_mode_payload(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        mode = values.get("mode")
+        task = values.get("task")
+        solve_request = values.get("solve_request")
+        if mode == "benchmark" and task is None:
+            raise ValueError("benchmark solve requests require a benchmark task")
+        if mode == "user_request" and solve_request is None:
+            raise ValueError("user_request solve requests require a solve_request payload")
+        return values
+
+
 class RunResult(BaseModel):
     task_id: str
     seed: int
@@ -721,7 +780,14 @@ class CapabilityExchange(BaseModel):
     runtime_asset_capabilities: Dict[str, bool] = Field(default_factory=dict)
     side_effect_receipts: bool = False
     required_env_names: List[str] = Field(default_factory=list)
+    required_env_any_of: List[List[str]] = Field(default_factory=list)
     capability_flags: List[str] = Field(default_factory=list)
+
+
+class RuntimeSolveResponse(BaseModel):
+    request_id: str
+    capability_exchange: CapabilityExchange
+    solve_result: SolveResult
 
 
 class RuntimeTaskInvocation(BaseModel):

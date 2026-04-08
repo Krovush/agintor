@@ -54,7 +54,7 @@ def load_api_key_from_file(path: str | Path, *, provider_label: str = "Hosted pr
     key_path = Path(path)
     if not key_path.exists():
         raise AgintorError(f"{provider_label} API key file does not exist: {key_path}")
-    content = key_path.read_text(encoding="utf-8").strip()
+    content = key_path.read_text(encoding="utf-8").lstrip("\ufeff").strip()
     if not content:
         raise AgintorError(f"{provider_label} API key file is empty: {key_path}")
     for raw_line in content.splitlines():
@@ -344,9 +344,30 @@ class HostedProviderBase(ModelProvider):
         self.pricing_map = normalize_pricing_map(pricing_map, pricing_env=self.pricing_env)
         self._client = None
 
+    def _credential_hints(self) -> list[str]:
+        hints: list[str] = []
+        if self.api_key_env:
+            hints.append(str(self.api_key_env))
+        if self.api_key_file_env:
+            hints.append(str(self.api_key_file_env))
+        return hints
+
+    def _ensure_credentials_available(self) -> None:
+        if self.api_key:
+            return
+        expected = self._credential_hints()
+        provider_label = str(self.provider_name or "hosted provider").strip()
+        if expected:
+            raise AgintorError(
+                f"{provider_label} credentials are required for hosted model calls. "
+                f"Provide one of: {', '.join(expected)}."
+            )
+        raise AgintorError(f"{provider_label} credentials are required for hosted model calls.")
+
     def _client_or_raise(self):
         if self._client is not None:
             return self._client
+        self._ensure_credentials_available()
         try:
             from openai import OpenAI
         except Exception as exc:  # pragma: no cover - exercised only in live environments

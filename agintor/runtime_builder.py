@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import secrets
 import shutil
 import sys
 from dataclasses import dataclass
@@ -13,8 +14,10 @@ from .benchmarks import BenchmarkSuite, build_demo_suite
 from .evolution import EvolutionEngine
 from .goal_rubric import build_goal_spec, build_success_criteria_bundle, canonical_goal_prompt
 from .project import baseline_template_dir, init_runtime
-from .providers import ModelProvider
+from .providers import LocalDeterministicProvider, ModelProvider
 from .pydantic_compat import model_copy, model_dump, model_validate
+from .runtime_api import load_solve_request, runtime_solve_request_for_user_request
+from .runtime_host import RuntimeHost
 from .runtime_loader import (
     DEPLOYMENT_CONTRACT_FILE,
     KERNEL_VERSION,
@@ -27,10 +30,10 @@ from .runtime_loader import (
 )
 from .runtime_profile import (
     RUNTIME_PROFILE_FILE,
+    HostedProviderProfile,
     RuntimeProfile,
     factory_profile_payload,
     load_runtime_profile,
-    profile_to_json,
     runtime_profile_payload,
 )
 from .runtime_sdk import (
@@ -43,9 +46,12 @@ from .runtime_sdk import (
 from .schemas import (
     ArchiveEntry,
     ArchiveRecord,
+    AssumptionRegister,
     BenchmarkPlan,
     BuildSummary,
     DeploymentContract,
+    ExportValidationCheck,
+    ExportValidationReceipt,
     ExportSummary,
     FactoryProfile,
     GoalAssumption,
@@ -57,6 +63,7 @@ from .schemas import (
     ReplanContract,
     RuntimeManifest,
     RuntimePlan,
+    ModelRequest,
     SuccessCriteriaBundle,
     VerifierBundle,
     VerifierSpec,
@@ -87,7 +94,42 @@ class BuiltRuntimeResult:
     export_bundle_file: str
     provenance_bundle_file: str
     export_summary_path: str
+    export_validation_path: str
     summary_path: str
+
+
+@dataclass(frozen=True)
+class BuildWorkspaceLayout:
+    root: Path
+    goal_dir: Path
+    planning_dir: Path
+    seed_runtime_dir: Path
+    evolution_dir: Path
+    export_dir: Path
+
+
+def _build_workspace_layout(workspace: str | Path, clean_goal: str) -> BuildWorkspaceLayout:
+    workspace_root = ensure_directory(Path(workspace))
+    prefix = f"build_{stable_hash(clean_goal)[:8]}_"
+    build_root: Path | None = None
+    for _ in range(128):
+        candidate = workspace_root / f"{prefix}{secrets.token_hex(4)}"
+        try:
+            candidate.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            continue
+        build_root = candidate
+        break
+    if build_root is None:
+        raise RuntimeError(f"unable to allocate a unique build workspace under {workspace_root}")
+    return BuildWorkspaceLayout(
+        root=build_root,
+        goal_dir=ensure_directory(build_root / "goal"),
+        planning_dir=ensure_directory(build_root / "planning"),
+        seed_runtime_dir=build_root / "seed_runtime",
+        evolution_dir=ensure_directory(build_root / "evolution"),
+        export_dir=ensure_directory(build_root / "export"),
+    )
 
 
 def _goal_task_id(goal_input: GoalSpec | str) -> str:
@@ -149,6 +191,193 @@ def build_goal_conditioned_suite(goal_input: GoalSpec | str, profile: RuntimePro
     )
 
 
+def _merge_mapping(base: dict[str, Any], updates: Any) -> dict[str, Any]:
+    if not isinstance(updates, dict):
+        return dict(base)
+    return {**dict(base), **updates}
+
+
+def _normalize_partition_task_ids(
+    requested_task_ids: Iterable[str],
+    *,
+    available_task_ids: Iterable[str],
+    default_task_ids: list[str],
+    task_family_map: dict[str, str],
+    family_targets: Iterable[str],
+    excluded_task_ids: Iterable[str] = (),
+) -> list[str]:
+    available = set(available_task_ids)
+    excluded = set(excluded_task_ids)
+    required_families = {family for family in family_targets if family}
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for task_id in requested_task_ids:
+        if task_id not in available or task_id in seen:
+            continue
+        normalized.append(task_id)
+        seen.add(task_id)
+    if not normalized:
+        return list(default_task_ids)
+
+    required_family_defaults: dict[str, list[str]] = {}
+    for task_id in default_task_ids:
+        if task_id in excluded:
+            continue
+        family = task_family_map.get(task_id)
+        if family not in required_families:
+            continue
+        required_family_defaults.setdefault(family, []).append(task_id)
+
+    covered_families = {
+        task_family_map[task_id]
+        for task_id in normalized
+        if task_id not in excluded and task_id in task_family_map
+    }
+    for family in sorted(required_families):
+        if family in covered_families:
+            continue
+        for task_id in required_family_defaults.get(family, []):
+            if task_id in seen:
+                continue
+            normalized.append(task_id)
+            seen.add(task_id)
+    return normalized
+
+
+def _normalize_benchmark_plan_against_suite(
+    benchmark_plan: BenchmarkPlan,
+    suite: BenchmarkSuite,
+    *,
+    goal_spec: GoalSpec,
+) -> BenchmarkPlan:
+    default_plan = _build_benchmark_plan(goal_spec, suite)
+    available_ids = {
+        "train": [task.task_id for task in suite.train],
+        "proxy": [task.task_id for task in suite.proxy],
+        "val": [task.task_id for task in suite.val],
+        "test": [task.task_id for task in suite.test],
+    }
+    known_ids = {task_id for values in available_ids.values() for task_id in values}
+    synthetic_ids = [
+        task.task_id
+        for task in suite.train
+        if task.metadata.get("goal_conditioned") is True
+    ]
+    payload = model_dump(benchmark_plan)
+    payload["goal_id"] = goal_spec.goal_id
+    payload["family_targets"] = [
+        family
+        for family in payload.get("family_targets", [])
+        if family in {"top", "mem", "tool", "e2e"}
+    ]
+    if not payload["family_targets"]:
+        payload["family_targets"] = list(default_plan.family_targets)
+    expected_synthetic_ids = list(default_plan.synthetic_task_ids)
+    payload["train_task_ids"] = _normalize_partition_task_ids(
+        payload.get("train_task_ids", []),
+        available_task_ids=available_ids["train"],
+        default_task_ids=list(default_plan.train_task_ids),
+        task_family_map=suite.task_family_map("train"),
+        family_targets=payload["family_targets"],
+        excluded_task_ids=expected_synthetic_ids,
+    )
+    payload["proxy_task_ids"] = [task_id for task_id in payload.get("proxy_task_ids", []) if task_id in available_ids["proxy"]] or list(default_plan.proxy_task_ids)
+    payload["val_task_ids"] = _normalize_partition_task_ids(
+        payload.get("val_task_ids", []),
+        available_task_ids=available_ids["val"],
+        default_task_ids=list(default_plan.val_task_ids),
+        task_family_map=suite.task_family_map("val"),
+        family_targets=payload["family_targets"],
+    )
+    payload["test_task_ids"] = _normalize_partition_task_ids(
+        payload.get("test_task_ids", []),
+        available_task_ids=available_ids["test"],
+        default_task_ids=list(default_plan.test_task_ids),
+        task_family_map=suite.task_family_map("test"),
+        family_targets=payload["family_targets"],
+    )
+    payload["synthetic_task_ids"] = [task_id for task_id in payload.get("synthetic_task_ids", []) if task_id in known_ids and task_id in synthetic_ids]
+    if expected_synthetic_ids and set(payload["synthetic_task_ids"]) != set(expected_synthetic_ids):
+        payload["synthetic_task_ids"] = list(default_plan.synthetic_task_ids)
+    for task_id in payload["synthetic_task_ids"]:
+        if task_id not in payload["train_task_ids"]:
+            payload["train_task_ids"].append(task_id)
+    payload["frozen"] = True
+    return model_validate(BenchmarkPlan, payload)
+
+
+def _maybe_provider_refine_planning(
+    provider: ModelProvider,
+    *,
+    goal_prompt: str,
+    goal_spec: GoalSpec,
+    success_bundle: SuccessCriteriaBundle,
+    benchmark_plan: BenchmarkPlan,
+    suite: BenchmarkSuite,
+) -> tuple[GoalSpec, SuccessCriteriaBundle, BenchmarkPlan]:
+    provider_name = getattr(provider, "provider_name", provider.__class__.__name__).strip().lower()
+    if provider_name == "local":
+        return goal_spec, success_bundle, benchmark_plan
+    request = ModelRequest(
+        instructions=(
+            "Return strict JSON with keys goal_spec, success_criteria, and benchmark_plan. "
+            "Preserve the same goal_id, bundle_id, plan_id, and verifier_bundle_id. "
+            "Only revise fields when the raw goal clearly supports the revision."
+        ),
+        prompt=json.dumps(
+            {
+                "raw_goal": goal_prompt,
+                "goal_spec": model_dump(goal_spec),
+                "success_criteria": model_dump(success_bundle),
+                "benchmark_plan": model_dump(benchmark_plan),
+            },
+            sort_keys=True,
+        ),
+        model_class="large",
+        seed=0,
+        metadata={"mode": "planning", "max_output_tokens": 16000},
+    )
+    try:
+        response = provider.generate(request)
+        payload = json.loads(response.text)
+    except Exception:
+        return goal_spec, success_bundle, benchmark_plan
+    if not isinstance(payload, dict):
+        return goal_spec, success_bundle, benchmark_plan
+    goal_payload = payload.get("goal_spec")
+    if isinstance(goal_payload, dict):
+        merged_goal = _merge_mapping(model_dump(goal_spec), goal_payload)
+        merged_goal["goal_id"] = goal_spec.goal_id
+        merged_goal["raw_prompt"] = goal_spec.raw_prompt
+        merged_goal["constraints"] = _merge_mapping(goal_spec.constraints, goal_payload.get("constraints"))
+        merged_goal["deployment_preferences"] = _merge_mapping(goal_spec.deployment_preferences, goal_payload.get("deployment_preferences"))
+        goal_spec = model_validate(GoalSpec, merged_goal)
+        success_bundle = build_success_criteria_bundle(goal_spec)
+        benchmark_plan = _normalize_benchmark_plan_against_suite(
+            _build_benchmark_plan(goal_spec, suite),
+            suite,
+            goal_spec=goal_spec,
+        )
+    success_payload = payload.get("success_criteria")
+    if isinstance(success_payload, dict):
+        merged_success = _merge_mapping(model_dump(success_bundle), success_payload)
+        merged_success["bundle_id"] = success_bundle.bundle_id
+        merged_success["goal_id"] = goal_spec.goal_id
+        success_bundle = model_validate(SuccessCriteriaBundle, merged_success)
+    benchmark_payload = payload.get("benchmark_plan")
+    if isinstance(benchmark_payload, dict):
+        merged_plan = _merge_mapping(model_dump(benchmark_plan), benchmark_payload)
+        merged_plan["plan_id"] = benchmark_plan.plan_id
+        merged_plan["goal_id"] = goal_spec.goal_id
+        merged_plan["verifier_bundle_id"] = benchmark_plan.verifier_bundle_id
+        benchmark_plan = _normalize_benchmark_plan_against_suite(
+            model_validate(BenchmarkPlan, merged_plan),
+            suite,
+            goal_spec=goal_spec,
+        )
+    return goal_spec, success_bundle, benchmark_plan
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
@@ -185,6 +414,24 @@ def _write_json(path: Path, payload: Any) -> Path:
     return path
 
 
+def _artifact_envelope(
+    payload: dict[str, Any],
+    *,
+    artifact_id: str,
+    schema_version: str,
+    creation_stage: str,
+) -> dict[str, Any]:
+    clean_payload = {key: value for key, value in payload.items() if key != "artifact_metadata"}
+    envelope = dict(clean_payload)
+    envelope["artifact_metadata"] = {
+        "artifact_id": artifact_id,
+        "schema_version": schema_version,
+        "content_digest": stable_hash(clean_payload),
+        "creation_stage": creation_stage,
+    }
+    return envelope
+
+
 def _persist_model(
     path: Path,
     model_cls: type[Any],
@@ -203,6 +450,29 @@ def _persist_model(
         )
     _write_json(path, value)
     return model_validate(model_cls, json.loads(path.read_text(encoding="utf-8")))
+
+
+def _persist_assumption_register(path: Path, goal_spec: GoalSpec) -> AssumptionRegister:
+    assumptions = [
+        GoalAssumption(
+            assumption_id=f"{goal_spec.goal_id}.assumption.{index}",
+            statement=statement,
+        )
+        for index, statement in enumerate(goal_spec.assumptions, start=1)
+    ]
+    register = AssumptionRegister(
+        register_id=f"assumptions.{goal_spec.goal_id}",
+        goal_id=goal_spec.goal_id,
+        assumptions=assumptions,
+    )
+    return _persist_model(
+        path,
+        AssumptionRegister,
+        register,
+        artifact_id=register.register_id,
+        schema_version="agintor.assumption_register.v1",
+        creation_stage="goal_normalization",
+    )
 
 
 def _load_template_manifest() -> RuntimeManifest:
@@ -263,6 +533,107 @@ def _write_runtime_provenance_bundle(
     (destination_path / RUNTIME_PROVENANCE_BUNDLE_FILE).write_text(
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
+    )
+
+
+def _write_export_snapshot(path: Path, payload: Any) -> Path:
+    _write_json(path, payload)
+    return path
+
+
+def _runtime_relative_path(root: Path, path: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def _validate_exported_runtime(
+    destination_path: Path,
+    *,
+    build_id: str,
+    goal_id: str,
+    runtime_id: str,
+    runtime_hash: str,
+    runtime_backend: str,
+    runtime_profile: RuntimeProfile,
+    export_dir: Path,
+) -> ExportValidationReceipt:
+    """Validate the exported runtime boundary and write a narrow readiness receipt.
+
+    This check proves that the exported runtime loads through inspect and that
+    prompt-mode solve routes through the exported runtime boundary. It does not
+    certify live hosted-provider availability or external credentials.
+    """
+    export_host = RuntimeHost(
+        export_dir / ".runtime_host",
+        runtime_backend=runtime_backend,
+        artifact_mode=ArtifactMode.NONE,
+    )
+    capability_exchange = export_host.inspect(destination_path)
+    checks = [
+        ExportValidationCheck(
+            check_id=f"{build_id}.inspect",
+            check_type="inspect_capability_exchange",
+            status="passed",
+            summary="The exported runtime completed capability exchange through the runtime boundary.",
+            request_mode="inspect",
+        )
+    ]
+    validation_request = runtime_solve_request_for_user_request(
+        runtime_backend=runtime_backend,
+        seed=0,
+        solve_request=load_solve_request(
+            prompt="Given the numbers [2, 3, 5], compute the sum and product and return JSON with keys sum and product."
+        ),
+    )
+    validation_response = export_host.solve(
+        destination_path,
+        validation_request,
+        provider=LocalDeterministicProvider(),
+        runtime_profile=runtime_profile,
+    )
+    solve_result = validation_response.solve_result
+    observed_model_calls = int(solve_result.budget.get("model_calls", 0) or 0)
+    if not solve_result.verified or solve_result.artifact != {"sum": 10, "product": 30}:
+        raise RuntimeError("exported runtime failed deterministic prompt-mode solve validation")
+    if observed_model_calls != 0:
+        raise RuntimeError("exported runtime deterministic prompt-mode validation unexpectedly used model calls")
+    checks.append(
+        ExportValidationCheck(
+            check_id=f"{build_id}.prompt_solve",
+            check_type="deterministic_prompt_solve",
+            status="passed",
+            summary="The exported runtime completed prompt solve through the runtime boundary with a verified deterministic artifact and no model calls.",
+            request_mode="user_request",
+            provider_name="local_deterministic",
+            verification_status=solve_result.verification_status,
+            observed_artifact=solve_result.artifact,
+            observed_model_calls=observed_model_calls,
+        )
+    )
+    return _persist_model(
+        export_dir / "export_validation.json",
+        ExportValidationReceipt,
+        ExportValidationReceipt(
+            validation_id=f"export-validation.{build_id}",
+            build_id=build_id,
+            goal_id=goal_id,
+            runtime_hash=runtime_hash,
+            runtime_id=runtime_id,
+            runtime_abi=capability_exchange.runtime_abi,
+            certified_properties=[
+                "The exported runtime completed inspect through the host/runtime protocol boundary.",
+                "Prompt-mode solve executed through the exported runtime boundary rather than host-side imports.",
+                "Deployment-contract compatibility and missing-environment checks are surfaced as host/runtime contract errors.",
+            ],
+            uncertified_properties=[
+                "This validation does not certify live hosted-provider availability.",
+                "This validation does not certify the presence or correctness of external credentials.",
+                "This validation does not certify network reachability to hosted endpoints at build time.",
+            ],
+            checks=checks,
+        ),
+        artifact_id=f"export-validation.{build_id}",
+        schema_version="agintor.export_validation.v1",
+        creation_stage="export",
     )
 
 
@@ -327,11 +698,19 @@ def _tooling_scope_from_suite(suite: BenchmarkSuite) -> list[str]:
 
 
 def _required_runtime_env_names(profile: RuntimeProfile) -> list[str]:
-    env_names: list[str] = []
-    api_key_env = str(profile.runtime_provider.api_key_env or "").strip()
-    if api_key_env:
-        env_names.append(api_key_env)
-    return env_names
+    return []
+
+
+def _required_runtime_env_any_of(profile: RuntimeProfile) -> list[list[str]]:
+    credential_group = [
+        name
+        for name in [
+            str(profile.runtime_provider.api_key_env or "").strip(),
+            str(profile.runtime_provider.api_key_file_env or "").strip(),
+        ]
+        if name
+    ]
+    return [credential_group] if credential_group else []
 
 
 def _build_benchmark_plan(goal_spec: GoalSpec, suite: BenchmarkSuite) -> BenchmarkPlan:
@@ -415,9 +794,11 @@ def _build_deployment_contract(goal_spec: GoalSpec, profile: RuntimeProfile) -> 
         notes.append(
             f"{profile.runtime_provider.api_key_file_env} may be used as a key-file alternative for the default runtime provider."
         )
+    required_env_any_of = _required_runtime_env_any_of(profile)
     environment_allowlist = sorted(
         {
             *[str(name).strip() for name in _required_runtime_env_names(profile)],
+            *[name for group in required_env_any_of for name in group],
             str(profile.runtime_provider.base_url_env or "").strip(),
             str(profile.runtime_provider.pricing_env or "").strip(),
         }
@@ -431,6 +812,7 @@ def _build_deployment_contract(goal_spec: GoalSpec, profile: RuntimeProfile) -> 
         python_version=">=3.11",
         supported_backends=list(goal_spec.deployment_preferences.get("supported_backends", ["local", "docker"])),
         required_env_names=_required_runtime_env_names(profile),
+        required_env_any_of=required_env_any_of,
         environment_allowlist=environment_allowlist,
         network_policy=str(goal_spec.constraints.get("network_policy", "provider-only")),
         filesystem_policy=str(goal_spec.constraints.get("filesystem_policy", "workspace-read-write")),
@@ -515,12 +897,19 @@ def _build_runtime_plan(
     )
 
 
-def _write_seed_runtime(seed_runtime_dir: Path, runtime_plan: RuntimePlan, profile: RuntimeProfile) -> None:
+def _factory_runtime_profile_for_plan(profile: RuntimeProfile, runtime_plan: RuntimePlan) -> RuntimeProfile:
+    payload = model_dump(profile)
+    runtime_payload = dict(runtime_plan.runtime_profile)
+    payload["prompts"] = _merge_mapping(payload.get("prompts", {}), runtime_payload.get("prompts"))
+    for key in ("runtime_provider", "execution", "topology", "memory", "tooling", "control"):
+        if key in runtime_payload:
+            payload[key] = runtime_payload[key]
+    return model_validate(RuntimeProfile, payload)
+
+
+def _write_seed_runtime(seed_runtime_dir: Path, runtime_plan: RuntimePlan) -> None:
     init_runtime(seed_runtime_dir, force=True)
-    (seed_runtime_dir / RUNTIME_PROFILE_FILE).write_text(
-        profile_to_json(profile, runtime_only=True),
-        encoding="utf-8",
-    )
+    _write_json(seed_runtime_dir / RUNTIME_PROFILE_FILE, runtime_plan.runtime_profile)
     _write_json(seed_runtime_dir / DEPLOYMENT_CONTRACT_FILE, runtime_plan.deployment_contract)
 
 
@@ -533,27 +922,43 @@ def _score_rows_for_candidates(
         record.entry.runtime_hash: _mean_goal_score(record.entry.scores, goal_keys)
         for record in candidates
     }
-    best_goal_score = max(goal_scores.values(), default=float("-inf"))
-    top_goal_hashes = {
-        runtime_hash
-        for runtime_hash, score in goal_scores.items()
-        if score == best_goal_score
-    }
-    validation_scores: dict[str, float] = {}
+    validation_scores: dict[str, float | None] = {}
+    validation_errors: dict[str, str] = {}
+    winning_goal_score: float | None = None
+    grouped_candidates: dict[float, list[ArchiveRecord]] = {}
     for record in candidates:
-        if record.entry.runtime_hash not in top_goal_hashes:
-            continue
-        validation = engine.evaluator.evaluate_validation(Path(record.runtime_dir))
-        validation_scores[record.entry.runtime_hash] = validation.objective_scores.get("sbar:global", float("-inf"))
+        grouped_candidates.setdefault(goal_scores[record.entry.runtime_hash], []).append(record)
+    for goal_score in sorted(grouped_candidates, reverse=True):
+        successful_validations = False
+        for record in grouped_candidates[goal_score]:
+            runtime_hash = record.entry.runtime_hash
+            try:
+                validation = engine.evaluator.evaluate_validation(Path(record.runtime_dir))
+            except Exception as exc:
+                validation_errors[runtime_hash] = str(exc)
+                continue
+            validation_scores[runtime_hash] = validation.objective_scores.get("sbar:global", float("-inf"))
+            successful_validations = True
+        if successful_validations:
+            winning_goal_score = goal_score
+            break
     rows: list[dict[str, Any]] = []
     for record in candidates:
+        runtime_hash = record.entry.runtime_hash
+        export_eligible = (
+            winning_goal_score is not None
+            and goal_scores[runtime_hash] == winning_goal_score
+            and runtime_hash in validation_scores
+        )
         rows.append(
             {
-                "runtime_hash": record.entry.runtime_hash,
+                "runtime_hash": runtime_hash,
                 "runtime_dir": record.runtime_dir,
-                "goal_score": goal_scores[record.entry.runtime_hash],
-                "validation_score": validation_scores.get(record.entry.runtime_hash),
-                "validation_evaluated": record.entry.runtime_hash in validation_scores,
+                "goal_score": goal_scores[runtime_hash],
+                "validation_score": validation_scores.get(runtime_hash),
+                "validation_evaluated": runtime_hash in validation_scores or runtime_hash in validation_errors,
+                "validation_error": validation_errors.get(runtime_hash),
+                "export_eligible": export_eligible,
                 "train_score": record.entry.scores.get("sbar:global", float("-inf")),
                 "mutable_loc": record.entry.mutable_loc,
                 "scope_tag": record.entry.scope_tag,
@@ -563,6 +968,7 @@ def _score_rows_for_candidates(
     return sorted(
         rows,
         key=lambda row: (
+            0 if row["export_eligible"] else 1,
             -row["goal_score"],
             0 if row["validation_score"] is None else -row["validation_score"],
             -row["train_score"],
@@ -573,14 +979,20 @@ def _score_rows_for_candidates(
 
 
 def _persist_benchmark_suite(path: Path, suite: BenchmarkSuite) -> BenchmarkSuite:
-    payload = {
-        "schema_version": "agintor.benchmark.v1",
-        "name": suite.name,
-        "train": [model_dump(task) for task in suite.train],
-        "val": [model_dump(task) for task in suite.val],
-        "test": [model_dump(task) for task in suite.test],
-        "proxy": [model_dump(task) for task in suite.proxy],
-    }
+    payload = _artifact_envelope(
+        {
+            "suite_id": f"benchmark-suite.{suite.name}",
+            "schema_version": "agintor.benchmark.v1",
+            "name": suite.name,
+            "train": [model_dump(task) for task in suite.train],
+            "val": [model_dump(task) for task in suite.val],
+            "test": [model_dump(task) for task in suite.test],
+            "proxy": [model_dump(task) for task in suite.proxy],
+        },
+        artifact_id=f"benchmark-suite.{suite.name}",
+        schema_version="agintor.benchmark.v1",
+        creation_stage="benchmark_planning",
+    )
     _write_json(path, payload)
     reloaded = json.loads(path.read_text(encoding="utf-8"))
     return BenchmarkSuite(
@@ -592,14 +1004,76 @@ def _persist_benchmark_suite(path: Path, suite: BenchmarkSuite) -> BenchmarkSuit
     )
 
 
-def _assumption_register(goal_spec: GoalSpec) -> list[GoalAssumption]:
-    return [
-        GoalAssumption(
-            assumption_id=f"{goal_spec.goal_id}.assumption.{index}",
-            statement=statement,
+def _goal_requires_repo_writes(goal_spec: GoalSpec) -> bool:
+    tokens = {
+        *[str(token).lower() for token in goal_spec.goal_keywords],
+        *[str(token).lower() for token in goal_spec.goal_phrases],
+    }
+    return any(token in tokens for token in {"edit", "file", "files", "patch", "repo", "repository"})
+
+
+def _runtime_provider_name(runtime_plan: RuntimePlan) -> str:
+    return str(runtime_plan.provider_plan.runtime_provider.name or "").strip().lower()
+
+
+def _filesystem_is_read_only(policy: str) -> bool:
+    normalized = str(policy or "").strip().lower()
+    return "read-only" in normalized or normalized in {"readonly", "read_only", "none"}
+
+
+def _repair_planning_artifacts(
+    goal_spec: GoalSpec,
+    suite: BenchmarkSuite,
+    benchmark_plan: BenchmarkPlan,
+    verifier_bundle: VerifierBundle,
+    runtime_plan: RuntimePlan,
+    deployment_contract: DeploymentContract,
+    diagnostics: PlanningDiagnostics,
+) -> tuple[VerifierBundle, RuntimePlan, DeploymentContract, bool]:
+    repaired = False
+    repaired_bundle = verifier_bundle
+    repaired_runtime_plan = runtime_plan
+    repaired_contract = deployment_contract
+    issue_ids = {issue.issue_id for issue in diagnostics.issues}
+    requested_backend = str(goal_spec.constraints.get("runtime_backend", "")).strip().lower()
+    if f"{goal_spec.goal_id}.backend" in issue_ids and requested_backend in {"local", "docker"}:
+        repaired_contract = model_copy(
+            repaired_contract,
+            update={"supported_backends": [requested_backend]},
         )
-        for index, statement in enumerate(goal_spec.assumptions, start=1)
-    ]
+        repaired_runtime_plan = model_copy(
+            repaired_runtime_plan,
+            update={"deployment_contract": repaired_contract},
+        )
+        repaired = True
+    if any(issue_id.startswith(f"{goal_spec.goal_id}.verifier.") for issue_id in issue_ids):
+        repaired_bundle = _build_verifier_bundle(benchmark_plan, suite)
+        repaired = True
+    if f"{goal_spec.goal_id}.provider.network" in issue_ids:
+        runtime_profile_payload = dict(repaired_runtime_plan.runtime_profile)
+        runtime_profile_payload["runtime_provider"] = model_dump(HostedProviderProfile(name="local"))
+        repaired_contract = model_copy(
+            repaired_contract,
+            update={
+                "required_env_names": [],
+                "required_env_any_of": [],
+                "environment_allowlist": [],
+                "notes": [*list(repaired_contract.notes), "Runtime provider was repaired to local deterministic mode because network access is restricted."],
+            },
+        )
+        repaired_runtime_plan = model_copy(
+            repaired_runtime_plan,
+            update={
+                "runtime_profile": runtime_profile_payload,
+                "provider_plan": model_copy(
+                    repaired_runtime_plan.provider_plan,
+                    update={"runtime_provider": ProviderRole(name="local")},
+                ),
+                "deployment_contract": repaired_contract,
+            },
+        )
+        repaired = True
+    return repaired_bundle, repaired_runtime_plan, repaired_contract, repaired
 
 
 def _plan_consistency_check(
@@ -619,6 +1093,29 @@ def _plan_consistency_check(
                 message=f"requested runtime backend {requested_backend!r} is not supported by the deployment contract",
                 repair_action="align deployment contract supported_backends with the requested backend",
                 artifact_refs=["goal/goal_spec.json", "planning/runtime_plan.json"],
+            )
+        )
+    if _goal_requires_repo_writes(goal_spec) and _filesystem_is_read_only(runtime_plan.deployment_contract.filesystem_policy):
+        issues.append(
+            PlanningIssue(
+                issue_id=f"{goal_spec.goal_id}.filesystem",
+                severity="error",
+                message="the normalized goal implies repository writes, but the deployment contract is read-only",
+                repair_action="align filesystem_policy with the repo-edit requirement or narrow the goal to read-only work",
+                artifact_refs=["goal/goal_spec.json", "planning/runtime_plan.json", "planning/deployment_contract.json"],
+            )
+        )
+    if (
+        str(runtime_plan.deployment_contract.network_policy).strip().lower() == "restricted"
+        and _runtime_provider_name(runtime_plan) not in {"", "local"}
+    ):
+        issues.append(
+            PlanningIssue(
+                issue_id=f"{goal_spec.goal_id}.provider.network",
+                severity="error",
+                message="the runtime provider requires network access, but the deployment contract forbids network use",
+                repair_action="switch the runtime provider plan to the local deterministic provider",
+                artifact_refs=["planning/runtime_plan.json", "planning/deployment_contract.json"],
             )
         )
     if goal_spec.constraints.get("network_policy") == "restricted" and "tool" in goal_spec.target_families:
@@ -653,7 +1150,12 @@ def _plan_consistency_check(
     replan_contract = ReplanContract(
         contract_id=f"replan.{stable_hash(goal_spec.goal_id, diagnostics.diagnostics_id)[:12]}",
         goal_id=goal_spec.goal_id,
-        repairable_artifacts=["planning/benchmark_plan.json", "planning/verifier_bundle.json", "planning/runtime_plan.json"],
+        repairable_artifacts=[
+            "planning/benchmark_plan.json",
+            "planning/verifier_bundle.json",
+            "planning/runtime_plan.json",
+            "planning/deployment_contract.json",
+        ],
         blocked_stages=["seed_runtime_materialization"] if diagnostics.blocked else [],
         raw_goal_reparse_allowed=False,
         status="repair_required" if diagnostics.issues else "stable",
@@ -677,61 +1179,70 @@ def build_runtime_from_goal(
     clean_goal = canonical_goal_prompt(goal_prompt)
     if not clean_goal:
         raise ValueError("goal prompt may not be empty")
-    build_id = f"build.{stable_hash(clean_goal)[:12]}"
     destination_path = Path(destination)
-    build_root = ensure_directory(Path(workspace) / f"build_{stable_hash(clean_goal)[:8]}")
-    goal_dir = ensure_directory(build_root / "goal")
-    planning_dir = ensure_directory(build_root / "planning")
-    export_dir = ensure_directory(build_root / "export")
-    evolution_dir = ensure_directory(build_root / "evolution")
-    seed_runtime_dir = build_root / "seed_runtime"
+    layout = _build_workspace_layout(workspace, clean_goal)
+    build_id = f"build.{stable_hash(clean_goal, layout.root.name)[:12]}"
     agintor_provider = getattr(provider, "provider_name", provider.__class__.__name__.lower())
     effective_runtime_backend = (runtime_backend or "local").strip().lower()
     merged_profile = load_runtime_profile(profile_path=profile_path)
-    (goal_dir / "raw_goal.txt").write_text(clean_goal, encoding="utf-8")
+    (layout.goal_dir / "raw_goal.txt").write_text(clean_goal, encoding="utf-8")
 
+    local_goal_spec = build_goal_spec(
+        clean_goal,
+        runtime_provider_name=merged_profile.runtime_provider.name,
+        default_runtime_backend=effective_runtime_backend,
+    )
+    local_success_bundle = build_success_criteria_bundle(local_goal_spec)
+    local_suite = build_goal_conditioned_suite(local_goal_spec, merged_profile)
+    local_benchmark_plan = _normalize_benchmark_plan_against_suite(
+        _build_benchmark_plan(local_goal_spec, local_suite),
+        local_suite,
+        goal_spec=local_goal_spec,
+    )
+    goal_spec, success_bundle, benchmark_plan = _maybe_provider_refine_planning(
+        provider,
+        goal_prompt=clean_goal,
+        goal_spec=local_goal_spec,
+        success_bundle=local_success_bundle,
+        benchmark_plan=local_benchmark_plan,
+        suite=local_suite,
+    )
+    goal_suite = _persist_benchmark_suite(
+        layout.planning_dir / "benchmark_suite.json",
+        build_goal_conditioned_suite(goal_spec, merged_profile),
+    )
+    benchmark_plan = _normalize_benchmark_plan_against_suite(
+        benchmark_plan,
+        goal_suite,
+        goal_spec=goal_spec,
+    )
     goal_spec = _persist_model(
-        goal_dir / "goal_spec.json",
+        layout.goal_dir / "goal_spec.json",
         GoalSpec,
-        build_goal_spec(
-            clean_goal,
-            runtime_provider_name=merged_profile.runtime_provider.name,
-            default_runtime_backend=effective_runtime_backend,
-        ),
+        goal_spec,
         artifact_id=f"goal-spec.{build_id}",
         schema_version="agintor.goal_spec.v1",
         creation_stage="goal_normalization",
     )
-    assumption_register = _assumption_register(goal_spec)
-    _write_json(
-        planning_dir / "assumption_register.json",
-        {
-            "goal_id": goal_spec.goal_id,
-            "assumptions": [model_dump(item) for item in assumption_register],
-        },
-    )
+    _persist_assumption_register(layout.planning_dir / "assumption_register.json", goal_spec)
     success_bundle = _persist_model(
-        goal_dir / "success_criteria.json",
+        layout.goal_dir / "success_criteria.json",
         SuccessCriteriaBundle,
-        build_success_criteria_bundle(goal_spec),
+        success_bundle,
         artifact_id=f"success-criteria.{goal_spec.goal_id}",
         schema_version="agintor.success_criteria.v1",
         creation_stage="success_criteria_extraction",
     )
-    goal_suite = _persist_benchmark_suite(
-        planning_dir / "benchmark_suite.json",
-        build_goal_conditioned_suite(goal_spec, merged_profile),
-    )
     benchmark_plan = _persist_model(
-        planning_dir / "benchmark_plan.json",
+        layout.planning_dir / "benchmark_plan.json",
         BenchmarkPlan,
-        _build_benchmark_plan(goal_spec, goal_suite),
+        benchmark_plan,
         artifact_id=f"benchmark-plan.{goal_spec.goal_id}",
         schema_version="agintor.benchmark_plan.v1",
         creation_stage="benchmark_planning",
     )
     verifier_bundle = _persist_model(
-        planning_dir / "verifier_bundle.json",
+        layout.planning_dir / "verifier_bundle.json",
         VerifierBundle,
         _build_verifier_bundle(benchmark_plan, goal_suite),
         artifact_id=benchmark_plan.verifier_bundle_id,
@@ -740,7 +1251,7 @@ def build_runtime_from_goal(
     )
     goal_keys = _goal_score_keys(goal_spec, goal_suite)
     factory_profile = _persist_model(
-        planning_dir / "factory_profile.json",
+        layout.planning_dir / "factory_profile.json",
         FactoryProfile,
         _build_factory_profile(
             merged_profile,
@@ -756,7 +1267,7 @@ def build_runtime_from_goal(
         creation_stage="runtime_planning",
     )
     runtime_plan = _persist_model(
-        planning_dir / "runtime_plan.json",
+        layout.planning_dir / "runtime_plan.json",
         RuntimePlan,
         _build_runtime_plan(
             goal_spec,
@@ -772,7 +1283,7 @@ def build_runtime_from_goal(
         creation_stage="runtime_planning",
     )
     deployment_contract = _persist_model(
-        planning_dir / DEPLOYMENT_CONTRACT_FILE,
+        layout.planning_dir / DEPLOYMENT_CONTRACT_FILE,
         DeploymentContract,
         runtime_plan.deployment_contract,
         artifact_id=f"deployment-contract.{goal_spec.goal_id}",
@@ -780,9 +1291,9 @@ def build_runtime_from_goal(
         creation_stage="runtime_planning",
     )
     runtime_plan = _persist_model(
-        planning_dir / "runtime_plan.json",
+        layout.planning_dir / "runtime_plan.json",
         RuntimePlan,
-        runtime_plan.copy(update={"deployment_contract": deployment_contract}),
+        model_copy(runtime_plan, update={"deployment_contract": deployment_contract}),
         artifact_id=f"runtime-plan.{goal_spec.goal_id}",
         schema_version="agintor.runtime_plan.v1",
         creation_stage="runtime_planning",
@@ -793,37 +1304,80 @@ def build_runtime_from_goal(
         verifier_bundle,
         runtime_plan,
     )
+    verifier_bundle, runtime_plan, deployment_contract, repaired = _repair_planning_artifacts(
+        goal_spec,
+        goal_suite,
+        benchmark_plan,
+        verifier_bundle,
+        runtime_plan,
+        deployment_contract,
+        planning_diagnostics,
+    )
+    if repaired:
+        verifier_bundle = _persist_model(
+            layout.planning_dir / "verifier_bundle.json",
+            VerifierBundle,
+            verifier_bundle,
+            artifact_id=benchmark_plan.verifier_bundle_id,
+            schema_version="agintor.verifier_bundle.v1",
+            creation_stage="repair_planning",
+        )
+        deployment_contract = _persist_model(
+            layout.planning_dir / DEPLOYMENT_CONTRACT_FILE,
+            DeploymentContract,
+            deployment_contract,
+            artifact_id=f"deployment-contract.{goal_spec.goal_id}",
+            schema_version="agintor.deployment_contract.v1",
+            creation_stage="repair_planning",
+        )
+        runtime_plan = _persist_model(
+            layout.planning_dir / "runtime_plan.json",
+            RuntimePlan,
+            model_copy(runtime_plan, update={"deployment_contract": deployment_contract}),
+            artifact_id=f"runtime-plan.{goal_spec.goal_id}",
+            schema_version="agintor.runtime_plan.v1",
+            creation_stage="repair_planning",
+        )
+        planning_diagnostics, replan_contract = _plan_consistency_check(
+            goal_spec,
+            goal_suite,
+            verifier_bundle,
+            runtime_plan,
+        )
+        planning_diagnostics = model_copy(planning_diagnostics, update={"repaired": True})
+        replan_contract = model_copy(replan_contract, update={"status": "repaired" if not planning_diagnostics.blocked else "repair_required"})
     planning_diagnostics = _persist_model(
-        planning_dir / "planning_diagnostics.json",
+        layout.planning_dir / "planning_diagnostics.json",
         PlanningDiagnostics,
         planning_diagnostics,
         artifact_id=planning_diagnostics.diagnostics_id,
         schema_version="agintor.planning_diagnostics.v1",
-        creation_stage="runtime_planning",
+        creation_stage="repair_planning" if repaired else "runtime_planning",
     )
     replan_contract = _persist_model(
-        planning_dir / "replan_contract.json",
+        layout.planning_dir / "replan_contract.json",
         ReplanContract,
         replan_contract,
         artifact_id=replan_contract.contract_id,
         schema_version="agintor.replan_contract.v1",
-        creation_stage="runtime_planning",
+        creation_stage="repair_planning" if repaired else "runtime_planning",
     )
     if planning_diagnostics.blocked:
         issues = "; ".join(issue.message for issue in planning_diagnostics.issues)
         raise RuntimeError(f"planning diagnostics blocked build before seed materialization: {issues}")
 
-    _write_seed_runtime(seed_runtime_dir, runtime_plan, merged_profile)
+    effective_runtime_profile = _factory_runtime_profile_for_plan(merged_profile, runtime_plan)
+    _write_seed_runtime(layout.seed_runtime_dir, runtime_plan)
     engine = EvolutionEngine(
         goal_suite,
-        evolution_dir,
+        layout.evolution_dir,
         provider,
-        seed_runtime_dir,
+        layout.seed_runtime_dir,
         mutator_type=mutator_type,
-        reference_runtime_dir=seed_runtime_dir,
+        reference_runtime_dir=layout.seed_runtime_dir,
         runtime_backend=effective_runtime_backend,
-        runtime_profile=merged_profile,
-        profile_path=Path(profile_path) if profile_path is not None else None,
+        runtime_profile=effective_runtime_profile,
+        profile_path=None,
         artifact_mode=artifact_mode or ArtifactMode.ALWAYS,
     )
     summary = engine.run(steps=steps)
@@ -831,8 +1385,10 @@ def build_runtime_from_goal(
     if not candidates:
         raise RuntimeError("runtime build produced no archive candidates")
     leaderboard_rows = _score_rows_for_candidates(engine, candidates, goal_keys)
-    leaderboard_path = _write_json(export_dir / "leaderboard.json", leaderboard_rows)
-    leader_row = leaderboard_rows[0]
+    leaderboard_path = _write_json(layout.evolution_dir / "leaderboard.json", leaderboard_rows)
+    leader_row = next((row for row in leaderboard_rows if row.get("export_eligible")), None)
+    if leader_row is None:
+        raise RuntimeError("leader validation failed for every candidate group; no exportable runtime was produced")
     leader = next(record for record in candidates if record.entry.runtime_hash == leader_row["runtime_hash"])
     best_goal_score = float(leader_row["goal_score"])
     best_val_score = float(leader_row["validation_score"])
@@ -849,24 +1405,31 @@ def build_runtime_from_goal(
         destination_path,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
     )
-    (destination_path / RUNTIME_PROFILE_FILE).write_text(
-        profile_to_json(merged_profile, runtime_only=True),
-        encoding="utf-8",
-    )
+    _write_json(destination_path / RUNTIME_PROFILE_FILE, runtime_plan.runtime_profile)
     _write_json(destination_path / DEPLOYMENT_CONTRACT_FILE, deployment_contract)
     bundle_runtime_kernel(destination_path, runtime_abi=RUNTIME_ABI_VERSION, force=True)
     with _without_bytecode_writes():
         exported_runtime = load_runtime(
             destination_path,
-            runtime_profile=merged_profile,
             runtime_backend=effective_runtime_backend,
         )
     runtime_hash = exported_runtime.runtime_hash
     code_hash = exported_runtime.code_hash
     manifest_version = exported_runtime.manifest.version
     runtime_id = exported_runtime.manifest.runtime_id
-    identity_inputs = runtime_identity_inputs(destination_path, runtime_profile=merged_profile)
+    _validate_exported_runtime(
+        destination_path,
+        build_id=build_id,
+        goal_id=goal_spec.goal_id,
+        runtime_id=runtime_id,
+        runtime_hash=runtime_hash,
+        runtime_backend=effective_runtime_backend,
+        runtime_profile=effective_runtime_profile,
+        export_dir=layout.export_dir,
+    )
+    identity_inputs = runtime_identity_inputs(destination_path)
     export_bundle_path = destination_path / RUNTIME_EXPORT_BUNDLE_FILE
+    kernel_manifest_path = destination_path / KERNEL_BUNDLE_DIR / KERNEL_MANIFEST_FILE
     export_bundle = {
         "schema_version": "agintor.runtime.export.v1",
         "runtime_abi": RUNTIME_ABI_VERSION,
@@ -879,29 +1442,19 @@ def build_runtime_from_goal(
         "build_id": build_id,
         "goal_id": goal_spec.goal_id,
         "agintor_provider": agintor_provider,
-        "runtime_provider": merged_profile.runtime_provider.name,
+        "runtime_provider": runtime_plan.provider_plan.runtime_provider.name,
         "source_runtime_dir": str(leader.runtime_dir),
         "source_runtime_hash": leader.entry.runtime_hash,
         "selection_policy": "goal_score_mean_then_validation",
-        "runtime_profile_file": str(destination_path / RUNTIME_PROFILE_FILE),
-        "deployment_contract_file": str(destination_path / DEPLOYMENT_CONTRACT_FILE),
-        "kernel_manifest_file": str(destination_path / KERNEL_BUNDLE_DIR / KERNEL_MANIFEST_FILE),
-        "export_bundle_file": str(export_bundle_path),
-        "provenance_bundle_file": str(destination_path / RUNTIME_PROVENANCE_BUNDLE_FILE),
+        "runtime_profile_file": RUNTIME_PROFILE_FILE,
+        "deployment_contract_file": DEPLOYMENT_CONTRACT_FILE,
+        "kernel_manifest_file": _runtime_relative_path(destination_path, kernel_manifest_path),
+        "export_bundle_file": RUNTIME_EXPORT_BUNDLE_FILE,
+        "provenance_bundle_file": RUNTIME_PROVENANCE_BUNDLE_FILE,
     }
     _write_json(export_bundle_path, export_bundle)
-    _write_runtime_provenance_bundle(
-        destination_path,
-        runtime_hash=runtime_hash,
-        code_hash=code_hash,
-        runtime_provider=merged_profile.runtime_provider.name,
-        source_runtime_dir=str(leader.runtime_dir),
-        goal_prompt=clean_goal,
-        runtime_identity=identity_inputs,
-    )
-
-    export_summary = _persist_model(
-        export_dir / "export_summary.json",
+    workspace_export_summary = _persist_model(
+        layout.export_dir / "export_summary.json",
         ExportSummary,
         ExportSummary(
             export_id=f"export.{build_id}",
@@ -916,37 +1469,64 @@ def build_runtime_from_goal(
             storage_schema_version=STORAGE_SCHEMA_VERSION,
             source_runtime_dir=str(leader.runtime_dir),
             source_runtime_hash=leader.entry.runtime_hash,
-            runtime_profile_path=str(destination_path / RUNTIME_PROFILE_FILE),
-            deployment_contract_path=str(destination_path / DEPLOYMENT_CONTRACT_FILE),
-            export_bundle_path=str(export_bundle_path),
-            provenance_bundle_path=str(destination_path / RUNTIME_PROVENANCE_BUNDLE_FILE),
+            runtime_profile_path=RUNTIME_PROFILE_FILE,
+            deployment_contract_path=DEPLOYMENT_CONTRACT_FILE,
+            export_bundle_path=RUNTIME_EXPORT_BUNDLE_FILE,
+            provenance_bundle_path=RUNTIME_PROVENANCE_BUNDLE_FILE,
             leaderboard_path=str(leaderboard_path),
-            runtime_plan_path=str(planning_dir / "runtime_plan.json"),
+            runtime_plan_path=str(layout.planning_dir / "runtime_plan.json"),
         ),
-        artifact_id=f"export-summary.{build_id}",
+        artifact_id=f"export-summary.workspace.{build_id}",
         schema_version="agintor.export_summary.v1",
         creation_stage="export",
     )
+    runtime_export_summary = _persist_model(
+        destination_path / "export_summary.json",
+        ExportSummary,
+        model_copy(
+            workspace_export_summary,
+            update={
+                "leaderboard_path": "",
+                "runtime_plan_path": "",
+            },
+        ),
+        artifact_id=f"export-summary.runtime.{build_id}",
+        schema_version="agintor.export_summary.v1",
+        creation_stage="export",
+    )
+    _write_runtime_provenance_bundle(
+        destination_path,
+        runtime_hash=runtime_hash,
+        code_hash=code_hash,
+        runtime_provider=runtime_plan.provider_plan.runtime_provider.name,
+        source_runtime_dir=str(leader.runtime_dir),
+        goal_prompt=clean_goal,
+        runtime_identity=identity_inputs,
+    )
     build_summary = _persist_model(
-        export_dir / "build_summary.json",
+        layout.export_dir / "build_summary.json",
         BuildSummary,
         BuildSummary(
             build_id=build_id,
             goal_id=goal_spec.goal_id,
             goal_prompt=clean_goal,
             goal_task_ids=[key[2:] for key in goal_keys],
-            goal_spec_path=str(goal_dir / "goal_spec.json"),
-            success_criteria_path=str(goal_dir / "success_criteria.json"),
-            benchmark_plan_path=str(planning_dir / "benchmark_plan.json"),
-            verifier_bundle_path=str(planning_dir / "verifier_bundle.json"),
-            runtime_plan_path=str(planning_dir / "runtime_plan.json"),
-            factory_profile_path=str(planning_dir / "factory_profile.json"),
-            deployment_contract_path=str(planning_dir / DEPLOYMENT_CONTRACT_FILE),
-            planning_diagnostics_path=str(planning_dir / "planning_diagnostics.json"),
-            replan_contract_path=str(planning_dir / "replan_contract.json"),
-            workspace=str(build_root),
+            goal_spec_path=str(layout.goal_dir / "goal_spec.json"),
+            success_criteria_path=str(layout.goal_dir / "success_criteria.json"),
+            benchmark_plan_path=str(layout.planning_dir / "benchmark_plan.json"),
+            verifier_bundle_path=str(layout.planning_dir / "verifier_bundle.json"),
+            runtime_plan_path=str(layout.planning_dir / "runtime_plan.json"),
+            factory_profile_path=str(layout.planning_dir / "factory_profile.json"),
+            deployment_contract_path=str(layout.planning_dir / DEPLOYMENT_CONTRACT_FILE),
+            planning_diagnostics_path=str(layout.planning_dir / "planning_diagnostics.json"),
+            replan_contract_path=str(layout.planning_dir / "replan_contract.json"),
+            workspace=str(layout.root),
             output_runtime_dir=str(destination_path),
             history_path=getattr(summary, "history_path", ""),
+            archive_index_path=getattr(summary, "archive_index_path", ""),
+            validation_history_path=getattr(summary, "validation_history_path", ""),
+            stage_failures_path=getattr(summary, "stage_failures_path", ""),
+            leaderboard_path=str(leaderboard_path),
             leader_runtime_hash=leader.entry.runtime_hash,
             leader_runtime_dir=str(leader.runtime_dir),
             runtime_abi=RUNTIME_ABI_VERSION,
@@ -957,13 +1537,14 @@ def build_runtime_from_goal(
             accepted_mutations=summary.accepted,
             archive_cells=summary.archive_cells,
             agintor_provider=agintor_provider,
-            runtime_provider=merged_profile.runtime_provider.name,
+            runtime_provider=runtime_plan.provider_plan.runtime_provider.name,
             export_bundle_file=RUNTIME_EXPORT_BUNDLE_FILE,
             provenance_bundle_file=RUNTIME_PROVENANCE_BUNDLE_FILE,
-            export_summary_path=str(export_dir / "export_summary.json"),
+            export_summary_path=str(layout.export_dir / "export_summary.json"),
+            export_validation_path=str(layout.export_dir / "export_validation.json"),
         ),
         artifact_id=f"build-summary.{build_id}",
-        schema_version="agintor.build_summary.v1",
+        schema_version="agintor.build_summary.v2",
         creation_stage="export",
     )
     return BuiltRuntimeResult(
@@ -976,9 +1557,9 @@ def build_runtime_from_goal(
         verifier_bundle_path=build_summary.verifier_bundle_path,
         runtime_plan_path=build_summary.runtime_plan_path,
         output_runtime_dir=str(destination_path),
-        workspace=str(build_root),
+        workspace=str(layout.root),
         agintor_provider=agintor_provider,
-        runtime_provider=merged_profile.runtime_provider.name,
+        runtime_provider=runtime_plan.provider_plan.runtime_provider.name,
         mutator_type=mutator_type,
         best_train_score=summary.best_train_score,
         best_goal_score=best_goal_score,
@@ -987,6 +1568,7 @@ def build_runtime_from_goal(
         accepted_mutations=summary.accepted,
         export_bundle_file=RUNTIME_EXPORT_BUNDLE_FILE,
         provenance_bundle_file=RUNTIME_PROVENANCE_BUNDLE_FILE,
-        export_summary_path=str(export_dir / "export_summary.json"),
-        summary_path=str(export_dir / "build_summary.json"),
+        export_summary_path=str(layout.export_dir / "export_summary.json"),
+        export_validation_path=str(layout.export_dir / "export_validation.json"),
+        summary_path=str(layout.export_dir / "build_summary.json"),
     )

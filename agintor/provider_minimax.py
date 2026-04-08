@@ -31,6 +31,8 @@ MINIMAX_PROVIDER_DEFAULTS: dict[str, Any] = {
     "pricing_env": "AGINTOR_MAS_MINIMAX_PRICING",
 }
 
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+
 
 class MiniMaxProvider(HostedProviderBase):
     def __init__(
@@ -70,6 +72,7 @@ class MiniMaxProvider(HostedProviderBase):
     def _client_or_raise(self):
         if self._client is not None:
             return self._client
+        self._ensure_credentials_available()
         try:
             import anthropic
         except Exception as exc:  # pragma: no cover - exercised only in live environments
@@ -142,8 +145,8 @@ class MiniMaxProvider(HostedProviderBase):
         if self.temperature is not None and "temperature" not in kwargs:
             payload["temperature"] = self.temperature
         max_output_tokens = request_max_output_tokens(metadata or {})
-        if max_output_tokens is not None and "max_tokens" not in kwargs:
-            payload["max_tokens"] = max_output_tokens
+        if "max_tokens" not in kwargs:
+            payload["max_tokens"] = max_output_tokens if max_output_tokens is not None else DEFAULT_MAX_OUTPUT_TOKENS
         payload.update(kwargs)
         return client.messages.create(**payload)  # pragma: no cover - live path only
 

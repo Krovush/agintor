@@ -1,0 +1,22 @@
+{
+  "domain": "benchmark-plan normalization and frozen family coverage",
+  "owned_paths": [
+    "agintor/runtime_builder.py",
+    "tests/test_runtime_builder.py"
+  ],
+  "disallowed_paths": [
+    "agintor/runtime_host.py",
+    "agintor/runtime_api.py",
+    "agintor/templates/baseline_runtime/memory_policy.py",
+    "tests/test_runtime_host.py"
+  ],
+  "focus_points": [
+    "Normalize provider-updated BenchmarkPlan payloads without dropping required family pressure from train, val, or test.",
+    "Treat provider-supplied partition task ids as hints when they conflict with family_targets coverage invariants.",
+    "Add focused regressions for partial task-id payloads that preserve family_targets but lose family coverage."
+  ],
+  "dependencies": [],
+  "validation_targets": [
+    "pytest -q tests/test_runtime_builder.py"
+  ]
+}

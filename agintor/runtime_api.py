@@ -11,12 +11,15 @@ from .runtime_profile import RuntimeProfile, default_runtime_profile
 from .schemas import (
     AgentTemplate,
     BenchmarkTask,
+    CapabilityExchange,
     Checkpoint,
     InspectRequest,
     ModelResponse,
     OperationSpec,
     RunResult,
     RuntimeBatchRequest,
+    RuntimeSolveResponse,
+    RuntimeSolveRequest,
     RuntimeTaskInvocation,
     SolveRequest,
     SolveResult,
@@ -217,7 +220,7 @@ def load_solve_request(prompt: str | None = None, prompt_file: str | Path | None
     payload: dict[str, Any] = {}
     prompt_text = _normalized_request_prompt(prompt or "")
     if prompt_file is not None:
-        raw = Path(prompt_file).read_text(encoding="utf-8")
+        raw = Path(prompt_file).read_text(encoding="utf-8").lstrip("\ufeff")
         try:
             loaded = json.loads(raw)
         except Exception:
@@ -246,6 +249,24 @@ def load_solve_request(prompt: str | None = None, prompt_file: str | Path | None
     }
     request_id = str(payload.get("request_id", "")).strip() or f"solve.{stable_hash(request_payload)[:12]}"
     return SolveRequest(request_id=request_id, **request_payload)
+
+
+def benchmark_task_to_solve_request(task: BenchmarkTask, *, request_id: str | None = None) -> SolveRequest:
+    verification_preference = "verified_if_available"
+    if task.allow_best_effort:
+        verification_preference = "best_effort"
+    elif task.verification_required:
+        verification_preference = "required"
+    return SolveRequest(
+        request_id=request_id or f"benchmark.{task.task_id}",
+        prompt=task.prompt,
+        context_items=[dict(item) for item in task.context_items],
+        file_paths=list(task.file_paths),
+        output_schema={},
+        allowed_tool_categories=list(task.allowed_tool_categories),
+        verification_preference=verification_preference,
+        budget_overrides={},
+    )
 
 
 def _parse_number_list(prompt: str) -> list[float]:
@@ -569,6 +590,44 @@ def solve_result_from_run_result(request: SolveRequest, run: RunResult, runtime_
     )
 
 
+def runtime_solve_failure_response(
+    request: SolveRequest,
+    runtime_hash: str,
+    capability_exchange: CapabilityExchange,
+    *,
+    mode: str,
+    summary: str,
+    provider_usage: dict[str, Any] | None = None,
+    fault_code: str = "solve_failure",
+) -> RuntimeSolveResponse:
+    return RuntimeSolveResponse(
+        request_id=request.request_id,
+        capability_exchange=capability_exchange,
+        solve_result=SolveResult(
+            request_id=request.request_id,
+            runtime_hash=runtime_hash,
+            mode=mode,
+            artifact={"error": fault_code, "message": summary},
+            status="failed",
+            verification_status="failed",
+            summary=summary,
+            checks=[],
+            budget={},
+            provider_usage=dict(provider_usage or {}),
+            faults={
+                "count": 1,
+                "hard_invalid": False,
+                "invalid_reason": summary,
+                "code": fault_code,
+                "contract_error": True,
+            },
+            recoverability="none",
+            verified=False,
+            best_effort=False,
+        ),
+    )
+
+
 def inspect_request_for_runtime(
     *,
     request_id: str,
@@ -583,6 +642,40 @@ def inspect_request_for_runtime(
         expected_runtime_abi=runtime_abi,
         expected_kernel_version=kernel_version,
         expected_storage_schema_version=storage_schema_version,
+    )
+
+
+def runtime_solve_request_for_task(
+    *,
+    request_id: str,
+    runtime_backend: str,
+    seed: int,
+    task: BenchmarkTask,
+    budget_overrides: dict[str, Any] | None = None,
+) -> RuntimeSolveRequest:
+    return RuntimeSolveRequest(
+        request_id=request_id,
+        runtime_backend=runtime_backend,
+        mode="benchmark",
+        seed=int(seed),
+        task=task,
+        budget_overrides=dict(budget_overrides or {}),
+    )
+
+
+def runtime_solve_request_for_user_request(
+    *,
+    runtime_backend: str,
+    seed: int,
+    solve_request: SolveRequest,
+) -> RuntimeSolveRequest:
+    return RuntimeSolveRequest(
+        request_id=solve_request.request_id,
+        runtime_backend=runtime_backend,
+        mode="user_request",
+        seed=int(seed),
+        solve_request=solve_request,
+        budget_overrides=dict(solve_request.budget_overrides),
     )
 
 

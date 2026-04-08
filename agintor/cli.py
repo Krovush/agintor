@@ -8,17 +8,21 @@ from typing import Optional
 import typer
 
 from .artifacts import ArtifactAllocator, ArtifactMode, WorkspaceLease
-from .benchmarks import BenchmarkSuite, load_suite
+from .benchmarks import load_suite
 from .exceptions import AgintorError
 from .evaluator import RuntimeEvaluator
 from .evolution import EvolutionEngine
 from .project import init_runtime as init_runtime_dir, write_demo_suite
 from .pydantic_compat import model_dump
 from .providers import build_provider
-from .runtime_api import load_solve_request, solve_request_to_task, solve_result_from_run_result_with_context
+from .runtime_api import (
+    load_solve_request,
+    runtime_solve_request_for_task,
+    runtime_solve_request_for_user_request,
+)
 from .runtime_builder import build_runtime_from_goal
+from .runtime_host import RuntimeHost
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile
-from .runtime_loader import load_runtime
 
 
 app = typer.Typer(add_completion=False, help="Agintor CLI MVP")
@@ -97,6 +101,14 @@ def _resolve_workspace(workspace: Optional[str], purpose: str, artifact_mode: Ar
     )
 
 
+def _resolve_benchmark_task(benchmark, task_id: str) -> tuple[object, str]:
+    for candidate_partition in ("train", "val", "test", "proxy"):
+        for candidate in benchmark.all_tasks(candidate_partition):
+            if candidate.task_id == task_id:
+                return candidate, candidate_partition
+    raise typer.BadParameter(f"task {task_id!r} was not found in suite {benchmark.name!r}")
+
+
 @app.command("init-runtime")
 def init_runtime_cmd(destination: str, force: bool = typer.Option(False, "--force"), write_suite: Optional[str] = typer.Option(None, "--write-demo-suite")) -> None:
     path = init_runtime_dir(destination, force=force)
@@ -128,57 +140,50 @@ def solve_cmd(
     if not task_id and not (prompt or prompt_file):
         raise typer.BadParameter("provide either <task_id> for benchmark mode or --prompt / --prompt-file for user-request mode")
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
-    runtime = load_runtime(runtime_dir, runtime_profile=runtime_profile, runtime_backend=runtime_backend)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
-    effective_provider = provider or runtime_profile.runtime_provider.name
     workspace_lease = _resolve_workspace(workspace, "solve", artifact_mode)
     workspace_path = workspace_lease.path
     failed = True
     try:
-        solve_request = None
-        if task_id:
-            benchmark = load_suite(suite)
-            task = benchmark.by_id(task_id)
-            benchmark_suite = benchmark
-            mode = "benchmark"
-            solve_request = load_solve_request(prompt=task.prompt)
-        else:
-            solve_request = load_solve_request(prompt=prompt, prompt_file=prompt_file)
-            task = solve_request_to_task(solve_request)
-            benchmark_suite = BenchmarkSuite(name=f"solve_request_{solve_request.request_id}", train=[task], val=[], test=[], proxy=[task])
-            partition = "train"
-            mode = "user_request"
-        budget_overrides = solve_request.budget_overrides if mode == "user_request" else None
-        evaluator = RuntimeEvaluator(
-            benchmark_suite,
+        host = RuntimeHost(
             workspace_path,
-            provider_impl,
-            baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
-            budget_overrides=budget_overrides,
             runtime_backend=runtime_backend,
             artifact_mode=artifact_mode,
-            **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
         )
-        evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=[seed], use_cache=False, tasks_override=[task])
-        run_result = evaluation.run_results[0]
-        provider_usage = dict(getattr(evaluator, "last_provider_usage", {}))
-        solve_result = solve_result_from_run_result_with_context(
-            solve_request,
-            run_result,
-            runtime.runtime_hash,
-            mode=mode,
-            provider_usage=provider_usage,
+        if task_id:
+            benchmark = load_suite(suite)
+            task, resolved_partition = _resolve_benchmark_task(benchmark, task_id)
+            mode = "benchmark"
+            runtime_request = runtime_solve_request_for_task(
+                request_id=f"solve.{task.task_id}.{seed}",
+                runtime_backend=runtime_backend,
+                seed=seed,
+                task=task,
+            )
+        else:
+            solve_request = load_solve_request(prompt=prompt, prompt_file=prompt_file)
+            mode = "user_request"
+            runtime_request = runtime_solve_request_for_user_request(
+                runtime_backend=runtime_backend,
+                seed=seed,
+                solve_request=solve_request,
+            )
+        response = host.solve(
+            runtime_dir,
+            runtime_request,
+            provider=provider_impl,
+            runtime_profile=runtime_profile,
         )
-        typer.echo(json.dumps({
+        payload = {
             "mode": mode,
-            "runtime_hash": runtime.runtime_hash,
-            "task_id": task.task_id,
-            "request": model_dump(solve_request),
-            "result": model_dump(run_result),
-            "solve_result": model_dump(solve_result),
-            "objective_scores": evaluation.objective_scores,
-            "provider_usage": provider_usage,
-        }, indent=2, sort_keys=True))
+            "task_id": task.task_id if task_id else None,
+            "suite": suite if task_id else None,
+            "partition": resolved_partition if task_id else None,
+            "request": model_dump(runtime_request),
+            "capability_exchange": model_dump(response.capability_exchange),
+            "solve_result": model_dump(response.solve_result),
+        }
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
         failed = False
     finally:
         workspace_lease.release(failed=failed)
@@ -272,7 +277,7 @@ def build_runtime_cmd(
     mutator: str = typer.Option("heuristic", "--mutator"),
     workspace: Optional[str] = typer.Option(None, "--workspace"),
     artifact_mode: ArtifactMode = typer.Option(ArtifactMode.ALWAYS, "--artifact-mode"),
-    runtime_backend: str = typer.Option("docker", "--runtime-backend"),
+    runtime_backend: str = typer.Option("local", "--runtime-backend"),
     force: bool = typer.Option(False, "--force"),
 ) -> None:
     prompt_text = _load_prompt_input(prompt, prompt_file)
