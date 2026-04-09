@@ -6,6 +6,7 @@
 - Checkpoint envelopes from Workstream 2 acquire a real persistence layer backed by stable snapshot contracts.
 - Short-term memory becomes durable provenance instead of an in-memory execution graph that disappears after the run.
 - Long-term memory becomes a versioned durable graph with contradiction handling, retrieval diagnostics, and explicit write lineage.
+- Hosted-call traces become durable canonical artifacts with session-scoped raw call stores, rebuildable grouped views, and wire-faithful human-readable transcripts.
 - Recovery decisions become auditable through environment fingerprints, compatibility checks, and replay or diff tooling.
 
 ## Prerequisites
@@ -24,8 +25,10 @@
 
 - Own the persistence contract for runtime-owned state, checkpoint storage, short-term provenance storage, long-term-memory durability, replay records, environment fingerprints, and recovery diagnostics.
 - Own reconstruction of persisted state back into live runtime objects inside the bundled solve-time kernel.
+- Own canonical OpenAI trace storage, scoped trace finalization, trace rebuild and repair surfaces, and durable trace-query layouts.
 - Keep scheduling policy, checkpoint timing, branch concurrency rules, per-tool sandbox behavior, provider feature semantics, export packaging, and factory-search persistence outside this workstream.
 - Keep validation and test traces out of runtime durability surfaces except where immutable held-out reports explicitly reference runtime artifacts by ID.
+- Keep the typed trace-context contract definition on runtime request and provider schemas outside this workstream. Consume the frozen contract and persist it faithfully.
 
 ## Non-Goals
 
@@ -63,6 +66,27 @@ workspace/
     replays/
 ```
 
+- Keep a session-scoped canonical hosted-call store beside runtime state:
+
+```text
+openai_api_traces/
+  sessions/<session_id>/
+    calls/*.json
+    calls/*.md
+    INDEX.md
+    TRANSCRIPT.md
+    builds/<build_id>/
+      INDEX.md
+      TRANSCRIPT.md
+      runtime_tasks/<task_id>/seed_<seed>/runtimes/<runtime_hash>/
+        INDEX.md
+        TRANSCRIPT.md
+    solves/<request_id>/
+      INDEX.md
+      TRANSCRIPT.md
+```
+
+- Keep `calls/*.json` as the canonical source of truth. Scoped trace folders contain rendered indexes and transcripts only.
 - Keep canonical JSON serialization deterministic and hashable.
 
 ## Core Decisions
@@ -75,6 +99,9 @@ workspace/
 - Replace ad hoc deep copies with explicit subsystem snapshot and restore methods.
 - Preserve exact-first retrieval. Durable graph richness must not weaken the target spec's exact symbol and path precedence.
 - Add a tiny deterministic `working_memory` block to runtime state for always-visible current-task facts, accepted constraints, and current-plan state. It must stay small and derived from validated runtime state rather than becoming an unbounded transcript cache.
+- Keep one canonical raw hosted-call store and derive all grouped trace views from it.
+- Make per-call and grouped markdown wire-faithful by default. Verbose debug rendering remains opt-in.
+- Allow interrupted builds, evals, evolves, and solves to re-finalize grouped traces from canonical raw call records without re-executing provider calls.
 - Keep secrets out of persisted state. Store digests, IDs, and redacted metadata only.
 
 ## Phase 1: Freeze Serializable Snapshot Contracts
@@ -141,6 +168,23 @@ workspace/
   - environment-fingerprint refs
   - recovery outcomes
 - Store full checkpoint envelopes as JSON payloads so they remain inspectable and portable across local and Docker execution.
+- Extend the local persistence layer with a session-scoped hosted-call trace store keyed by:
+  - `session_id`
+  - `build_id`
+  - `task_id`
+  - `seed`
+  - `runtime_hash`
+  - `request_id`
+  - `provider_role`
+- Persist canonical per-call JSON records with:
+  - request payload
+  - request metadata
+  - `trace_context`
+  - raw response envelope
+  - usage
+  - latency
+  - error
+- Do not duplicate raw call JSON into grouped trace folders.
 
 ## Phase 3: Replace Deep-Copy Isolation with Subsystem Snapshots
 
@@ -180,6 +224,17 @@ workspace/
   - checkpoint lineage diff
   - artifact lineage diff
   - receipt diff
+- Add trace finalization that rebuilds:
+  - session `INDEX.md` and `TRANSCRIPT.md`
+  - build-scoped views
+  - runtime-task views grouped by `task_id`, `seed`, and `runtime_hash`
+  - solve-scoped views grouped by `request_id`
+- Include export-validation prompt solves in both build-scoped and solve-scoped views when they occur inside a build.
+- Wire-faithful render rules:
+  - render `Outgoing` from recorded wire payloads first
+  - render `Incoming` from preserved response-envelope items first
+  - never splice local orchestration metadata into the visible API conversation body
+  - keep `Call Context` separate and include trace context, purpose, usage, latency, and provider role there
 - Keep replay and diff surfaces library-first and deterministic. Add CLI wrappers only after the APIs stabilize.
 
 ## Phase 5: Add Deterministic Working Memory
@@ -285,12 +340,15 @@ workspace/
 5. Long-term memory survives restart when appropriate, resets at task or episode boundaries when required, and records contradictions and tombstones without losing provenance.
 6. Working memory remains small, deterministic, and explainable across resume and replay.
 7. Environment fingerprints and recovery diagnostics explain why a resume succeeded, degraded, or failed closed.
+8. Canonical raw call records can re-finalize per-session, per-build, per-runtime-task, and per-solve trace views after interruption without re-running provider calls.
+9. Default trace renders are wire-faithful and separate call context from visible request and response bodies.
 
 ## File Ownership
 
 - `agintor/shell.py`: runtime snapshot and restore lifecycle, invariant validation after restore
 - `agintor/memory_graph.py`: durable short-term and long-term graph semantics, retrieval diagnostics, contradiction handling
 - `agintor/runtime_api.py`: snapshot contracts and checkpoint-envelope schemas
+- `agintor/openai_trace.py`: canonical raw-call storage, scoped finalization, wire-faithful rendering, and rebuild surfaces
 - `agintor/runtime_sdk/`: runtime-owned restore, replay, and checkpoint validation entrypoints
 - `agintor/runner.py`: integration with persistence hooks and recovery handoff
 - `agintor/state_store.py`: indexed runtime metadata store

@@ -6,6 +6,7 @@
 - Promoted tools become durable runtime assets with manifests, validation evidence, determinism classification, sandbox fingerprints, and rollback state.
 - Tool runs and provider background operations share a unified async job model with restart and receipt linkage.
 - Hosted provider adapters preserve rich structured response envelopes instead of flattening everything into text.
+- Hosted-call records preserve typed trace context and wire-faithful request and response renders instead of mixing transport payloads with local orchestration metadata.
 - Solve-time control decisions become predictor-backed, uncertainty-aware, and auditable from runtime traces and workspace artifacts.
 
 ## Prerequisites
@@ -23,6 +24,7 @@
 ## Boundaries
 
 - Own runtime-side tool contracts, promoted-tool lifecycle, per-tool sandbox policy, tool execution lifecycle, hosted provider request and response contracts, provider retry and replay classification, async job records, and solve-time control behavior.
+- Own provider-side projection of typed trace context into wire requests, raw hosted-call capture, per-call trace-record semantics, and wire-faithful per-call rendering.
 - Own runtime-facing schemas such as:
   - tool manifests
   - promoted-tool records
@@ -32,6 +34,7 @@
   - decision records
 - Keep runtime-wide branch scheduling, checkpoint timing, durable store implementation, benchmark policy, archive accounting, and export packaging outside this workstream.
 - Keep factory-owned scheduler responsibilities out of solve-time control entirely.
+- Keep session-scoped grouped trace finalization and long-lived trace-store indexing outside this workstream.
 
 ## Non-Goals
 
@@ -47,6 +50,7 @@
 - `SandboxManager.sandbox_hash(...)` already gives a good content-addressed reuse foundation.
 - `agintor/providers.py` already supports local deterministic, replay, retry, failover, OpenAI, and MiniMax providers.
 - `provider_openai.py` already uses the Responses path, but the runtime-facing abstraction still collapses too much of the response into flat text.
+- `openai_trace.py` still mixes local metadata into human-facing transcripts and does not persist `trace_context` as a first-class stored field.
 - `control_policy.py` still carries factory-owned methods that do not belong to solve-time control.
 - `runner.py` still relies too heavily on hand-written decision heuristics rather than shared predictor-backed utilities.
 - The local tool registry is still canonical today. Remote MCP tools or provider-side tool search do not yet exist as explicit optional boundaries.
@@ -72,6 +76,11 @@
 - Distinguish task-local tools from promoted reusable tools explicitly in runtime state and on-disk asset layout.
 - Promote only deterministic or environment-deterministic tools in the MVP. Replayable nondeterministic tools may remain task-local. Side-effectful tools remain non-promotable unless later work explicitly broadens that boundary.
 - Unify tool handles and provider background jobs under one async job model tied to receipts, recovery, and environment fingerprints.
+- Treat `metadata.mode` as purpose classification only. Cross-cutting correlation data lives in `trace_context`.
+- Project canonical request-side trace context into provider metadata immediately before dispatch. Provider adapters must preserve it exactly and omit missing fields rather than synthesizing them.
+- Make wire-faithful request and response rendering the default per-call trace view. Verbose debug rendering remains opt-in and clearly separate.
+- Use `request_payload` as the canonical outgoing render source and preserved hosted response envelopes as the canonical incoming render source.
+- Preserve `provider_role` exactly as supplied by upstream runtime and factory contracts, using only `factory` and `runtime`. Provider adapters do not infer or rename role values.
 
 ## Phase 1: Move Tooling, Provider, and Control Contracts into the Runtime Boundary
 
@@ -83,6 +92,7 @@
   - sandbox policy
   - control decision records
 - Remove remaining solve-time dependence on host-side implementation classes.
+- Rehome provider-side trace-context projection with the runtime-owned request path so hosted adapters receive typed correlation data without making provider metadata the canonical owner of the contract.
 - Freeze solve-time control to:
   - `assign_model`
   - `request_checks`
@@ -186,6 +196,20 @@
   - normalized streaming event log
 - Keep flat text as a convenience projection, not the primary contract.
 - Use pinned snapshot model IDs by default for evaluation and replay lanes.
+- Persist `trace_context` as a first-class field beside `request_metadata`, `request_payload`, and `response_raw`.
+- For OpenAI Responses adapters, preserve enough raw request-envelope fields for wire-faithful rendering, including:
+  - `instructions`
+  - `input`
+  - `model`
+  - `reasoning`
+  - `max_output_tokens`
+- Default human-readable per-call traces must:
+  - render `Outgoing` from wire payload fields only
+  - render `Incoming` from `response_raw.output` message items before falling back to flat text
+  - suppress local metadata payloads in the visible API body
+  - show `trace_context`, purpose, tokens, latency, and provider role in a separate `Call Context` section
+- `calls/*.md` must follow the same wire-faithful rules as grouped transcripts.
+- Keep optional verbose render mode that includes local orchestration metadata for debugging without changing the default trace readability.
 - Replace generic exception-text handling with typed retry and failover classes:
   - auth or config
   - rate limit
@@ -265,6 +289,8 @@
 6. Optional MCP and provider-side tool-search interop remain bounded extensions rather than the internal runtime architecture.
 7. Tooling and control decisions use shared utility estimates with deterministic fallback and emit decision records.
 8. Runtime traces and persisted artifacts explain tool, provider, sandbox, and control behavior from the workspace alone.
+9. Hosted provider call records persist first-class trace context and wire-faithful per-call renders without mixing local metadata into the visible API conversation.
+10. OpenAI Responses adapters preserve enough structured raw output to reconstruct visible message bodies without defaulting to flattened text.
 
 ## File Ownership
 
@@ -273,6 +299,7 @@
 - `agintor/provider_common.py`: shared provider contracts and deterministic or replay providers
 - `agintor/provider_openai.py`: Responses-native hosted adapter and rich hosted-response capture
 - `agintor/provider_minimax.py`: hosted adapter alignment with shared response contracts
+- `agintor/openai_trace.py`: per-call trace-record schema, wire-faithful rendering, and provider-facing trace persistence
 - `agintor/predictors.py`: solve-time utility helpers and predictor-backed decision surfaces
 - `agintor/runtime_sdk/`: runtime-owned tool, provider, and control execution surfaces
 - `agintor/runtime_profile.py`: runtime-owned provider, tooling, and control profile fields plus serialization rules

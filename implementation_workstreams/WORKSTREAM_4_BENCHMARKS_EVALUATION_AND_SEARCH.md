@@ -3,6 +3,7 @@
 ## Outcome
 
 - Factory evaluation consumes frozen `BenchmarkPlan` and `VerifierBundle` artifacts through the same runtime entrypoint used by exported-runtime solve execution.
+- Goal-conditioned benchmark planning becomes goal-scoped, coverage-driven, and provenance-rich instead of compressing rich goals into a tiny demo-shaped subset.
 - Benchmark pressure graduates from demo-shaped structured tasks to serious local task families that can actually justify runtime claims.
 - Evaluation becomes a durable factory surface with stage-failure ledgers, validation history, leaderboard snapshots, contamination tracking, and held-out reports.
 - Search becomes resumable and auditable, with persisted archive state, scheduler state, operator history, and deterministic reporting.
@@ -22,14 +23,17 @@
 ## Boundaries
 
 - Own benchmark content, typed task adapters, verifier catalogs, staged evaluation, robustness measurement, contamination control, search policy, search-state persistence, validation reporting, and held-out reporting.
+- Own goal-conditioned family scoring, goal-scoped task selection, bounded local template synthesis, and benchmark provenance artifacts.
 - Keep runtime-state semantics, orchestration mechanics, tool sandbox internals, provider transport behavior, and solve-time policy implementation outside this workstream.
 - Keep open-ended benchmark invention, free-form grader generation, and internet-dependent benchmark lanes outside the MVP lane.
 
 ## Planning Constraints
 
 - `BenchmarkPlan` and `VerifierBundle` are the only legal evaluation inputs once frozen.
+- `BenchmarkPlan` is a goal-scoped subset selected from the benchmark library and approved local templates, not a hidden alias for the full demo suite.
 - Later stages must not silently reparse the original goal or rebuild suites from scratch.
 - Fixture setup and environment digests must be frozen separately from task selection.
+- Provider assistance may propose revisions only inside the known task library and approved template set. The local deterministic planner remains the final owner of task selection, verifier freeze, and artifact finalization.
 - MVP proof lanes stay bounded:
   - first serious lane: `repo_patch`
   - second serious lane: `service_task`
@@ -42,6 +46,9 @@
 - `agintor/verifiers.py` already supports exact and near-exact local verification plus the `local`, `subtree`, `repo`, and `benchmark` checker ladder.
 - `agintor/evaluator.py` already has the right staged-evaluation skeleton: patch integrity, deterministic smoke, proxy gate, local subset gate, and full-train gate.
 - `agintor/archive.py` and `agintor/evolution.py` already implement objective islands, scope scheduling, staged acceptance, and predictor updates.
+- Goal-family selection still caps relevance too aggressively, and benchmark planning still collapses rich goals into too few tasks per family.
+- `benchmark_provenance.json` is expected by the architecture but still lacks a concrete coverage and synthesis contract.
+- Factory-side hosted planning and mutation calls are not yet stamped with stable build and search trace context.
 - The current suite is still dominated by small structured tasks, and evaluation is stronger than the benchmark pressure it measures.
 - Search state is still too process-local, and objective or operator policy is still too simplistic for the optimizer machinery already present.
 
@@ -56,6 +63,7 @@
 ## Core Decisions
 
 - Treat frozen `BenchmarkPlan` and `VerifierBundle` as the only legal evaluation inputs.
+- Make `BenchmarkPlan` a goal-scoped subset frozen from the benchmark library and approved local templates rather than carrying the full demo train set by default.
 - Measure runtimes through the runtime entrypoint, not through hidden direct imports.
 - Keep benchmark growth bounded and locally judgeable.
 - Make repo editing the first serious proof lane.
@@ -64,6 +72,15 @@
 - Keep `multimodal_task` as a later adapter slot, not an MVP proof target.
 - Add a simplification or refactoring operator to the search portfolio so the system can improve by getting smaller and cleaner, not only by getting more elaborate.
 - Fix the signal bottleneck explicitly. Search policy must preserve enough full-train and held-out evidence to justify archive, scheduler, and predictor complexity.
+- Use this exact goal-family rule:
+  - compute all family scores
+  - select every family with score `>= 2`
+  - if none meet that threshold, select the top 2 positive-scoring families
+  - if no family has a positive score, default to `["e2e", "top"]`
+  - force-include `e2e` when the goal implies export, deployment, verification, orchestration, workflow completion, or composite reports
+- Require at least 2 train tasks per selected family when available and at least 1 proxy task per selected family when available.
+- Trigger bounded synthetic task generation only when deterministic coverage remains weak after selection.
+- Name the planning strategy `goal_scoped_multi_select_v1`.
 
 ## Phase 1: Make Frozen Planning Artifacts Authoritative
 
@@ -79,6 +96,19 @@
   - `leaderboard.json`
   - `evolution_history.json`
   - `benchmark_provenance.json`
+- Persist `planning/benchmark_provenance.json` as a first-class frozen artifact beside `BenchmarkPlan` and `VerifierBundle`.
+- `benchmark_provenance.json` must record at least:
+  - planning strategy
+  - family scores
+  - selected families
+  - partition task selection
+  - required capabilities
+  - capability coverage
+  - success-criteria coverage
+  - source-task and template provenance
+  - synthesis decision
+  - provider-assist decision and applied revisions
+- Stamp factory-side hosted planning, mutation, and patch-repair calls with typed factory trace context, including `provider_role="factory"` and available fields such as `session_id`, `build_id`, `iteration`, `objective`, `touched_scope`, `runtime_hash`, and `runtime_dir`.
 - Record enough provenance to rerun evaluation from disk without reopening the raw goal prompt or implicitly rebuilding the suite.
 
 ## Phase 2: Build a Typed Benchmark Adapter Registry
@@ -101,6 +131,41 @@
   - clone or adapt bounded templates second
   - synthesize only when deterministic local grading remains possible
 - Require every benchmark family to declare why it is locally judgeable and reproducible.
+- Change selection defaults to:
+  - at least 2 train tasks per selected family when available
+  - at least 1 proxy task per selected family when available
+  - preservation of cross-family `e2e` pressure whenever the goal implies orchestration, verification, export, workflow completion, or composite reports
+- Trigger bounded synthetic generation if any remain true after deterministic selection:
+  - a required capability is uncovered
+  - a required success criterion is uncovered
+  - a selected family has fewer than 2 train tasks when the library has 2 or more
+  - a selected family has no proxy task when a proxy exists for that family
+- Approved local template IDs:
+  - `top.multi_op_structured_v1`
+  - `top.checkpoint_trace_variant_v1`
+  - `mem.exact_symbol_compaction_v1`
+  - `mem.exact_path_resume_v1`
+  - `tool.underspecified_expression_v1`
+  - `tool.reuse_vs_create_variant_v1`
+  - `e2e.composite_numeric_report_v1`
+  - `e2e.composite_memory_tool_v1`
+- Every selected, cloned, or synthesized task must record:
+  - `source_task_id`
+  - `template_id`
+  - `goal_criteria_targets`
+  - `transform_summary`
+  - `verifier_origin`
+- Template transforms may:
+  - change prompt wording
+  - change literals, symbol names, row values, context volume, and dependency annotations
+  - omit an explicit expression for under-specified generated-expression tasks
+- Template transforms may not:
+  - change task family
+  - change verifier class
+  - change artifact shape or output keys
+  - introduce external side effects
+  - broaden allowed tool categories beyond the source task family
+- Provider-assisted planning may propose revised task IDs and approved template IDs only within the known benchmark library and approved local template set. The local deterministic planner remains the final owner of final selection and verifier freeze.
 
 ## Phase 3: Expand Verifiers into Typed Local Graders
 
@@ -237,14 +302,20 @@
 5. Search can resume from persisted archive and scheduler state without rebuilding the world from scratch.
 6. Search reporting exposes whether the optimizer has enough full-train evidence to justify its current complexity.
 7. An exported leader is backed by a reproducible held-out report on a serious suite, not only by structured-demo improvements.
+8. Rich goals select more than two relevant families when justified, and benchmark plans freeze only the selected goal-scoped subset rather than the full demo train set by default.
+9. Selected families carry multi-task train pressure and at least one proxy task when the benchmark library provides them.
+10. Any cloned or synthesized task is bounded to approved local templates and carries explicit source-task, transform, criteria-target, and verifier provenance.
+11. Provider-assisted planning cannot move task selection outside the known benchmark library and approved local template set.
 
 ## File Ownership
 
 - `agintor/benchmarks.py`: adapter registry, fixture references, benchmark provenance
+- `agintor/goal_rubric.py`: family scoring, family-selection thresholds, and goal-conditioned coverage inputs
 - `agintor/verifiers.py`: typed verifier catalog and evidence serialization
 - `agintor/evaluator.py`: staged evaluation, failure ledgers, validation history, held-out policy
 - `agintor/archive.py`: archive descriptors and persisted archive state
 - `agintor/evolution.py`: objective selection, operator portfolio, resume support, leader tracking
+- `agintor/runtime_builder.py`: goal-scoped benchmark planning, deterministic coverage pass, and benchmark provenance artifact emission
 - `agintor/mutator.py`: simplification and refactoring operator hooks
 - `agintor/crossover.py`: bounded whole-method crossover
 - `agintor/predictors.py`: predictor snapshot persistence and search-side summaries
