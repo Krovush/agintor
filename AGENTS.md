@@ -1,15 +1,15 @@
-> [!IMPORTANT]
-> **Current Prompt** (for cases when you are unsure, get lost, or need a reminder of what you are doing, what the user preferences and requirements are)
->
-> The current prompt:
-> "Implement `C:\Users\yaros\Desktop\Agintor MVP\implementation_workstreams\WORKSTREAM_2_RUNTIME_EXECUTION_AND_ORCHESTRATION.md` end to end and verify the implementation.
-> Stay strictly within Workstream 2. Do not work on later workstreams or let them shape this implementation beyond unavoidable interface awareness.
-> Do the work thoroughly. Read the relevant code and docs, research best practices when needed, and use all available tools well.
->     - No hotfixes, bandaids, or narrow patches.
->     - Take a holistic approach. Refactor or redesign the relevant architecture when necessary.
->     - Do not treat the workstream doc as unquestionable. Some details may be vague, wrong, or suboptimal.
->     - Use your judgment to choose what best serves the project's actual goal: a strong MAS-factory with minimal human-in-the-loop feedback."
->
+[!IMPORTANT]
+ **Current Prompt** (for cases when you are unsure, get lost, or need a reminder of your task, its constraints, and what the user preferences and requirements are)
+
+ The current prompt:
+ "Implement `C:\Users\yaros\Desktop\Agintor MVP\implementation_workstreams\WORKSTREAM_2_RUNTIME_EXECUTION_AND_ORCHESTRATION.md` end to end and verify the implementation.
+ Stay strictly within Workstream 2. Do not work on later workstreams or let them shape this implementation beyond unavoidable interface awareness.
+ Do the work thoroughly. Read the relevant code and docs, research best practices when needed, and use all available tools well.
+     - No hotfixes, bandaids, or narrow patches.
+     - Take a holistic approach. Refactor or redesign the relevant architecture when necessary.
+     - Do not treat the workstream doc as unquestionable. Some details may be vague, wrong, or suboptimal.
+     - Use your judgment to choose what best serves the project's actual goal: a strong MAS-factory with minimal human-in-the-loop feedback."
+
 Verify implementation correctness through thorough code analysis and manual testing.
 
 # Role:
