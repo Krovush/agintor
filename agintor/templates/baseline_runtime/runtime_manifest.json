@@ -20,9 +20,9 @@
   ],
   "metadata": {
     "template": "baseline_runtime",
-    "runtime_abi": "agintor-runtime-abi-v3",
+    "runtime_abi": "agintor-runtime-abi-v5",
     "kernel_version": "agintor-kernel-v1",
-    "storage_schema_version": "agintor-storage-v1",
+    "storage_schema_version": "agintor-storage-v3",
     "kernel_manifest_file": "runtime_sdk/kernel_manifest.json"
   }
 }

@@ -1,8 +1,8 @@
 {
   "entry_command": "agintor solve <runtime_dir> --prompt \"<request>\"",
-  "runtime_abi": "agintor-runtime-abi-v3",
+  "runtime_abi": "agintor-runtime-abi-v5",
   "kernel_version": "agintor-kernel-v1",
-  "storage_schema_version": "agintor-storage-v1",
+  "storage_schema_version": "agintor-storage-v3",
   "python_version": ">=3.11",
   "supported_backends": [
     "local",
@@ -12,6 +12,21 @@
   "environment_allowlist": [],
   "network_policy": "provider-only",
   "filesystem_policy": "workspace-read-write",
+  "runtime_isolation_policy": {
+    "timeout_envelope": {},
+    "workspace_root": ".",
+    "environment_allowlist": [],
+    "network_policy": "provider-only",
+    "filesystem_policy": "workspace-read-write",
+    "required_guarantees": [
+      "timeout_enforcement",
+      "workspace_isolation",
+      "environment_filtering"
+    ],
+    "desired_guarantees": [
+      "process_cleanup"
+    ]
+  },
   "dependency_digest_set": [],
   "container_image_digest": null,
   "capability_flags": [
