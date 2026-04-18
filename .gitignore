@@ -29,3 +29,4 @@ MiniMax API Key.txt
 /.codex_review_tmp*/
 /openai_api_traces/
 /agintor/templates/baseline_runtime/
+.codex/skills/mass-implement/Diff Proposals/

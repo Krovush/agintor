@@ -59,8 +59,8 @@
 
 - Keep the fixed shell plus four mutable policy files as the solve-time architecture. The remaining change is to finish consolidating solve semantics under the bundled runtime boundary that already exists.
 - Freeze the next runtime protocol and storage versions at the start of this workstream:
-  - `runtime_abi = agintor-runtime-abi-v4`
-  - `storage_schema_version = agintor-storage-v2`
+  - `runtime_abi = agintor-runtime-abi-v5`
+  - `storage_schema_version = agintor-storage-v3`
 - Use one runtime-native `ExecutionPlan` contract for both benchmark tasks and user requests.
 - Adopt the canonical `OpenAITraceContext` contract defined in `TRACE_AND_PLANNING_IMPROVEMENTS_PLAN.md`. Workstream 2 owns runtime-side propagation of that full contract through request, execution-plan, policy-context, frame, and branch objects. Do not redefine a runtime-only subset here. Despite the historical name, this contract is provider-agnostic correlation metadata, not an OpenAI-only feature.
 - Normalize benchmark request identity as `benchmark.<task_id>.seed_<seed>` so benchmark-mode traces and runtime artifacts have stable request keys.

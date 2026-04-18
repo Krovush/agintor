@@ -1,0 +1,293 @@
+# WS2 Final Fix Plan
+
+## Purpose
+
+This plan defines the remaining WS2 work needed to close runtime execution, orchestration, and isolation. The remaining issues are runtime-contract bugs that still break:
+
+- resume identity,
+- branch accounting under failure,
+- host-side run closure after post-launch validation errors,
+- top-level cancellation semantics on stop-policy exits,
+- Docker artifact fidelity,
+- and a few remaining dead or ambiguous WS2 surfaces.
+
+## P1 Blockers
+
+### 1. Resume request_id must be rebound end to end
+
+- Gap:
+  - `runtime_api.solve_request_from_resume_checkpoint()` rewrites only the outward `SolveRequest.request_id`.
+  - `runtime_host.py` and `runtime_sdk/runtime_entry.py` pass the original `CheckpointEnvelope` into the runner.
+  - `runner._restore_from_checkpoint()` rejects mismatched request ids.
+- Fix:
+  - Add one canonical helper that rebinds a `CheckpointEnvelope` in memory for resume.
+  - The rebind contract is execution-identity only. Rebind exactly these fields in memory:
+    - `CheckpointEnvelope.request_id`
+    - `CheckpointEnvelope.plan_snapshot.request_id`
+    - `CheckpointEnvelope.plan_snapshot.trace_context.request_id`
+    - `CheckpointEnvelope.runtime_state_snapshot.request_id`
+    - active and queued frame `request_id` plus nested `trace_context.request_id`
+    - branch/publication/receipt `request_id` plus nested `trace_context.request_id`
+    - any request-id mirrors inside `working_state_summary` and `trace_cursor`
+  - Do not rebind runtime identity or semantic-plan identity:
+    - `runtime_hash`
+    - `runtime_abi`
+    - `storage_schema_version`
+    - `plan_id`
+    - plan node graph, verifier contract, or benchmark/task payload
+  - `plan_id` and `plan_digest` remain frozen semantic plan identity across resume. Resume changes execution identity, not plan identity.
+  - If the current `ExecutionPlan.plan_digest` implementation includes request identity, narrow digest semantics so `plan_digest` excludes rebound execution-id fields rather than regenerating the digest on resume.
+  - Make `solve_request_from_resume_checkpoint()` return the rebound `SolveRequest`, rebound `CheckpointEnvelope`, and effective request id.
+  - Pass the rebound envelope all the way into `runner.resume_from_checkpoint()`.
+  - Add immutable provenance for post-resume artifacts:
+    - `origin_request_id`
+    - `source_checkpoint_ref`
+  - Store those provenance fields on new post-resume checkpoint envelopes and propagate them forward unchanged after the first resumed checkpoint. Do not backfill older checkpoint files.
+  - Do not rewrite existing checkpoint files on disk.
+- Files:
+  - `agintor/runtime_api.py`
+  - `agintor/runtime_host.py`
+  - `agintor/runtime_sdk/runtime_entry.py`
+  - `agintor/runner.py`
+  - `agintor/schemas.py`
+
+### 2. Every launched branch must return one terminal `BranchResult`
+
+- Gap:
+  - `_execute_horizontal_branches()` accounts only from `branch_results`.
+  - `_run_branch_plan()` can still let branch-scoped failures escape through `future.result()`.
+  - Reserved-budget overspend currently raises inside the worker instead of returning terminal branch data.
+- Fix:
+  - `_run_branch_plan()` must return exactly one terminal `BranchResult` for every launched branch: `completed`, `cancelled`, or `failed`.
+  - Capture branch-local budget, provider usage, publications, receipts, verifier support, and unresolved-critical counts even on failure.
+  - Keep `ResumeRecoveryError` as the only branch error allowed to propagate.
+  - Add a typed failed-branch contract:
+    - keep `BranchState.status` as `completed`, `cancelled`, or `failed`
+    - add `failure_kind` and `failure_details` for failed branches
+    - keep `CancellationRecord` reserved for `cancelled` branches only
+  - Minimum required `failure_kind` values for WS2 closeout:
+    - `reservation_exceeded`
+    - `branch_execution_error`
+    - `cleanup_failure`
+    - `verification_failure`
+    - `protocol_failure`
+  - Convert reserved-budget overspend into `BranchResult(status="failed")` with `failure_kind="reservation_exceeded"` instead of raising `HardInvalidation` inside the worker.
+  - Parent rollup must account from returned `BranchResult` values first, then decide whether to raise one deterministic outer fatal error.
+  - In v1, any `BranchResult(status="failed")` is fatal to the branch group after accounting and sibling cleanup completes. Failed branches never participate in merge output.
+- Files:
+  - `agintor/runner.py`
+  - `agintor/schemas.py`
+
+### 3. Receipt terminalization must use one shared classifier
+
+- Gap:
+  - Cancellation and reconciliation paths use different hard-coded terminal status sets.
+  - A receipt can be accepted as terminal in one pass and rejected as unresolved in the next.
+  - The branch `side_effect_callback` drops the receipt payload that triggered the persist.
+- Fix:
+  - Add `is_terminal_receipt(receipt) -> bool`.
+  - Freeze the shared terminal-status set in one place. In WS2 closeout, terminal receipt statuses are:
+    - `completed`
+    - `failed`
+    - `reconciled`
+    - `abandoned`
+  - Add one shared `terminalize_receipt(...)` helper for cancellation and resume reconciliation.
+  - Replace inline receipt-status set checks in the runner with these helpers.
+  - `terminalize_receipt(...)` must preserve the original action identity and record the reconciliation source instead of fabricating ad hoc terminalization rules in each caller.
+  - Keep the existing action kinds distinct. Do not collapse `tool_launch`, `tool_completion`, `provider_request`, `provider_completion`, `service_action`, or `filesystem_write`.
+  - Replace the branch-side lambda callback with a real helper that persists branch state and forwards the exact receipt payload that triggered persistence.
+- Files:
+  - `agintor/runner.py`
+  - `agintor/schemas.py`
+  - `agintor/runtime_api.py` if callback typing needs cleanup
+
+### 4. Horizontal fan-out admission must be jointly feasible
+
+- Gap:
+  - `_launchable_branch_plans()` shrinks only on calls and checks.
+  - Latency is apportioned after the fact, which can launch branches that are impossible to run inside their reserved latency slice.
+- Fix:
+  - Add joint feasibility over model calls, checks, and latency.
+  - Add one deterministic `_branch_minimum_latency(...)` helper alongside `_branch_minimum_model_calls()`.
+  - Freeze a per-branch minimum-latency contract before launch:
+    - provider, tool, service-action, direct-response, and verify nodes each consume one latency slice
+    - merge, checkpoint, and pure memory-lookup nodes consume zero latency slices
+    - total minimum branch latency is `latency_slices * branch_latency_floor_s`
+  - Add `branch_latency_floor_s` to the runtime execution profile for this check. Default it to `1.0` seconds unless a stricter runtime profile value is set.
+  - Shrink branch candidates greedily by lowest-ranked worker until feasible.
+  - Feasibility must be checked against the sum of branch minima before weighted slack is apportioned. Post-hoc proportional slicing is not sufficient.
+  - If no feasible set remains, skip fan-out and continue serial execution on the same frontier.
+  - Keep branch reservations as hard ceilings. Do not silently widen them.
+- Files:
+  - `agintor/runner.py`
+  - `agintor/runtime_profile.py`
+  - `agintor/schemas.py` if reservation-failure reasons need enum support
+
+### 5. Host-created attempts must always finalize
+
+- Gap:
+  - In `run_batch()`, `solve()`, and `resume()`, capability-drift checks happen after the `try/except` that currently finalizes host launch failures.
+  - A capability mismatch after attempt creation can leave run or attempt manifests stuck in `running`.
+- Fix:
+  - After `begin_attempt()`, wrap the full host-owned lifecycle in one finalization path:
+    - preflight
+    - local/container execution
+    - capability drift checks
+    - response-shape validation
+    - grouped batch result validation
+  - Always call `_finalize_execution_unit()` before the exception reaches the caller.
+  - Add explicit failure kinds for at least:
+    - `capability_drift`
+    - `protocol_mismatch`
+    - `missing_batch_result`
+    - `host_launch_failure`
+- Files:
+  - `agintor/runtime_host.py`
+  - `agintor/run_store.py` if manifest helpers need small extensions
+
+### 6. Stop-policy exits must produce real top-level cancellation semantics
+
+- Gap:
+  - `runtime.control.stop_policy(...)` can terminate execution before the run has reached a real terminal artifact.
+  - The runner can then pass through `completing`, record `run_cancelled`, and still finish the run in `completed`.
+  - WS2 requires parent-policy cancellation to be a first-class terminal path with top-level `cancelled` state.
+- Fix:
+  - Classify stop-policy exits explicitly:
+    - if terminal outputs are resolved and completion is valid, continue on the completion path
+    - if stop policy terminates execution while unresolved work remains or the terminal artifact is not ready, transition to `cancelled`
+  - Record one canonical `run_cancelled` event for that path with a typed reason such as `parent_stop_policy`.
+  - Do not emit `terminal_emitted` or transition to `completed` on a cancellation path.
+  - Keep `completed`, `failed`, and `cancelled` as the only legal top-level terminal states.
+  - Preserve `RunResult.run_lifecycle_state="cancelled"` on that path and do not let host-side shaping coerce the run back to `completed`.
+- Files:
+  - `agintor/runner.py`
+  - `agintor/schemas.py` if cancellation reason typing needs cleanup
+
+### 7. Docker durable rewriting must be schema-aware
+
+- Gap:
+  - `container_runtime._rewrite_durable_json_paths()` rewrites any string under `/mnt/runs` or `/mnt/checkpoints` recursively.
+  - That can corrupt opaque payload content stored inside checkpoints or side-effect receipts.
+- Fix:
+  - Delete the content-blind recursive rewriter.
+  - Replace it with typed rewriters that only touch explicit path fields from the real durable models already in the repo.
+  - Build the allowlist from the actual schemas, starting with `RunManifest`, `AttemptManifest`, `CheckpointEnvelope`, `CheckpointReference`, and nested `AsyncHandle` path fields.
+  - Treat opaque payloads as immutable bytes. Do not rewrite arbitrary strings inside model output, tool output, `result_ref`, or free-form JSON blobs.
+- Files:
+  - `agintor/container_runtime.py`
+  - `agintor/schemas.py` only if a typed path sub-schema is needed
+
+## P2 Cleanup That Should Land In The Same Closeout
+
+### 8. Distinguish transfer episodes from benchmark duplicates
+
+- Gap:
+  - `runtime_host.py` classifies grouped invocation sets with `len(invocations) > 1`.
+  - That conflates true transfer episodes with repeated benchmark duplicates that share an evaluation unit.
+- Fix:
+  - Add an explicit `episode_kind` to runtime invocation grouping data.
+  - Freeze `episode_kind` values as:
+    - `single_task`
+    - `transfer_episode`
+    - `benchmark_duplicate`
+  - Stamp `episode_kind` in `runtime_batch_request_for_tasks()` and carry it through the host request envelope.
+  - Preserve `task_id` for benchmark duplicates.
+  - Treat only `transfer_episode` as a grouped multi-step evaluation unit.
+  - `benchmark_duplicate` invocations may share transport, but they must not be collapsed into a transfer-style grouped evaluation unit.
+- Files:
+  - `agintor/runtime_api.py`
+  - `agintor/runtime_host.py`
+  - `agintor/schemas.py`
+
+### 9. Remove the legacy summary-only checkpoint writer
+
+- Gap:
+  - `FixedShell.save_checkpoints()` still exists next to `save_checkpoint_envelope()`.
+- Fix:
+  - Delete `save_checkpoints()` outright.
+  - Keep `save_checkpoint_envelope()` as the only checkpoint write path.
+- Files:
+  - `agintor/shell.py`
+
+### 10. Fix `BranchPublication.accepted` semantics instead of deleting it
+
+- Gap:
+  - Branch publications are emitted with `accepted=True` unconditionally.
+  - That conflicts with the governing WS2 contract, which requires parent acceptance to control sibling visibility and merge consumption.
+- Fix:
+  - Keep `BranchPublication.accepted` in the schema. It is required by the governing workstream contract.
+  - Freeze acceptance semantics explicitly:
+    - branches emit publications with `accepted=False`
+    - only the parent may flip a publication to `accepted=True`
+    - only accepted publications are visible to sibling branches through the append-only board and restored-frontier reconstruction
+    - merge consumes only accepted publications, choosing the deterministic winner for each logical key
+    - losing publications remain stored in checkpoints and trace history but do not mutate merged parent state
+  - Remove unconditional `accepted=True` emission and any code that treats branch publication as parent-accepted by default.
+- Files:
+  - `agintor/schemas.py`
+  - `agintor/runner.py`
+
+### 11. Add one explicit guard on the `completing` exit path
+
+- Gap:
+  - The run can be cancelled while transitioning out of `completing`.
+  - The current code behaves plausibly, but the exit contract is implicit.
+- Fix:
+  - Add one end-of-transition assertion that the final state is exactly one of `completed`, `failed`, or `cancelled`.
+  - Record exactly one matching terminal event on that exit.
+- Files:
+  - `agintor/runner.py`
+
+## Implementation Order
+
+1. Fix host finalization in `runtime_host.py`.
+2. Add the shared receipt classifier and terminalization helpers.
+3. Rework branch terminalization, failure typing, publication acceptance, and parent rollup so every branch returns a terminal `BranchResult`.
+4. Add joint fan-out feasibility, including deterministic minimum latency.
+5. Implement end-to-end resume rebind, provenance fields, and frozen semantic plan identity.
+6. Normalize stop-policy exits so cancellation is a real top-level terminal path.
+7. Replace Docker's content-blind path rewriting with typed rewriters.
+8. Land cleanup items:
+   - `episode_kind`
+   - remove `save_checkpoints()`
+   - add the completion-exit assertion
+
+## Required Test Coverage
+
+- Resume with a new `request_id` must produce:
+  - `SolveResult.request_id == active_request_id`
+  - post-resume runtime events with the active request id
+  - new checkpoints with the active request id plus `origin_request_id`
+  - preserved `plan_id`, `plan_digest`, `runtime_hash`, and checkpoint-selected semantic plan identity
+- A failed branch must still return a terminal `BranchResult` and contribute full budget/provider usage/receipts to parent rollup.
+- Branch overspend must become terminal branch data with `failure_kind="reservation_exceeded"`, not a top-level `HardInvalidation`.
+- Completed receipts must remain terminal during cancellation and resume reconciliation.
+- Failed receipts must remain terminal during cancellation and resume reconciliation.
+- Branch side-effect callbacks must receive the receipt payload that triggered the persist.
+- Parent acceptance must be required before a branch publication becomes sibling-visible or merge-visible.
+- Infeasible latency must suppress fan-out instead of launching impossible branches.
+- Stop-policy cancellation with unresolved work must end in `cancelled`, emit exactly one `run_cancelled`, and never emit `terminal_emitted`.
+- Terminal-ready completion paths must still end in `completed` and must not be reclassified as cancellation.
+- `solve`, `run_batch`, and `resume` must finalize manifests on capability drift and other post-launch validation failures.
+- Docker post-processing must rewrite only typed path fields and preserve opaque payload strings byte-for-byte.
+- Benchmark duplicates must preserve `task_id`, while transfer episodes remain grouped multi-step units.
+- `save_checkpoints()` must no longer exist.
+- `BranchPublication.accepted` must have real parent-acceptance semantics.
+
+## Done Definition
+
+WS2 is closed when all of the following are true:
+
+- Post-resume artifacts use exactly one active `request_id`, with original checkpoint identity preserved only as provenance.
+- Every launched branch yields exactly one terminal `BranchResult`, parent accounting is derived from branch results rather than uncaught worker exceptions, and failed branches carry typed failure kinds.
+- No run or attempt manifest remains `running` after any host-visible exception that occurs after attempt creation.
+- Stop-policy exits with unresolved work become true top-level cancellation outcomes rather than completing runs.
+- Docker durable-path rewriting touches only explicitly path-typed fields.
+- Transfer episodes and benchmark duplicates are classified separately.
+- The repo no longer contains:
+  - `FixedShell.save_checkpoints()`
+  - unconditional `accepted=True` branch publication emission
+  - content-blind durable string rewriting under `/mnt/...`
+- The focused tests above are green.
+
+Only then should WS3 start.

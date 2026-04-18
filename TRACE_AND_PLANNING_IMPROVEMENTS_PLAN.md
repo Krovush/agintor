@@ -320,8 +320,8 @@ builds/<build_id>/runtime_tasks/<task_id>/seed_<seed>/runtimes/<runtime_hash>/
   - broaden allowed tool categories beyond the source task family
 - Set `FactoryProfile.benchmark_generation.strategy` to `goal_scoped_multi_select_v1`.
 - Set:
-  - `runtime_abi = "agintor-runtime-abi-v4"`
-  - `storage_schema_version = "agintor-storage-v2"`
+  - `runtime_abi = "agintor-runtime-abi-v5"`
+  - `storage_schema_version = "agintor-storage-v3"`
 - Treat compatibility failures as hard breaks with explicit loader or host errors that report expected versus actual values and instruct the user to rebuild or re-export the runtime.
 
 ## Went To Which Implementation Workstream
@@ -354,7 +354,7 @@ Use this section as the routing map when implementing from the remaining workstr
 | Bounded goal-conditioned task synthesis from approved local templates | Workstream 4 | None | Entirely benchmark-planning and benchmark-library scope. |
 | Initial bounded template IDs and transform restrictions | Workstream 4 | None | Entirely benchmark-planning scope. |
 | Provider-assisted planning authority limits | Workstream 4 | Workstream 5 | Workstream 4 owns what provider-assisted planning is allowed to change. Workstream 5 only preserves structured provider outputs and trace capture for those calls. |
-| `runtime_abi = agintor-runtime-abi-v4` and `storage_schema_version = agintor-storage-v2` | Workstream 2 | Workstreams 3, 5 | Workstream 2 owns introducing the version bump at the runtime contract boundary. Workstreams 3 and 5 must adopt the new versions for persisted trace and provider-capture changes, but must not introduce another independent bump. |
+| `runtime_abi = agintor-runtime-abi-v5` and `storage_schema_version = agintor-storage-v3` | Workstream 2 | Workstreams 3, 5 | Workstream 2 owns introducing the version bump at the runtime contract boundary. Workstreams 3 and 5 must adopt the new versions for persisted trace and provider-capture changes, but must not introduce another independent bump. |
 | Compatibility failures as explicit hard breaks | Workstream 2 | Workstream 3 | Workstream 2 owns host or loader compatibility errors. Workstream 3 owns persisted-state and trace-store compatibility behavior under the same version line. |
 | Manual validation of trace context propagation and grouped traces | Workstreams 2 and 3 | Workstream 5 | Workstream 2 validates contract propagation, Workstream 3 validates grouped-finalization behavior, and Workstream 5 validates provider capture and rendering fidelity. |
 | Manual validation of broader family selection and multi-task planning | Workstream 4 | None | Entirely benchmark-planning scope. |
