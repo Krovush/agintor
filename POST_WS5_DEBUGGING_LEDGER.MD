@@ -19,21 +19,6 @@
   - make grouped reduction treat `paused` as non-terminal unless/until the run actually reaches a completed terminal state
   - recheck host finalization and grouped episode reduction together so resumable failures do not get flattened into successful completion records
 
-### External checkpoint resume should fall back from stale `run_root` to `run_id`
-
-- Area:
-  - `agintor/run_store.py`
-  - `RunStore.resolve_resume_target()`
-- Current behavior:
-  - when resume is driven by an explicit `checkpoint_ref` outside the durable run directory, resolution prefers `CheckpointEnvelope.run_root` whenever that field is non-empty
-  - if that embedded `run_root` is stale or container-only (for example `/mnt/runs/...`), resume fails even when `CheckpointEnvelope.run_id` still points to a valid local durable run manifest
-- Why not fixed in this WS2 closure pass:
-  - normal same-workspace checkpoint publication paths are already host-rewritten and continue to work
-  - the failure shows up on externalized, copied, or container-origin checkpoints rather than the dominant local resume path
-- Follow-up target:
-  - make `resolve_resume_target()` fall back from `run_root` to `run_id` when the stored root cannot be resolved locally
-  - keep this covered when WS3 introduces the durable indexed checkpoint store and cross-run recovery surfaces
-
 ### ReplayProvider branch-clone determinism under concurrent horizontal execution
 
 - Area:
@@ -279,3 +264,137 @@
   - this bug is real, but it sits in a secondary convenience wrapper rather than the core host/runtime batch contract
 - Follow-up target:
   - route `DockerRuntimeExecutor.run_batch()` through `runtime_batch_request_for_tasks()` so duplicate-task handling, grouped episodes, and trace stamping stay aligned with the main batch protocol
+
+### Repeating the same transfer-scored episode with the same seed collapses batch identity
+
+- Area:
+  - `agintor/runtime_api.py`
+  - `runtime_batch_request_for_tasks()`
+  - `agintor/runtime_host.py`
+  - `RuntimeHost.run_batch()`
+- Current behavior:
+  - transfer-scored invocations currently key grouped execution only by `episode_id` plus `seed`
+  - if the same transfer episode is intentionally scheduled twice with the same seed, both copies get the same grouped `evaluation_unit_id`
+  - the member `request_id` values also repeat, so host-side batch grouping and response validation collapse what should be two repeated evaluation units into one durable run/request namespace
+- Why not fixed in this WS2 closure pass:
+  - this only appears when an identical transfer-scored episode is deliberately rerun with the same seed for repeatability or comparison
+  - current WS2 closure and WS3 handoff work do not rely on repeated transfer-episode duplicates in the active shipped suite
+  - the fix should be deliberate because it needs to preserve stable within-episode grouping semantics while adding a higher-level duplicate ordinal for repeated episode runs
+- Follow-up target:
+  - disambiguate repeated transfer-episode invocations at the evaluation-unit layer without breaking grouped episode semantics
+  - keep per-member `request_id`, grouped `evaluation_unit_id`, and durable run identity aligned when the same episode is scheduled more than once with the same seed
+
+### Shaped batch failures currently erase real usage and latency
+
+- Area:
+  - `agintor/runtime_sdk/runtime_entry.py`
+  - `_shape_batch_failure_run()`
+- Current behavior:
+  - when one batch invocation raises and gets converted into a shaped `RunResult`, the fallback result hardcodes `cost=0`, `latency=0`, and empty `provider_usage`
+  - if the failing invocation already spent model calls before the exception, both the per-run metrics and the aggregated `RuntimeBatchResponse.provider_usage` under-report real usage
+- Why not fixed in this WS2 closure pass:
+  - this is a real evaluation-accounting bug, but it does not break the runtime state machine, checkpoint envelope contract, branch semantics, or resume semantics that WS3 is about to inherit
+  - the common successful solve and resume paths still preserve usage correctly
+- Follow-up target:
+  - preserve provider-usage delta and elapsed latency when shaping failed batch invocations so evaluation artifacts stay truthful even on failure paths
+
+### Resumed runs under-report end-to-end latency
+
+- Area:
+  - `agintor/runner.py`
+  - `TaskRuntime._restore_runtime_state_snapshot()`
+  - `TaskRuntime._build_run_result()`
+- Current behavior:
+  - checkpoint restore repopulates `RuntimeBudget.latency` from the checkpoint snapshot
+  - the final `RunResult` still reports `latency=time.perf_counter() - start`, which only measures the resumed segment
+  - resumed solve and batch runs therefore under-report total latency relative to uninterrupted runs
+- Why not fixed in this WS2 closure pass:
+  - this does not change checkpoint safety, receipt replay rules, branch execution semantics, or runtime isolation guarantees
+  - the gap is in evaluation/accounting fidelity, not in the core solve-time contract WS3 is about to inherit
+- Follow-up target:
+  - include pre-resume latency in the final `RunResult` latency field or persist an explicit end-to-end elapsed-time counter across checkpoints
+  - recheck solve/batch aggregation so resumed runs compare fairly against uninterrupted runs
+
+### Post-launch provider and tool failures leave launched-only receipts
+
+- Area:
+  - `agintor/runtime_api.py`
+  - `PolicyContext.run_model_request()`
+  - `agintor/runner.py`
+  - `_execute_tool_operation()`
+- Current behavior:
+  - provider requests and tool executions publish launch receipts and checkpoint boundaries before the side effect finishes
+  - if `provider.generate()` throws, or if a launched tool fails before its completion receipt is recorded, the checkpoint ledger is left with a `launched` receipt only
+  - strict resume then fails closed with `receipt_reconciliation_failed` even though the original action has already reached a local terminal failure
+- Why not fixed in this WS2 closure pass:
+  - the runtime still fails closed and avoids blind reissue, so this does not undermine the receipt, checkpoint, or persistence contract WS3 is about to inherit
+  - the gap is in recovery fidelity for failure paths, not in the core solve-time meaning of the persisted artifacts
+- Follow-up target:
+  - emit terminal failure receipts for provider and tool paths that throw after launch persistence
+  - keep resume behavior fail-closed when terminal status still cannot be proven, but distinguish known local failure from unknown in-flight state
+
+### Prompt-mode file inspection can compile into repo patch plans
+
+- Area:
+  - `agintor/runtime_api.py`
+  - `solve_request_to_task()`
+  - `_prompt_requests_repo_patch()`
+  - `_prompt_requests_file_inspection()`
+- Current behavior:
+  - prompt-mode request adaptation checks the repo-patch template before the file-inspection template
+  - broad tokens such as `fix`, `change`, or `update` therefore push read-only prompts like `review the fix in foo.py` into the write-capable repo-patch path
+- Why not fixed before WS3 handoff:
+  - this is a user-request adaptation bug, not a checkpoint, receipt, branch, or persistence-contract break
+  - WS3 can proceed on top of the frozen WS2 state and durability contracts without depending on this prompt-template ordering
+- Follow-up target:
+  - make file-inspection intent outrank repo-patch intent when the prompt is clearly read-only
+  - tighten repo-patch triggering so broad review/debug language does not cross into write semantics
+
+### Prompt-mode file path extraction ignores repo-relative paths
+
+- Area:
+  - `agintor/runtime_api.py`
+  - `_PROMPT_PATH_RE`
+  - `_request_file_paths()`
+- Current behavior:
+  - plain prompt-mode adaptation only extracts absolute paths from free-text prompts
+  - common repo-relative requests such as `review src/app.py` or `fix tests/test_runtime.py` therefore miss the file-aware templates and fall back to generic direct-response behavior
+- Why not fixed before WS3 handoff:
+  - this hurts prompt-mode ergonomics and correctness, but it does not undermine the runtime-state, checkpoint, or persistence surfaces that WS3 inherits
+  - the bug is local to prompt adaptation rather than to the WS2 execution-state contract
+- Follow-up target:
+  - recognize bounded repo-relative paths during prompt adaptation
+  - keep the extraction tied to the runtime workspace so file-aware prompt templates work without requiring absolute paths
+
+### Docker solve and batch containers do not mount prompt-mode request files
+
+- Area:
+  - `agintor/container_runtime.py`
+  - `DockerRuntimeExecutor.solve_protocol()`
+  - `DockerRuntimeExecutor.run_batch_protocol()`
+- Current behavior:
+  - the Docker execution path mounts the runtime bundle, transport JSON, provider payloads, workspace, output directory, and durable run roots
+  - it does not mount host-side `request.file_paths` / `task.file_paths` that the new prompt-mode `file_inspection` and `repo_patch` templates compile into `filesystem/read_text_file` nodes
+  - file-backed prompt solves therefore work locally but fail inside Docker because the referenced files are absent from the container filesystem
+- Why not fixed before WS3 handoff:
+  - this is a backend-specific prompt-execution gap, not a failure of the checkpoint, branch, receipt, or runtime-event contracts that WS3 is about to persist
+  - WS3 can still safely build on the frozen WS2 solve-state and durability surfaces without depending on Docker prompt-mode file inspection or patching
+- Follow-up target:
+  - mount validated request/task input files into Docker solve and batch containers with stable container-side rewrites
+  - keep the mounted-path rewrite aligned with the execution-plan file bindings so file-backed prompt templates behave the same across `local` and `docker`
+
+### Service-action wall time is not charged into runtime budget accounting
+
+- Area:
+  - `agintor/runner.py`
+  - `TaskRuntime._execute_service_action_node()`
+- Current behavior:
+  - the `service_action` path performs `urllib_request.urlopen(...)` and returns an output artifact, but never charges the elapsed call time into `RuntimeBudget.latency`
+  - final run latency still reflects total wall-clock runtime, but branch reservations and stop-policy heuristics read `RuntimeBudget.latency`, not the final `RunResult.latency`
+  - long or hanging HTTP calls can therefore overspend the reserved branch latency slice without being reflected in the runtime-side budget state
+- Why not fixed before WS3 handoff:
+  - this is evaluation and control-accounting drift on one operation family, not a break in the persisted checkpoint, receipt, recovery, or trace contracts that WS3 consumes
+  - the service-action side-effect protocol itself is the WS3-critical part; the latency-charge omission weakens solve-time budgeting but does not invalidate the durability model
+- Follow-up target:
+  - charge service-action elapsed wall time into `RuntimeBudget.latency` just like tool and checker latency
+  - recheck branch reservation enforcement and stop-policy behavior for `service_action` nodes once that accounting path is wired up
