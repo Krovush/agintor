@@ -184,12 +184,22 @@ class TopologyPolicy:
             key=lambda item: (
                 0 if item.get("verifier_support", 0.0) >= 1.0 else 1,
                 -item.get("verifier_support", 0.0),
-                -item.get("predicted_solve", 0.0),
                 item.get("unresolved_critical", 0),
-                item.get("worker_id", ""),
+                -item.get("predicted_solve", 0.0),
+                item.get("merge_priority", 0),
+                item.get("branch_id", item.get("worker_id", "")),
             ),
         )
-        return ordered[0]["artifact"] if ordered else {}
+        if not ordered:
+            return {}
+        if all(isinstance(item.get("artifact"), dict) for item in ordered):
+            merged: dict[str, Any] = {}
+            for item in ordered:
+                for key, value in item.get("artifact", {}).items():
+                    merged.setdefault(key, value)
+            if merged:
+                return merged
+        return ordered[0]["artifact"]
 
     def make_checkpoint(self, ctx, frame, artifacts, unresolved, open_handles) -> Checkpoint:
         summary = SummaryRecord(

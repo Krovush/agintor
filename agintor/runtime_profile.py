@@ -39,6 +39,7 @@ class ExecutionProfile(BaseModel):
     model_calls_max: int = 64
     checks_max: int = 16
     context_window_tokens: int = 768
+    branch_latency_floor_s: float = 1.0
 
 
 class EvaluationProfile(BaseModel):

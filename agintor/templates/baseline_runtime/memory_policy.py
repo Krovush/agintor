@@ -69,20 +69,14 @@ class MemoryPolicy:
     def summarize_span(self, ctx, nodes: Sequence[dict[str, Any]]) -> SummaryRecord:
         spec = load_prompt_spec(ctx.profile.prompts.memory_summary)
         prompt = "\n".join(f"{node['type']}: {node['content']}" for node in nodes)
-        response = ctx.provider.generate(
-            type(
-                "Req",
-                (),
-                {
-                    "instructions": spec.instructions,
-                    "prompt": prompt,
-                    "model_class": spec.model_class,
-                    "seed": ctx.seed,
-                    "metadata": {"mode": "summary"},
-                },
-            )
+        response = ctx.run_model_request(
+            instructions=spec.instructions,
+            prompt=prompt,
+            model_class=spec.model_class,
+            purpose="summary",
+            payload={"node_count": len(nodes)},
+            trace_context=ctx.derive_trace_context(frame_role="memory", op_id="memory_summary"),
         )
-        ctx.consume_model_response(response, purpose="memory_summary")
         artifacts = sorted(
             {
                 str(node["metadata"].get("artifact_ref", "") or node["label"])

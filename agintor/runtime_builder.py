@@ -61,6 +61,7 @@ from .schemas import (
     ProviderPlan,
     ProviderRole,
     ReplanContract,
+    RuntimeIsolationPolicy,
     RuntimeManifest,
     RuntimePlan,
     ModelRequest,
@@ -804,6 +805,15 @@ def _build_deployment_contract(goal_spec: GoalSpec, profile: RuntimeProfile) -> 
         }
     )
     environment_allowlist = [name for name in environment_allowlist if name]
+    network_policy = str(goal_spec.constraints.get("network_policy", "provider-only"))
+    required_guarantees = [
+        "timeout_enforcement",
+        "workspace_isolation",
+        "environment_filtering",
+    ]
+    desired_guarantees = ["process_cleanup"]
+    if network_policy in {"none", "restricted"}:
+        required_guarantees.append("network_disablement")
     return DeploymentContract(
         entry_command='agintor solve <runtime_dir> --prompt "<request>"',
         runtime_abi=RUNTIME_ABI_VERSION,
@@ -814,10 +824,19 @@ def _build_deployment_contract(goal_spec: GoalSpec, profile: RuntimeProfile) -> 
         required_env_names=_required_runtime_env_names(profile),
         required_env_any_of=required_env_any_of,
         environment_allowlist=environment_allowlist,
-        network_policy=str(goal_spec.constraints.get("network_policy", "provider-only")),
+        network_policy=network_policy,
         filesystem_policy=str(goal_spec.constraints.get("filesystem_policy", "workspace-read-write")),
         dependency_digest_set=sorted(set(kernel_manifest.files.values())),
         capability_flags=[*KERNEL_CAPABILITY_FLAGS, "benchmark_mode", "prompt_mode"],
+        runtime_isolation_policy=RuntimeIsolationPolicy(
+            timeout_envelope={"seconds": profile.execution.latency_max},
+            workspace_root=".",
+            environment_allowlist=environment_allowlist,
+            network_policy=network_policy,
+            filesystem_policy=str(goal_spec.constraints.get("filesystem_policy", "workspace-read-write")),
+            required_guarantees=required_guarantees,
+            desired_guarantees=desired_guarantees,
+        ),
         notes=notes,
     )
 

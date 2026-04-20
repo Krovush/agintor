@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import shutil
 import statistics
 import subprocess
@@ -17,8 +18,14 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from .artifacts import ArtifactPolicy
 from .exceptions import SafetyViolation, ValidationError
-from .pydantic_compat import model_copy
-from .schemas import AsyncHandle, ToolExecutionResult, ToolSpec
+from .pydantic_compat import model_copy, model_dump, model_validate
+from .schemas import (
+    AsyncHandle,
+    TaskLocalToolRegistrySnapshot,
+    TaskLocalToolSnapshot,
+    ToolExecutionResult,
+    ToolSpec,
+)
 from .utils import ensure_directory, file_digest, now_ts, stable_hash
 
 
@@ -180,6 +187,22 @@ def _validation_temp_base() -> Path:
     return ensure_directory(ArtifactPolicy.resolve().tool_validation_root)
 
 
+def _resolve_runtime_file_path(path: str | Path, *, workspace_root: Path) -> Path:
+    candidate = Path(str(path or "").strip()).expanduser()
+    if not str(candidate):
+        raise ValidationError("filesystem/read_text_file requires a non-empty path")
+    if candidate.is_absolute():
+        return candidate.resolve()
+    resolved = (workspace_root / candidate).resolve()
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValidationError(
+            f"filesystem/read_text_file path {str(candidate)!r} escapes runtime workspace {workspace_root}"
+        ) from exc
+    return resolved
+
+
 def _materialize_generated_tool(spec: ToolSpec, source: str, sandbox_manager: SandboxManager) -> tuple[ToolSpec, Path]:
     staged_spec = model_copy(spec, update={"source_digest": stable_hash(source)})
     staged_dir = sandbox_manager.ensure_environment(staged_spec)
@@ -227,9 +250,10 @@ def _run_validation_trial(tool_file: Path, args: Mapping[str, Any], timeout_s: f
 
 
 class ToolRegistry:
-    def __init__(self, sandbox_manager: SandboxManager, safety_guard: SafetyGuard) -> None:
+    def __init__(self, sandbox_manager: SandboxManager, safety_guard: SafetyGuard, *, workspace_root: Path) -> None:
         self.sandbox_manager = sandbox_manager
         self.safety_guard = safety_guard
+        self.workspace_root = Path(workspace_root).resolve()
         self._tools: dict[str, RegisteredTool] = {}
         self._category_summaries: dict[str, str] = {}
         self._register_builtin_tools()
@@ -269,6 +293,27 @@ class ToolRegistry:
         register("math/basic/median_number", ["math", "basic"], "Return median number", lambda numbers: statistics.median(numbers), "(numbers: list[float]) -> float")
         register("data/csv/column_sum", ["data", "csv"], "Sum a numeric column across rows", lambda rows, column: sum(float(row[column]) for row in rows), "(rows: list[dict], column: str) -> float")
         register("data/csv/column_max", ["data", "csv"], "Max a numeric column across rows", lambda rows, column: max(float(row[column]) for row in rows), "(rows: list[dict], column: str) -> float")
+        register(
+            "filesystem/read_text_file",
+            ["filesystem", "read"],
+            "Read UTF-8 text content from a runtime-workspace-relative or explicit absolute file path",
+            self._read_text_file,
+            "(path: str) -> dict",
+        )
+
+    def _read_text_file(self, path: str) -> dict[str, Any]:
+        resolved = _resolve_runtime_file_path(path, workspace_root=self.workspace_root)
+        if not resolved.exists():
+            return {
+                "path": str(resolved),
+                "content": "",
+                "exists": False,
+            }
+        return {
+            "path": str(resolved),
+            "content": resolved.read_text(encoding="utf-8"),
+            "exists": True,
+        }
 
     @property
     def tools(self) -> dict[str, RegisteredTool]:
@@ -316,6 +361,51 @@ class ToolRegistry:
         ]
         for category_key in removable_categories:
             self._category_summaries.pop(category_key, None)
+
+    def snapshot_task_local(self) -> TaskLocalToolRegistrySnapshot:
+        tool_snapshots: list[TaskLocalToolSnapshot] = []
+        category_summaries: dict[str, str] = {}
+        for tool in self._tools.values():
+            if tool.spec.category_path[:2] != ["generated", "local"]:
+                continue
+            sandbox_dir = self.sandbox_manager.ensure_environment(tool.spec)
+            tool_file = sandbox_dir / _tool_filename(tool.spec)
+            source = tool_file.read_text(encoding="utf-8") if tool_file.exists() else ""
+            tool_snapshots.append(
+                TaskLocalToolSnapshot(
+                    spec=model_copy(tool.spec, deep=True),
+                    source=source,
+                    historical_passes=tool.historical_passes,
+                    historical_runs=tool.historical_runs,
+                    distinct_tasks=sorted(tool.distinct_tasks),
+                    sandbox_hash=tool.sandbox_hash,
+                    safety_validated=tool.safety_validated,
+                )
+            )
+            category_summaries[tool.category_key] = self._category_summaries.get(tool.category_key, tool.spec.description)
+        return TaskLocalToolRegistrySnapshot(
+            tools=tool_snapshots,
+            category_summaries=category_summaries,
+        )
+
+    def restore_task_local(self, snapshot: Mapping[str, Any] | TaskLocalToolRegistrySnapshot) -> None:
+        registry_snapshot = (
+            snapshot
+            if isinstance(snapshot, TaskLocalToolRegistrySnapshot)
+            else model_validate(TaskLocalToolRegistrySnapshot, snapshot)
+        )
+        self.reset_task_local()
+        for tool_snapshot in registry_snapshot.tools:
+            registered = self.register_generated_tool(tool_snapshot.spec, tool_snapshot.source)
+            registered.historical_passes = tool_snapshot.historical_passes
+            registered.historical_runs = tool_snapshot.historical_runs
+            registered.distinct_tasks = set(tool_snapshot.distinct_tasks)
+            registered.sandbox_hash = tool_snapshot.sandbox_hash
+            registered.safety_validated = tool_snapshot.safety_validated
+            self._category_summaries[registered.category_key] = registry_snapshot.category_summaries.get(
+                registered.category_key,
+                registered.spec.description,
+            )
 
     def register_generated_tool(self, spec: ToolSpec, source: str, executor: Callable[..., Any] | None = None) -> RegisteredTool:
         self.safety_guard.validate_permissions(spec.permissions)
@@ -535,6 +625,128 @@ class ToolExecutor:
             success=success,
             async_handle_id=handle.handle_id,
         )
+
+    def cancel_async_handle(self, handle_id: str, handle_table: Any) -> dict[str, Any]:
+        handle = handle_table.get(handle_id)
+        record = self._async_processes.pop(handle_id, None)
+        if record is None:
+            raise RuntimeError(f"async process handle {handle_id!r} is not tracked for cancellation")
+        process = record.process
+        stdout = ""
+        stderr = ""
+        if process.poll() is None:
+            try:
+                process.terminate()
+                stdout, stderr = process.communicate(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+        else:
+            stdout, stderr = process.communicate()
+        stderr = (stderr or "").strip()
+        if process.returncode not in (None, 0):
+            message = f"process terminated with code {process.returncode}"
+            if message not in stderr:
+                stderr = f"{stderr}\n{message}".strip()
+        artifact_refs = self._write_async_artifacts(
+            Path(handle.stdout_path) if handle.stdout_path else None,
+            Path(handle.stderr_path) if handle.stderr_path else None,
+            Path(handle.artifact_refs[0]) if handle.artifact_refs else None,
+            stdout=stdout or "",
+            stderr=stderr,
+            output=None,
+        )
+        handle_table.update_state(handle_id, "cancelled")
+        cancelled_handle = handle_table.get(handle_id)
+        cancelled_handle.artifact_refs = artifact_refs or list(cancelled_handle.artifact_refs)
+        handle_table.handles[handle_id] = cancelled_handle
+        return {
+            "handle_id": handle_id,
+            "state": "cancelled",
+            "stdout": stdout or "",
+            "stderr": stderr,
+            "artifact_refs": artifact_refs,
+        }
+
+    @staticmethod
+    def _pid_is_running(process_pid: int | None) -> bool:
+        if process_pid is None:
+            return False
+        try:
+            pid = int(process_pid)
+        except Exception:
+            return False
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return completed.returncode == 0 and str(pid) in str(completed.stdout or "")
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    def reconcile_async_handle(self, handle: AsyncHandle, handle_table: Any) -> dict[str, Any]:
+        record = self._async_processes.get(handle.handle_id)
+        if record is not None:
+            finished = self.await_handle(handle.handle_id, handle_table)
+            return {
+                "status": str(finished.get("state", "") or "").strip() or "unresolved",
+                "handle_id": handle.handle_id,
+                "output": finished.get("output"),
+                "stderr": finished.get("stderr"),
+                "reconciliation_source": "live_process",
+            }
+        if handle.state in {"completed", "failed", "cancelled"}:
+            output = None
+            result_path = Path(handle.artifact_refs[0]) if handle.artifact_refs else None
+            if result_path is not None and result_path.exists():
+                try:
+                    output = json.loads(result_path.read_text(encoding="utf-8"))
+                except Exception:
+                    output = None
+            return {
+                "status": handle.state,
+                "handle_id": handle.handle_id,
+                "output": output,
+                "stderr": "",
+                "reconciliation_source": "terminal_handle_state",
+            }
+        if handle.state != "running":
+            return {
+                "status": "unresolved",
+                "handle_id": handle.handle_id,
+                "reason": f"unsupported_handle_state:{handle.state}",
+                "reconciliation_source": "durable_state",
+            }
+        result_path = Path(handle.artifact_refs[0]) if handle.artifact_refs else None
+        if result_path is not None and result_path.exists():
+            try:
+                output = json.loads(result_path.read_text(encoding="utf-8"))
+            except Exception:
+                output = None
+            handle_table.update_state(handle.handle_id, "completed")
+            return {
+                "status": "completed",
+                "handle_id": handle.handle_id,
+                "output": output,
+                "stderr": "",
+                "reconciliation_source": "artifact_result",
+            }
+        live_process = self._pid_is_running(handle.process_pid)
+        return {
+            "status": "unresolved",
+            "handle_id": handle.handle_id,
+            "reason": "live_process_without_runtime_record" if live_process else "missing_runtime_record",
+            "live_process": live_process,
+            "reconciliation_source": "durable_state",
+        }
 
     def await_handle(self, handle_id: str, handle_table: Any) -> dict[str, Any]:
         handle = handle_table.get(handle_id)

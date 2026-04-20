@@ -12,7 +12,7 @@ from typing import Any, Dict
 
 from .exceptions import RuntimeLoadError
 from .pydantic_compat import model_dump, model_validate
-from .schemas import CapabilityExchange, DeploymentContract, KernelManifest, RuntimeManifest
+from .schemas import CapabilityExchange, DeploymentContract, KernelManifest, RuntimeIsolationPolicy, RuntimeManifest
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, profile_to_json
 try:
     from .runtime_sdk import (
@@ -27,10 +27,10 @@ except ImportError:
     KERNEL_MANIFEST_FILE = "kernel_manifest.json"
     KERNEL_PACKAGE_NAME = "agintor_runtime"
     KERNEL_VERSION = "agintor-kernel-v1"
-    STORAGE_SCHEMA_VERSION = "agintor-storage-v1"
+    STORAGE_SCHEMA_VERSION = "agintor-storage-v3"
 from .utils import ast_node_count, file_digest, stable_hash
 
-RUNTIME_ABI_VERSION = "agintor-runtime-abi-v3"
+RUNTIME_ABI_VERSION = "agintor-runtime-abi-v5"
 DEPLOYMENT_CONTRACT_FILE = "deployment_contract.json"
 RUNTIME_EXPORT_BUNDLE_FILE = "runtime_export_bundle.json"
 RUNTIME_PROVENANCE_BUNDLE_FILE = "runtime_provenance_bundle.json"
@@ -61,6 +61,13 @@ class LoadedRuntime:
     mutable_loc: int
 
 
+@dataclass(frozen=True)
+class DockerLaunchPolicy:
+    deployment_contract: DeploymentContract
+    runtime_isolation_policy: RuntimeIsolationPolicy
+    network_none: bool
+
+
 def _load_manifest(runtime_path: Path) -> RuntimeManifest:
     manifest_path = runtime_path / "runtime_manifest.json"
     if not manifest_path.exists():
@@ -74,7 +81,16 @@ def _load_deployment_contract(runtime_path: Path) -> DeploymentContract:
     contract_path = runtime_path / DEPLOYMENT_CONTRACT_FILE
     if not contract_path.exists():
         raise RuntimeLoadError(f"missing {DEPLOYMENT_CONTRACT_FILE} in {runtime_path}")
-    contract = model_validate(DeploymentContract, json.loads(contract_path.read_text(encoding="utf-8")))
+    try:
+        payload = json.loads(contract_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeLoadError(f"unable to read deployment contract {contract_path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeLoadError(f"invalid JSON in deployment contract {contract_path}: {exc.msg}") from exc
+    try:
+        contract = model_validate(DeploymentContract, payload)
+    except Exception as exc:
+        raise RuntimeLoadError(f"invalid deployment contract schema in {contract_path}: {exc}") from exc
     if contract.runtime_abi != RUNTIME_ABI_VERSION:
         raise RuntimeLoadError(
             f"deployment contract ABI mismatch for {runtime_path}: contract={contract.runtime_abi} loader={RUNTIME_ABI_VERSION}"
@@ -88,6 +104,47 @@ def _load_deployment_contract(runtime_path: Path) -> DeploymentContract:
             f"deployment contract storage schema mismatch for {runtime_path}: contract={contract.storage_schema_version} loader={STORAGE_SCHEMA_VERSION}"
         )
     return contract
+
+
+def _resolved_runtime_isolation_policy(runtime_path: Path, contract: DeploymentContract) -> RuntimeIsolationPolicy:
+    if contract.runtime_isolation_policy is not None:
+        return contract.runtime_isolation_policy
+    return RuntimeIsolationPolicy(
+        timeout_envelope={},
+        workspace_root=".",
+        environment_allowlist=list(contract.environment_allowlist),
+        network_policy=contract.network_policy,
+        filesystem_policy=contract.filesystem_policy,
+        required_guarantees=[],
+        desired_guarantees=[],
+    )
+
+
+def _docker_requires_network_none(policy: RuntimeIsolationPolicy) -> bool:
+    required = {str(item).strip().lower() for item in policy.required_guarantees}
+    network_policy = str(policy.network_policy).strip().lower()
+    return "network_disablement" in required or network_policy in {"none", "restricted"}
+
+
+def _effective_guarantees_for_backend(policy: RuntimeIsolationPolicy, backend: str | None) -> list[str]:
+    backend_key = str(backend or "").strip().lower()
+    if backend_key == "local":
+        return [
+            "timeout_enforcement",
+            "workspace_isolation",
+            "environment_filtering",
+        ]
+    if backend_key == "docker":
+        guarantees = [
+            "timeout_enforcement",
+            "workspace_isolation",
+            "environment_filtering",
+            "process_cleanup",
+        ]
+        if _docker_requires_network_none(policy):
+            guarantees.append("network_disablement")
+        return guarantees
+    return []
 
 
 @contextlib.contextmanager
@@ -196,6 +253,21 @@ def _validate_deployment_contract(
     runtime_backend: str | None = None,
     require_env_names: bool = False,
 ) -> None:
+    isolation_policy = _resolved_runtime_isolation_policy(runtime_path, contract)
+    backend_claims = {
+        "local": {
+            "timeout_enforcement",
+            "workspace_isolation",
+            "environment_filtering",
+        },
+        "docker": {
+            "timeout_enforcement",
+            "workspace_isolation",
+            "environment_filtering",
+            "process_cleanup",
+            "network_disablement",
+        },
+    }
     if not _python_version_ok(contract.python_version):
         raise RuntimeLoadError(
             f"python version mismatch for {runtime_path}: required={contract.python_version} current={sys.version_info.major}.{sys.version_info.minor}"
@@ -206,6 +278,15 @@ def _validate_deployment_contract(
         if backend and supported and backend not in supported:
             raise RuntimeLoadError(
                 f"runtime backend {backend!r} is not supported by {runtime_path}; supported backends: {sorted(supported)}"
+            )
+        if backend == "local" and _docker_requires_network_none(isolation_policy):
+            raise RuntimeLoadError(
+                f"runtime backend {backend!r} cannot satisfy network policy {isolation_policy.network_policy!r} for {runtime_path}"
+            )
+        missing_guarantees = sorted(set(isolation_policy.required_guarantees) - backend_claims.get(backend, set()))
+        if missing_guarantees:
+            raise RuntimeLoadError(
+                f"runtime backend {backend!r} cannot satisfy required isolation guarantees for {runtime_path}: {', '.join(missing_guarantees)}"
             )
     if require_env_names:
         missing = [name for name in contract.required_env_names if name and not os.environ.get(name)]
@@ -223,6 +304,18 @@ def _validate_deployment_contract(
             raise RuntimeLoadError(
                 f"missing required runtime environment variables for {runtime_path}: {rendered}"
             )
+
+
+def resolve_docker_launch_policy(runtime_dir: str | Path) -> DockerLaunchPolicy:
+    runtime_path = Path(runtime_dir).resolve()
+    contract = _load_deployment_contract(runtime_path)
+    policy = _resolved_runtime_isolation_policy(runtime_path, contract)
+    _validate_deployment_contract(runtime_path, contract, runtime_backend="docker")
+    return DockerLaunchPolicy(
+        deployment_contract=contract,
+        runtime_isolation_policy=policy,
+        network_none=_docker_requires_network_none(policy),
+    )
 
 
 def _load_kernel_manifest(runtime_path: Path) -> KernelManifest:
@@ -309,6 +402,7 @@ def load_runtime(
     kernel_manifest = _load_kernel_manifest(runtime_path)
     _verified_kernel_bundle_fingerprints(runtime_path, kernel_manifest)
     deployment_contract = _load_deployment_contract(runtime_path)
+    runtime_isolation_policy = _resolved_runtime_isolation_policy(runtime_path, deployment_contract)
     _validate_deployment_contract(
         runtime_path,
         deployment_contract,
@@ -348,7 +442,17 @@ def load_runtime(
         tool_runtimes=["python"],
         checkpoint_support=True,
         runtime_asset_capabilities={"traces": True, "checkpoints": True, "runtime_sdk": True},
-        side_effect_receipts=False,
+        side_effect_receipts=True,
+        resume_support=True,
+        runtime_isolation_policy=runtime_isolation_policy,
+        supported_guarantees=[
+            "timeout_enforcement",
+            "workspace_isolation",
+            "environment_filtering",
+            "process_cleanup",
+            "network_disablement",
+        ],
+        effective_guarantees=_effective_guarantees_for_backend(runtime_isolation_policy, runtime_backend),
         required_env_names=list(deployment_contract.required_env_names),
         required_env_any_of=[list(group) for group in deployment_contract.required_env_any_of],
         capability_flags=list(deployment_contract.capability_flags or kernel_manifest.capability_flags),
@@ -372,6 +476,7 @@ def load_runtime(
 
 __all__ = [
     "DEPLOYMENT_CONTRACT_FILE",
+    "DockerLaunchPolicy",
     "KERNEL_VERSION",
     "LoadedRuntime",
     "RUNTIME_ABI_VERSION",
@@ -379,5 +484,6 @@ __all__ = [
     "RUNTIME_PROVENANCE_BUNDLE_FILE",
     "STORAGE_SCHEMA_VERSION",
     "load_runtime",
+    "resolve_docker_launch_policy",
     "runtime_identity_inputs",
 ]

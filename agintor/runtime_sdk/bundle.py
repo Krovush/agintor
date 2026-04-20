@@ -12,13 +12,18 @@ KERNEL_BUNDLE_DIR = "runtime_sdk"
 KERNEL_MANIFEST_FILE = "kernel_manifest.json"
 KERNEL_PACKAGE_NAME = "agintor_runtime"
 KERNEL_VERSION = "agintor-kernel-v1"
-STORAGE_SCHEMA_VERSION = "agintor-storage-v1"
+STORAGE_SCHEMA_VERSION = "agintor-storage-v3"
 KERNEL_CAPABILITY_FLAGS = [
     "inspect",
     "run_batch",
+    "resume",
+    "execution_plan_v1",
     "checkpoint_refs",
+    "checkpoint_envelopes",
     "provider_usage",
     "trace_refs",
+    "side_effect_receipts",
+    "runtime_isolation",
 ]
 
 _KERNEL_SOURCE_FILES = [
@@ -34,6 +39,7 @@ _KERNEL_SOURCE_FILES = [
     "predictors.py",
     "prompts.py",
     "pydantic_compat.py",
+    "run_store.py",
     "runner.py",
     "runtime_api.py",
     "runtime_loader.py",

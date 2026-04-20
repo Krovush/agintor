@@ -60,6 +60,21 @@ def _refresh_deployment_contract(runtime_dir: Path) -> None:
     payload["environment_allowlist"] = environment_allowlist
     payload["dependency_digest_set"] = sorted(set(kernel_manifest.files.values()))
     payload["capability_flags"] = [*KERNEL_CAPABILITY_FLAGS, "benchmark_mode", "prompt_mode"]
+    payload["runtime_isolation_policy"] = {
+        "timeout_envelope": {"seconds": runtime_profile.execution.latency_max},
+        "workspace_root": ".",
+        "environment_allowlist": environment_allowlist,
+        "network_policy": str(payload.get("network_policy", "provider-only")),
+        "filesystem_policy": str(payload.get("filesystem_policy", "workspace-read-write")),
+        "required_guarantees": [
+            "timeout_enforcement",
+            "workspace_isolation",
+            "environment_filtering",
+        ],
+        "desired_guarantees": ["process_cleanup"],
+    }
+    if str(payload.get("network_policy", "provider-only")) in {"none", "restricted"}:
+        payload["runtime_isolation_policy"]["required_guarantees"].append("network_disablement")
     payload["notes"] = notes
     contract = DeploymentContract(**payload)
     contract_path.write_text(json.dumps(model_dump(contract), indent=2, sort_keys=True), encoding="utf-8")

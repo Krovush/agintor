@@ -6,6 +6,26 @@ class HardInvalidation(AgintorError):
     """Raised when a non-negotiable runtime invariant is violated."""
 
 
+class BranchCancelled(AgintorError):
+    """Raised when a branch should stop cooperatively without poisoning the whole run."""
+
+
+class PromptAdaptationError(AgintorError):
+    """Raised when bounded prompt adaptation cannot compile a valid runtime request."""
+
+    def __init__(self, failure_kind: str, message: str) -> None:
+        super().__init__(message)
+        self.failure_kind = str(failure_kind)
+
+
+class ResumeRecoveryError(HardInvalidation):
+    """Raised when checkpoint recovery cannot prove a safe restart."""
+
+    def __init__(self, failure_kind: str, message: str) -> None:
+        super().__init__(message)
+        self.failure_kind = str(failure_kind)
+
+
 class SafetyViolation(HardInvalidation):
     """Raised when a safety boundary is crossed."""
 

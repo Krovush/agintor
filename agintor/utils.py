@@ -9,7 +9,7 @@ import random
 import statistics
 import time
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -284,3 +284,15 @@ def read_text(path: Path) -> str:
 
 def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
+
+
+
+def merge_provider_usage(*payloads: Mapping[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for payload in payloads:
+        for key, value in dict(payload or {}).items():
+            if isinstance(value, (int, float)) and isinstance(merged.get(key, 0), (int, float)):
+                merged[key] = merged.get(key, 0) + value
+            else:
+                merged[key] = value
+    return merged

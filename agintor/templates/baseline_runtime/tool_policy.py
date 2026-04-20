@@ -156,20 +156,21 @@ class ToolPolicy:
         if not operation.expression:
             default_expression = self._fallback_expression(operation, tool_args)
             spec = load_prompt_spec(ctx.profile.prompts.tool_spec)
-            response = ctx.provider.generate(
-                type(
-                    "Req",
-                    (),
-                    {
-                        "instructions": spec.instructions,
-                        "prompt": json.dumps({"description": operation.description, "args": tool_args}, sort_keys=True),
-                        "model_class": spec.model_class,
-                        "seed": ctx.seed,
-                        "metadata": {"mode": "tool_spec", "payload": {"expression": default_expression, "description": operation.description, "args": tool_args}},
-                    },
-                )
+            response = ctx.run_model_request(
+                instructions=spec.instructions,
+                prompt=json.dumps({"description": operation.description, "args": tool_args}, sort_keys=True),
+                model_class=spec.model_class,
+                purpose="tool_spec",
+                payload={
+                    "expression": default_expression,
+                    "description": operation.description,
+                    "args": tool_args,
+                },
+                trace_context=ctx.derive_trace_context(
+                    frame_role="tool",
+                    op_id=getattr(operation, "op_id", getattr(operation, "node_id", "tool_spec")),
+                ),
             )
-            ctx.consume_model_response(response, purpose="tool_spec")
             payload = self._parse_tool_spec_payload(response.text)
             provider_expression = payload.get("expression")
             if provider_expression not in (None, ""):

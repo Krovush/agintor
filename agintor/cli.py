@@ -141,7 +141,11 @@ def solve_cmd(
         raise typer.BadParameter("provide either <task_id> for benchmark mode or --prompt / --prompt-file for user-request mode")
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
     provider_impl = _build_provider(provider, api_key_file, runtime_profile, default_to_runtime_profile=True)
-    workspace_lease = _resolve_workspace(workspace, "solve", artifact_mode)
+    if workspace is None:
+        allocator = ArtifactAllocator.resolve()
+        workspace_lease = allocator.explicit_workspace(allocator.ensure_purpose_root("solve"), purpose="solve")
+    else:
+        workspace_lease = _resolve_workspace(workspace, "solve", artifact_mode)
     workspace_path = workspace_lease.path
     failed = True
     try:
@@ -155,7 +159,6 @@ def solve_cmd(
             task, resolved_partition = _resolve_benchmark_task(benchmark, task_id)
             mode = "benchmark"
             runtime_request = runtime_solve_request_for_task(
-                request_id=f"solve.{task.task_id}.{seed}",
                 runtime_backend=runtime_backend,
                 seed=seed,
                 task=task,
