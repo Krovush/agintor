@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
 from agintor.exceptions import RuntimeLoadError
 from agintor.providers import build_provider
 from agintor.pydantic_compat import model_dump
+from agintor.runtime_sdk import bundle_runtime_kernel
 from agintor.runtime_api import (
     compile_execution_plan_from_task,
     load_solve_request,
@@ -114,6 +117,40 @@ def _make_repo_patch_task(task_id: str) -> BenchmarkTask:
         verification_required=False,
         allow_best_effort=True,
     )
+
+
+def test_task_runtime_facade_is_exported_in_bundled_kernel(tmp_path: Path):
+    from agintor.runner import TaskRuntime as HostTaskRuntime
+
+    runtime_dir = tmp_path / "runtime"
+    manifest = bundle_runtime_kernel(runtime_dir, runtime_abi="agintor-runtime-abi-v5", force=True)
+    sdk_path = str((runtime_dir / "runtime_sdk").resolve())
+
+    assert HostTaskRuntime.__name__ == "TaskRuntime"
+    assert hasattr(HostTaskRuntime, "run_task")
+    assert hasattr(HostTaskRuntime, "resume_from_checkpoint")
+    assert hasattr(HostTaskRuntime, "_run_branch_plan")
+    assert hasattr(HostTaskRuntime, "_execute_isolated_frame")
+    assert "agintor_runtime/task_runtime/base.py" in manifest.files
+    assert "agintor_runtime/task_runtime/branch_execution.py" in manifest.files
+
+    for module_name in list(sys.modules):
+        if module_name == "agintor_runtime" or module_name.startswith("agintor_runtime."):
+            del sys.modules[module_name]
+    sys.path.insert(0, sdk_path)
+    try:
+        bundled_runner = importlib.import_module("agintor_runtime.runner")
+        bundled_task_runtime = bundled_runner.TaskRuntime
+        assert bundled_task_runtime.__name__ == "TaskRuntime"
+        assert hasattr(bundled_task_runtime, "run_task")
+        assert hasattr(bundled_task_runtime, "resume_from_checkpoint")
+        assert hasattr(bundled_task_runtime, "_run_branch_plan")
+        assert hasattr(bundled_task_runtime, "_execute_isolated_frame")
+    finally:
+        sys.path.remove(sdk_path)
+        for module_name in list(sys.modules):
+            if module_name == "agintor_runtime" or module_name.startswith("agintor_runtime."):
+                del sys.modules[module_name]
 
 
 class _FakeDockerExecutor:

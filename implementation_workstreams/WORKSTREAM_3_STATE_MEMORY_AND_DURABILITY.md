@@ -106,6 +106,7 @@ Workstream 3 indexes must therefore support run-level, request-level, evaluation
   - request-id rebinding for resumed requests
   - strict and best-effort receipt reconciliation policies
 - Runtime-owned resume already lives in the bundled runtime entrypoint. The host/runtime split is already correct.
+- `agintor.runner.TaskRuntime` remains the stable public import path, but `agintor/runner.py` is now only a compatibility facade. Task-runtime implementation ownership lives under `agintor/task_runtime/`, and exported runtime kernels must bundle that package through `agintor/runtime_sdk/bundle.py`.
 
 Treat this as the restart-contract baseline. Workstream 3 may replace ad-hoc persisted dictionaries with typed fields where it owns the semantics, but it must not introduce a second restart artifact.
 
@@ -176,7 +177,7 @@ Do not spend Workstream 3 effort re-solving issues the current code already fixe
 - Host finalization already prefers a runtime-reported checkpoint ref and falls back to durable run-store lookup only when needed.
 - Grouped result reduction already preserves paused outcomes when a resumable checkpoint exists.
 - Sync tool execution already records launch receipts and checkpoint boundaries before the actual tool run.
-- The root runnable-frontier restore fallback issue is already fixed in the current runner.
+- The root runnable-frontier restore fallback issue is already fixed in the current task runtime.
 
 The debug ledger contains useful history, but Workstream 3 planning must follow the present codebase.
 
@@ -190,7 +191,7 @@ The debug ledger contains useful history, but Workstream 3 planning must follow 
 - There is still no real extracted `EnvironmentFingerprint` record.
 - There is still no typed `RecoveryAttempt` ledger.
 - `openai_trace.py` still writes to a single flat call store and does not yet materialize grouped session, build, solve, or runtime-task views from canonical raw-call records.
-- `TaskRuntime._restore_from_checkpoint()` currently overwrites `context.state.latest_checkpoint_ref` with the shell's latest checkpoint lookup instead of preserving the exact checkpoint selected for restore.
+- `TaskRuntime._restore_from_checkpoint()` in `agintor/task_runtime/checkpointing.py` currently overwrites `context.state.latest_checkpoint_ref` with the shell's latest checkpoint lookup instead of preserving the exact checkpoint selected for restore.
 - `FixedShell.save_trace()` still uses a filename pattern that can collide when the same `task_id` and `seed` are emitted multiple times in one attempt.
 - `DockerRuntimeExecutor._rewrite_checkpoint_envelope_paths()` still applies request-file reverse mapping to broad checkpoint payloads, including `side_effect_ledger`. Workstream 3 must narrow this to typed, explicitly modeled path fields so opaque receipt result payloads, working-memory snapshots, and trace cursors are not mutated by recursive string replacement.
 
@@ -304,7 +305,7 @@ Phases are sequential unless explicitly noted.
 
 This phase is small but mandatory. Fix the remaining baseline defects that would otherwise contaminate Workstream 3 lineage.
 
-- Fix restore-time checkpoint identity in `runner.TaskRuntime._restore_from_checkpoint` so `context.state.latest_checkpoint_ref` keeps the exact checkpoint ref selected for restore instead of being overwritten by `self.shell.latest_checkpoint_ref(...)`.
+- Fix restore-time checkpoint identity in `agintor/task_runtime/checkpointing.py` so `context.state.latest_checkpoint_ref` keeps the exact checkpoint ref selected for restore instead of being overwritten by `self.shell.latest_checkpoint_ref(...)`. Preserve `agintor.runner.TaskRuntime` as the public facade while changing the implementation module.
 - Fix `FixedShell.save_trace()` filename collisions. Include an attempt-scoped monotonic sequence or an already-available invocation key such as `task_id`, `seed`, `episode_step_index`, and a per-attempt counter so repeated invocations within one attempt never overwrite each other.
 - Add or extend tests that pin the current container path-rewrite boundary so future typed `WorkingMemorySnapshot` and `TraceCursorSnapshot` changes do not accidentally broaden opaque-path rewriting, including cases where request-file reverse mapping is active.
 - Add or extend tests proving grouped execution identifiers (`request_id`, `evaluation_unit_id`, `episode_kind`, `episode_step_index`) survive persisted request bundles, run manifests, resume, and indexed lookup.
@@ -334,7 +335,7 @@ Tighten the persistence contract surface before adding broad indexes. Public rec
 
 ### Checkpoint contract upgrade
 
-- Bump `CheckpointEnvelope.checkpoint_schema_version` from `agintor.checkpoint-envelope.v3` to `agintor.checkpoint-envelope.v4`. Update the identity gate in `runner.TaskRuntime._restore_from_checkpoint` so a v3 envelope never loads into a v4 runtime.
+- Bump `CheckpointEnvelope.checkpoint_schema_version` from `agintor.checkpoint-envelope.v3` to `agintor.checkpoint-envelope.v4`. Update the identity gate in `agintor/task_runtime/checkpointing.py` so a v3 envelope never loads into a v4 runtime.
 - Replace `working_state_summary: Dict[str, Any]` with `working_state: WorkingMemorySnapshot`.
 - Replace `trace_cursor: Dict[str, Any]` with `trace_cursor: TraceCursorSnapshot`.
 - Preserve the current runtime-event cursor semantics when typing `trace_cursor`. Do not repurpose this field into the authoritative session trace materialization manifest; session materialization authority lives in `openai_api_traces/sessions/<session_id>/materialization_state.json`.
@@ -895,11 +896,16 @@ Workstream 5 must not redesign storage topology. It upgrades provider capture ri
 - `agintor/state_store.py`: SQLite lineage and index query surfaces for run-owned durable state
 - `agintor/shell.py`: shell snapshot and restore lifecycle plus branch snapshot boundaries
 - `agintor/memory_graph.py`: durable short-term and long-term graph semantics, write lineage, tombstones, contradictions, and retrieval diagnostics
-- `agintor/runner.py`: persistence integration points, checkpoint publication upgrades, recovery recording, and restore-time checkpoint-identity correctness
+- `agintor/runner.py`: compatibility facade that preserves `agintor.runner.TaskRuntime` and legacy test patch points only; do not add runtime implementation here
+- `agintor/task_runtime/base.py`: composed `TaskRuntime` class, constructor, public `run_task`, `resume_from_checkpoint`, provider-environment isolation, and provider-usage helpers
+- `agintor/task_runtime/checkpointing.py`: checkpoint publication upgrades, checkpoint restore, frame snapshots, runtime-state restore, run-result construction, recovery recording, and restore-time checkpoint-identity correctness
+- `agintor/task_runtime/side_effects.py`: side-effect receipt persistence and reconciliation, including filesystem-write reconciliation
+- `agintor/task_runtime/branching.py` and `agintor/task_runtime/branch_execution.py`: branch publication, branch resume snapshots, horizontal branch launch/resume/run/cancel paths, and branch provider preparation
+- `agintor/task_runtime/execution_loop.py`, `frames.py`, `plan_helpers.py`, `operations.py`, `memory.py`, `tooling.py`, `bounded_io.py`, and `verification.py`: solve-time runtime-host execution helpers split by existing responsibility; preserve behavior and private method names used by tests
 - `agintor/runtime_api.py`: resume rebind helpers for upgraded typed checkpoint fields and grouped request-identity continuity
 - `agintor/openai_trace.py`: canonical session-scoped raw-call storage, canonical session-scoped materialization manifests, grouped trace finalization, rebuild APIs, and collision-free call identity
 - `agintor/container_runtime.py`: path-rewrite support for upgraded typed persistence fields
-- `agintor/runtime_sdk/`: runtime-owned restore entrypoints and state-reconstruction wiring
+- `agintor/runtime_sdk/`: runtime-owned restore entrypoints, state-reconstruction wiring, and bundled kernel source list for all `agintor/task_runtime/` modules
 - persistence and runtime tests adjacent to `tests/test_runtime_execution.py`, `tests/test_runtime_host.py`, and `tests/test_container_runtime.py`
 
 ## Deferred
