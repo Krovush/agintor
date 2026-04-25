@@ -1,28 +1,29 @@
 ## Project
 
-Agintor CLI MVP — "bounded evolutionary runtime search for agent topology, memory, tooling, and control". Python 3.11+, Pydantic v1 (`>=1.10,<2`), Typer CLI.
+Agintor CLI MVP — "bounded evolutionary runtime search for agent topology, memory, tooling, and control". Python 3.12, Pydantic v2 (`>=2,<3`), Typer CLI.
 
 ## Common commands
 
 Install in editable mode with the test extras:
 
 ```bash
-pip install -e ".[dev]"             # core + pytest
-pip install -e ".[dev,openai]"      # add OpenAI provider
-pip install -e ".[dev,minimax]"     # add MiniMax (anthropic SDK) provider
-pip install -e ".[dev,hosted]"      # both hosted providers
+py -3.12 -m venv .venv
+.\.venv\Scripts\python -m pip install -e ".[dev]"             # core + pytest
+.\.venv\Scripts\python -m pip install -e ".[dev,openai]"      # add OpenAI provider
+.\.venv\Scripts\python -m pip install -e ".[dev,minimax]"     # add MiniMax (anthropic SDK) provider
+.\.venv\Scripts\python -m pip install -e ".[dev,hosted]"      # both hosted providers
 ```
 
 Run the default (offline/fast) test suite — `pytest.ini_options.addopts` already excludes `heavy`, `docker`, and `live_openai` markers:
 
 ```bash
-pytest                                           # whole suite (offline, fast markers)
-pytest tests/test_runtime_host.py                # single file
-pytest tests/test_runtime_host.py::test_name     # single test
-pytest -m integration                            # runtime-backed offline integration
-pytest -m heavy                                  # runtime-heavy coverage (opt in)
-pytest -m docker                                 # docker-backed (opt in)
-pytest -m live_openai                            # live OpenAI (opt in, needs key)
+.\.venv\Scripts\python -m pytest                                           # whole suite (offline, fast markers)
+.\.venv\Scripts\python -m pytest tests/test_runtime_host.py                # single file
+.\.venv\Scripts\python -m pytest tests/test_runtime_host.py::test_name     # single test
+.\.venv\Scripts\python -m pytest -m integration                            # runtime-backed offline integration
+.\.venv\Scripts\python -m pytest -m heavy                                  # runtime-heavy coverage (opt in)
+.\.venv\Scripts\python -m pytest -m docker                                 # docker-backed (opt in)
+.\.venv\Scripts\python -m pytest -m live_openai                            # live OpenAI (opt in, needs key)
 ```
 
 CLI (installed as `agintor`, defined in [agintor/cli.py](agintor/cli.py)):
@@ -55,15 +56,9 @@ The repo enforces a four-layer split: **factory → host → runtime kernel → 
 
 Downstream code must treat `agintor/task_runtime/` as **bundled kernel internals**; factory/evaluator code must not reach into it — it should go through the runtime entrypoint or [runtime_api.py](agintor/runtime_api.py).
 
-### Frozen version axes
+### Runtime contract version
 
-These are inputs to every change; do not reopen them without an explicit workstream:
-
-- `RUNTIME_ABI_VERSION = "agintor-runtime-abi-v5"` — host/runtime request/response compatibility
-- `KERNEL_VERSION = "agintor-kernel-v1"` — bundled solve-time kernel version
-- `STORAGE_SCHEMA_VERSION = "agintor-storage-v3"` — checkpoint / durable runtime-state schema
-
-Defined in [agintor/runtime_loader.py](agintor/runtime_loader.py) and [agintor/runtime_sdk/bundle.py](agintor/runtime_sdk/bundle.py). Capability exchange ([runtime_host.py](agintor/runtime_host.py) `inspect`) validates these before every solve/eval/resume.
+The MVP uses one lightweight `RUNTIME_CONTRACT_VERSION`, derived from the package version, to catch host/runtime bundle mismatches. Checkpoints and exported runtimes are disposable during active development, so do not add cross-version upgrade support or separate ABI/kernel/storage version axes.
 
 ### Execution plan is the single contract
 

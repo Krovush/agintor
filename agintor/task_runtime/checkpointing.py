@@ -11,8 +11,8 @@ from ..runtime_api import (
     compile_execution_plan_from_task,
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
+    runtime_task_materialization_key,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -27,17 +27,23 @@ from ..schemas import (
     Checkpoint,
     CheckpointEnvelope,
     ChildSpec,
+    EnvironmentFingerprint,
     ExecutionPlan,
+    FingerprintDelta,
     MemoryNode,
     OpenAITraceContext,
     PlanNode,
     QueuedAgentSnapshot,
     QueuedFrameSnapshot,
     RecoveryFailureKind,
+    RecoveryAttempt,
     ReceiptReconciliationRecord,
     ReplayAllocation,
     RunResult,
     SideEffectReceipt,
+    TraceCursorSnapshot,
+    VerifiedFactRef,
+    WorkingMemorySnapshot,
     capability_scope_allows,
     plan_node_requires_default_provider,
     service_action_transport_compatibility,
@@ -55,6 +61,21 @@ class CheckpointingMixin:
         *,
         reconciliation_policy: str,
     ) -> None:
+        selected_checkpoint_ref = (
+            str(checkpoint_envelope.source_checkpoint_ref or "").strip()
+            or str(getattr(checkpoint_envelope.runtime_state_snapshot, "latest_checkpoint_ref", "") or "").strip()
+            or str(context.state.latest_checkpoint_ref or "").strip()
+        )
+        current_fingerprint = self._capture_environment_fingerprint(
+            context,
+            source_checkpoint_ref=selected_checkpoint_ref or None,
+        )
+        source_fingerprint = None
+        if getattr(self.shell, "run_store", None) is not None:
+            source_fingerprint = self.shell.run_store.load_environment_fingerprint(
+                checkpoint_envelope.run_root or self.shell.run_root,
+                checkpoint_envelope.environment_fingerprint_id,
+            )
         if checkpoint_envelope.request_id != context.request_id:
             raise ResumeRecoveryError(
                 RecoveryFailureKind.REQUEST_MISMATCH.value,
@@ -65,22 +86,17 @@ class CheckpointingMixin:
                 RecoveryFailureKind.REQUEST_MISMATCH.value,
                 f"checkpoint plan mismatch: expected {context.plan.plan_id}, found {checkpoint_envelope.plan_id}",
             )
-        if checkpoint_envelope.runtime_abi != self.runtime.kernel_manifest.runtime_abi:
+        if checkpoint_envelope.runtime_contract_version != self.runtime.kernel_manifest.runtime_contract_version:
             raise ResumeRecoveryError(
-                RecoveryFailureKind.RUNTIME_ABI_MISMATCH.value,
-                f"checkpoint runtime ABI mismatch: expected {self.runtime.kernel_manifest.runtime_abi}, found {checkpoint_envelope.runtime_abi}",
-            )
-        if checkpoint_envelope.storage_schema_version != self.runtime.kernel_manifest.storage_schema_version:
-            raise ResumeRecoveryError(
-                RecoveryFailureKind.STORAGE_SCHEMA_MISMATCH.value,
-                "checkpoint storage schema version does not match the loaded runtime",
+                RecoveryFailureKind.RUNTIME_CONTRACT_MISMATCH.value,
+                "checkpoint runtime contract does not match the loaded runtime",
             )
         if checkpoint_envelope.runtime_hash != self.runtime.runtime_hash:
             raise ResumeRecoveryError(
                 RecoveryFailureKind.RUNTIME_HASH_MISMATCH.value,
                 "checkpoint runtime hash does not match the loaded runtime",
             )
-        plan_snapshot = model_validate(ExecutionPlan, checkpoint_envelope.plan_snapshot)
+        plan_snapshot = (ExecutionPlan).model_validate(checkpoint_envelope.plan_snapshot)
         if plan_snapshot.plan_digest != context.plan.plan_digest:
             raise ResumeRecoveryError(
                 RecoveryFailureKind.PLAN_DIGEST_MISMATCH.value,
@@ -89,7 +105,7 @@ class CheckpointingMixin:
         self.shell.restore_checkpoint_shell_state(checkpoint_envelope.shell_state_snapshot)
         self._restore_runtime_state_snapshot(context, checkpoint_envelope.runtime_state_snapshot)
         ledger_receipts = [
-            model_validate(SideEffectReceipt, receipt)
+            (SideEffectReceipt).model_validate(receipt)
             for receipt in checkpoint_envelope.side_effect_ledger.get("receipts", [])
         ]
         root_receipts = [
@@ -109,7 +125,7 @@ class CheckpointingMixin:
         )
         self._restore_completed_nodes_from_receipts(context, receipts, branch_id=None)
         context.state.side_effect_receipts = [
-            model_dump(receipt)
+            (receipt).model_dump()
             for receipt in [*receipts, *branch_receipts]
         ]
         for node_id in blocked_node_ids:
@@ -120,8 +136,18 @@ class CheckpointingMixin:
             for output_key in context.plan.terminal_output_keys
             if output_key not in context.state.artifacts
         ]
-        context.state.latest_checkpoint_ref = self.shell.latest_checkpoint_ref(
+        context.state.latest_checkpoint_ref = selected_checkpoint_ref or self.shell.latest_checkpoint_ref(
             checkpoint_envelope.run_id or checkpoint_envelope.request_id
+        )
+        self._record_recovery_attempt(
+            context,
+            checkpoint_envelope,
+            selected_checkpoint_ref=selected_checkpoint_ref,
+            reconciliation_policy=reconciliation_policy,
+            current_fingerprint=current_fingerprint,
+            source_fingerprint=source_fingerprint,
+            receipts=receipts,
+            blocked_node_ids=blocked_node_ids,
         )
         context.active_frame = None
 
@@ -147,7 +173,7 @@ class CheckpointingMixin:
         context.state.interface_usage = dict(payload.get("interface_usage", context.state.interface_usage))
         context.state.artifacts = dict(payload.get("artifacts", context.state.artifacts))
         context.state.checkpoints = {
-            key: model_validate(Checkpoint, value)
+            key: (Checkpoint).model_validate(value)
             for key, value in dict(payload.get("checkpoints", {})).items()
         }
         context.state.worker_plans = {
@@ -283,16 +309,26 @@ class CheckpointingMixin:
     ) -> None:
         context.state.checkpoint_sequence_no += 1
         created_at = now_ts()
-        shell_snapshot = self.shell.snapshot_checkpoint_shell_state()
+        checkpoint_id = f"checkpoint.{plan.request_id}.{context.state.checkpoint_sequence_no:04d}"
+        shell_snapshot = self.shell.snapshot_checkpoint_shell_state(
+            checkpoint_id=checkpoint_id,
+            boundary=boundary,
+            branch_publications=context.state.branch_publications,
+            side_effect_receipts=context.state.side_effect_receipts,
+            runtime_event_refs=[str(row.get("event_id", "")) for row in context.trace if isinstance(row, Mapping)],
+        )
+        environment_fingerprint = self._capture_environment_fingerprint(
+            context,
+            source_checkpoint_ref=source_checkpoint_ref,
+        )
         resume_eligible, computed_ineligibility_reason = self._checkpoint_resume_eligibility(
             context,
             resume_eligible_override=resume_eligible_override,
             resume_ineligibility_reason=resume_ineligibility_reason,
         )
         envelope = CheckpointEnvelope(
-            checkpoint_id=f"checkpoint.{plan.request_id}.{context.state.checkpoint_sequence_no:04d}",
-            runtime_abi=self.runtime.kernel_manifest.runtime_abi,
-            storage_schema_version=self.runtime.kernel_manifest.storage_schema_version,
+            checkpoint_id=checkpoint_id,
+            runtime_contract_version=self.runtime.kernel_manifest.runtime_contract_version,
             runtime_hash=self.runtime.runtime_hash,
             run_id=getattr(self.shell, "run_id", ""),
             run_root=str(getattr(self.shell, "run_root", self.shell.workspace)),
@@ -301,6 +337,7 @@ class CheckpointingMixin:
             request_id=plan.request_id,
             origin_request_id=str(origin_request_id or "").strip() or None,
             source_checkpoint_ref=str(source_checkpoint_ref or "").strip() or None,
+            environment_fingerprint_id=environment_fingerprint.fingerprint_id,
             plan_id=plan.plan_id,
             task_id=task.task_id,
             seed=seed,
@@ -309,8 +346,8 @@ class CheckpointingMixin:
             created_at=created_at,
             resume_eligible=resume_eligible,
             resume_ineligibility_reason=computed_ineligibility_reason,
-            plan_snapshot=model_dump(plan),
-            task_payload=model_dump(task),
+            plan_snapshot=(plan).model_dump(),
+            task_payload=(task).model_dump(),
             runtime_state_snapshot={
                 "request_id": context.state.request_id,
                 "plan_id": context.state.plan_id,
@@ -330,7 +367,7 @@ class CheckpointingMixin:
                 "interface_usage": dict(context.state.interface_usage),
                 "artifacts": dict(context.state.artifacts),
                 "checkpoints": {
-                    key: model_dump(value)
+                    key: (value).model_dump()
                     for key, value in context.state.checkpoints.items()
                 },
                 "worker_plans": dict(context.state.worker_plans),
@@ -361,36 +398,24 @@ class CheckpointingMixin:
                     "terminal_nodes": list(plan.verification_plan.terminal_nodes),
                 },
             },
-            shell_state_snapshot=model_dump(shell_snapshot),
+            shell_state_snapshot=(shell_snapshot).model_dump(),
             side_effect_ledger={
                 "receipts": [
-                    model_validate(SideEffectReceipt, receipt)
+                    (SideEffectReceipt).model_validate(receipt)
                     for receipt in context.state.side_effect_receipts
                 ]
             },
-            attempt_snapshot=model_dump(self.shell.snapshot_attempt_state(boundary=boundary, published_at=created_at)),
-            working_state_summary={
-                "boundary": boundary,
-                "execution_state": context.state.execution_state,
-                "mode": context.state.mode,
-                "confidence": context.state.confidence,
-                "created_tools": context.state.created_tools,
-                "promoted_nodes": context.state.promoted_nodes,
-                "checks_used": context.state.checks_used,
-                "interface_usage": dict(context.state.interface_usage),
-                "subgoal_negative_steps": dict(context.state.subgoal_negative_steps),
-                "subgoal_last_model": dict(context.state.subgoal_last_model),
-                "last_unresolved_goal": context.state.last_unresolved_goal,
-                "message_board_entries": list(context.shell.message_board.entries),
-                "message_board_cursors": dict(context.shell.message_board.cursors),
-            },
-            trace_cursor={
-                "trace_length": len(context.trace),
-                "latest_event": context.trace[-1]["event"] if context.trace else None,
-                "latest_event_sequence_no": context.state.event_sequence_no,
-            },
+            attempt_snapshot=(self.shell.snapshot_attempt_state(boundary=boundary, published_at=created_at)).model_dump(),
+            working_state=self._build_working_memory_snapshot(context, boundary=boundary),
+            trace_cursor=self._build_trace_cursor_snapshot(context, task, seed),
         )
         checkpoint_ref = self.shell.save_checkpoint_envelope(envelope)
+        if getattr(self.shell, "run_store", None) is not None:
+            self.shell.run_store.write_working_memory_snapshot(
+                self.shell.run_root,
+                envelope.working_state,
+                checkpoint_id=envelope.checkpoint_id,
+            )
         if checkpoint_ref.resume_eligible:
             context.state.latest_checkpoint_ref = checkpoint_ref.ref
         context.record(
@@ -428,7 +453,7 @@ class CheckpointingMixin:
             agent_snapshot=QueuedAgentSnapshot(
                 restore_mode=restore_mode,
                 canonical_agent_id=canonical_agent_id,
-                agent_payload=model_validate(AgentTemplate, model_dump(frame.agent)),
+                agent_payload=(AgentTemplate).model_validate((frame.agent).model_dump()),
             ),
         )
 
@@ -440,7 +465,7 @@ class CheckpointingMixin:
         snapshot = (
             frame_snapshot
             if isinstance(frame_snapshot, QueuedFrameSnapshot)
-            else model_validate(QueuedFrameSnapshot, frame_snapshot)
+            else (QueuedFrameSnapshot).model_validate(frame_snapshot)
         )
         agent_snapshot = snapshot.agent_snapshot
         if agent_snapshot.restore_mode == "canonical_clone" and agent_snapshot.canonical_agent_id:
@@ -452,7 +477,7 @@ class CheckpointingMixin:
                     f"canonical agent {agent_snapshot.canonical_agent_id!r} is missing during restore",
                 ) from exc
         else:
-            restored_agent = model_validate(AgentTemplate, model_dump(agent_snapshot.agent_payload))
+            restored_agent = (AgentTemplate).model_validate((agent_snapshot.agent_payload).model_dump())
             setattr(restored_agent, "_canonical", False)
             setattr(restored_agent, "_clone", True)
         return AgentFrame(
@@ -501,6 +526,217 @@ class CheckpointingMixin:
             missing = sorted(branch_id for branch_id in running_branch_ids if branch_id not in context.state.branch_resume_snapshots)
             return False, f"missing_branch_resume_snapshot:{','.join(missing)}"
         return True, None
+
+    def _build_working_memory_snapshot(
+        self,
+        context: PolicyContext,
+        *,
+        boundary: str,
+    ) -> WorkingMemorySnapshot:
+        verified_facts: list[VerifiedFactRef] = []
+        for receipt_payload in context.state.side_effect_receipts:
+            receipt = (SideEffectReceipt).model_validate(receipt_payload)
+            if receipt.status not in {"completed", "reconciled"}:
+                continue
+            result_ref = dict(receipt.result_ref or {})
+            if "text" not in result_ref and "output" not in result_ref:
+                continue
+            content = str(result_ref.get("text", result_ref.get("output", "")))[:500]
+            if not content.strip():
+                continue
+            verified_facts.append(
+                VerifiedFactRef(
+                    fact_id=f"fact.{stable_hash(receipt.side_effect_id, content)[:16]}",
+                    content=content,
+                    supporting_receipt_ids=[receipt.side_effect_id],
+                )
+            )
+        branch_refs = sorted(
+            str(branch_id)
+            for branch_id, payload in context.state.branch_states.items()
+            if str(payload.get("status", "") or "") in {"running", "completed", "published"}
+        )
+        selected_refs = sorted(
+            {
+                ref
+                for ref in [
+                    context.state.latest_checkpoint_ref,
+                    *[
+                        str(payload.get("checkpoint_ref", "") or "")
+                        for payload in context.state.branch_resume_snapshots.values()
+                        if isinstance(payload, Mapping)
+                    ],
+                ]
+                if str(ref or "").strip()
+            }
+        )
+        warnings = []
+        if not context.state.unresolved_goals:
+            active_summary = f"{boundary}: no unresolved goals"
+        else:
+            active_summary = f"{boundary}: {len(context.state.unresolved_goals)} unresolved goal(s)"
+            warnings = [str(goal) for goal in context.state.unresolved_goals[:5]]
+        return WorkingMemorySnapshot(
+            current_objective=context.objective or context.task.prompt,
+            accepted_constraints=list(context.task.symbolic_seeds) + list(context.task.file_paths),
+            active_plan_summary=active_summary,
+            verified_facts=verified_facts[:10],
+            unresolved_critical_items=list(context.state.unresolved_goals),
+            active_branch_refs=branch_refs,
+            selected_checkpoint_refs=selected_refs,
+            active_recovery_warnings=warnings,
+            captured_at=now_ts(),
+        )
+
+    def _build_trace_cursor_snapshot(
+        self,
+        context: PolicyContext,
+        task: BenchmarkTask,
+        seed: int,
+    ) -> TraceCursorSnapshot:
+        latest_event = context.trace[-1] if context.trace else {}
+        trace_context = context.trace_context
+        linked_call_ids = sorted(
+            {
+                str(row.get("trace_call_id") or row.get("call_id") or row.get("openai_call_id") or "")
+                for row in context.trace
+                if isinstance(row, Mapping)
+                and str(row.get("trace_call_id") or row.get("call_id") or row.get("openai_call_id") or "").strip()
+            }
+        )
+        runtime_task_key = runtime_task_materialization_key(
+            request_id=context.request_id,
+            task_id=task.task_id,
+            seed=seed,
+            evaluation_unit_id=trace_context.evaluation_unit_id,
+            episode_kind=trace_context.episode_kind,
+            episode_step_index=trace_context.episode_step_index,
+        )
+        return TraceCursorSnapshot(
+            runtime_trace_length=len(context.trace),
+            latest_runtime_event=str(latest_event.get("event") or "") or None,
+            latest_runtime_event_sequence_no=int(context.state.event_sequence_no or 0),
+            last_session_id=trace_context.session_id,
+            last_build_id=trace_context.build_id,
+            last_solve_request_id=context.request_id,
+            last_runtime_task_key=runtime_task_key,
+            linked_call_ids=linked_call_ids,
+            materialization_state_ref=(
+                f"openai_api_traces/sessions/{trace_context.session_id}/materialization_state.json"
+                if trace_context.session_id
+                else None
+            ),
+            captured_at=now_ts(),
+        )
+
+    def _capture_environment_fingerprint(
+        self,
+        context: PolicyContext,
+        *,
+        source_checkpoint_ref: str | None,
+    ) -> EnvironmentFingerprint:
+        kernel_manifest = self.runtime.kernel_manifest
+        provider_identity = [context.provider.__class__.__name__]
+        tool_runtime_ids = sorted(self.shell.tool_registry.tools.keys())
+        dependency_digest = stable_hash(getattr(kernel_manifest, "files", {}))
+        fingerprint = EnvironmentFingerprint(
+            runtime_backend=context.runtime_backend,
+            runtime_hash=self.runtime.runtime_hash,
+            runtime_contract_version=kernel_manifest.runtime_contract_version,
+            runtime_isolation_policy=context.runtime_backend,
+            supported_guarantees=[
+                "checkpoint_envelopes",
+                "canonical_json_run_store",
+                "sqlite_state_index",
+                "typed_subsystem_snapshots",
+            ],
+            provider_identity=provider_identity,
+            model_class=getattr(context.profile, "default_model_class", None),
+            sandbox_hash=stable_hash(str(getattr(self.shell.artifact_policy, "sandbox_root", ""))),
+            tool_runtime_ids=tool_runtime_ids,
+            dependency_digest=dependency_digest,
+            filesystem_policy=str(getattr(self.shell.artifact_policy, "mode", "")),
+            network_policy="host_policy",
+            captured_at=now_ts(),
+            source_attempt_id=str(getattr(self.shell, "attempt_id", "") or "") or None,
+            source_checkpoint_ref=source_checkpoint_ref,
+        )
+        if getattr(self.shell, "run_store", None) is not None:
+            self.shell.run_store.write_environment_fingerprint(self.shell.run_root, fingerprint)
+        return fingerprint
+
+    def _fingerprint_deltas(
+        self,
+        source_fingerprint: EnvironmentFingerprint | None,
+        current_fingerprint: EnvironmentFingerprint,
+    ) -> list[FingerprintDelta]:
+        if source_fingerprint is None:
+            return []
+        source_payload = EnvironmentFingerprint.content_payload((source_fingerprint).model_dump())
+        current_payload = EnvironmentFingerprint.content_payload((current_fingerprint).model_dump())
+        deltas: list[FingerprintDelta] = []
+        for field_name in EnvironmentFingerprint.content_field_names():
+            if source_payload.get(field_name) != current_payload.get(field_name):
+                deltas.append(
+                    FingerprintDelta(
+                        field=field_name,
+                        previous=source_payload.get(field_name),
+                        current=current_payload.get(field_name),
+                    )
+                )
+        return deltas
+
+    def _record_recovery_attempt(
+        self,
+        context: PolicyContext,
+        checkpoint_envelope: CheckpointEnvelope,
+        *,
+        selected_checkpoint_ref: str,
+        reconciliation_policy: str,
+        current_fingerprint: EnvironmentFingerprint,
+        source_fingerprint: EnvironmentFingerprint | None,
+        receipts: Sequence[SideEffectReceipt],
+        blocked_node_ids: Sequence[str] | set[str],
+    ) -> None:
+        if getattr(self.shell, "run_store", None) is None:
+            return
+        deltas = self._fingerprint_deltas(source_fingerprint, current_fingerprint)
+        restore_state = "restored" if source_fingerprint is not None and not deltas else "restored_with_changes"
+        blocked_nodes = sorted(str(node_id) for node_id in blocked_node_ids if str(node_id).strip())
+        recovery = RecoveryAttempt(
+            recovery_attempt_id=f"recovery.{stable_hash(selected_checkpoint_ref, context.request_id, now_ts())[:16]}",
+            run_id=str(getattr(self.shell, "run_id", "") or checkpoint_envelope.run_id),
+            attempt_id=str(getattr(self.shell, "attempt_id", "") or ""),
+            selected_checkpoint_ref=selected_checkpoint_ref,
+            source_checkpoint_ref=checkpoint_envelope.source_checkpoint_ref,
+            origin_request_id=checkpoint_envelope.origin_request_id,
+            rebound_request_id=context.request_id,
+            reconciliation_policy=reconciliation_policy if reconciliation_policy in {"strict", "best_effort"} else "strict",
+            restore_state=restore_state,
+            source_fingerprint_id=getattr(source_fingerprint, "fingerprint_id", None),
+            current_fingerprint_id=current_fingerprint.fingerprint_id,
+            fingerprint_deltas=deltas,
+            receipts_reused=[
+                receipt.side_effect_id
+                for receipt in receipts
+                if receipt.status in {"completed", "reconciled"} and str(receipt.side_effect_id).strip()
+            ],
+            receipts_blocked=[
+                receipt.side_effect_id
+                for receipt in receipts
+                if receipt.node_id in blocked_nodes and str(receipt.side_effect_id).strip()
+            ],
+            blocked_node_ids=blocked_nodes,
+            changed_plan_node_ids=blocked_nodes if restore_state == "restored_with_changes" else [],
+            resume_explanation=(
+                "resume restored with matching environment fingerprint"
+                if restore_state == "restored"
+                else "resume restored with environment fingerprint differences or missing source fingerprint"
+            ),
+            attempted_at=now_ts(),
+            completed_at=now_ts(),
+        )
+        self.shell.run_store.write_recovery_attempt(self.shell.run_root, recovery)
 
     def _build_run_result(
         self,

@@ -7,18 +7,15 @@ from pathlib import Path
 from importlib import resources
 
 from .benchmarks import build_demo_suite
-from .pydantic_compat import model_dump
-from .runtime_loader import RUNTIME_ABI_VERSION
 from .runtime_profile import load_runtime_profile
 from .runtime_sdk import (
     KERNEL_CAPABILITY_FLAGS,
-    KERNEL_VERSION,
-    STORAGE_SCHEMA_VERSION,
     bundle_runtime_kernel,
     preview_kernel_manifest,
 )
 from .schemas import DeploymentContract
 from .utils import ensure_directory
+from .versioning import RUNTIME_CONTRACT_VERSION
 
 
 
@@ -30,7 +27,7 @@ def _refresh_deployment_contract(runtime_dir: Path) -> None:
     contract_path = runtime_dir / "deployment_contract.json"
     payload = json.loads(contract_path.read_text(encoding="utf-8"))
     runtime_profile = load_runtime_profile(runtime_dir)
-    kernel_manifest = preview_kernel_manifest(runtime_abi=RUNTIME_ABI_VERSION)
+    kernel_manifest = preview_kernel_manifest()
     required_env_names = []
     required_env_any_of: list[list[str]] = []
     api_key_env = str(runtime_profile.runtime_provider.api_key_env or "").strip()
@@ -52,9 +49,7 @@ def _refresh_deployment_contract(runtime_dir: Path) -> None:
         note = f"{api_key_file_env} may be used as a key-file alternative for the default runtime provider."
         if note not in notes:
             notes.append(note)
-    payload["runtime_abi"] = RUNTIME_ABI_VERSION
-    payload["kernel_version"] = KERNEL_VERSION
-    payload["storage_schema_version"] = STORAGE_SCHEMA_VERSION
+    payload["runtime_contract_version"] = RUNTIME_CONTRACT_VERSION
     payload["required_env_names"] = required_env_names
     payload["required_env_any_of"] = required_env_any_of
     payload["environment_allowlist"] = environment_allowlist
@@ -77,7 +72,7 @@ def _refresh_deployment_contract(runtime_dir: Path) -> None:
         payload["runtime_isolation_policy"]["required_guarantees"].append("network_disablement")
     payload["notes"] = notes
     contract = DeploymentContract(**payload)
-    contract_path.write_text(json.dumps(model_dump(contract), indent=2, sort_keys=True), encoding="utf-8")
+    contract_path.write_text(json.dumps((contract).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
 
 
 
@@ -91,7 +86,7 @@ def init_runtime(destination: str | Path, force: bool = False) -> Path:
     template_root = resources.files("agintor").joinpath("templates", "baseline_runtime")
     with resources.as_file(template_root) as template_dir:
         shutil.copytree(template_dir, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
-    bundle_runtime_kernel(dest, runtime_abi=RUNTIME_ABI_VERSION, force=True)
+    bundle_runtime_kernel(dest, force=True)
     _refresh_deployment_contract(dest)
     return dest
 
@@ -101,10 +96,10 @@ def write_demo_suite(destination: str | Path) -> Path:
     suite = build_demo_suite()
     payload = {
         "name": suite.name,
-        "train": [model_dump(task) for task in suite.train],
-        "val": [model_dump(task) for task in suite.val],
-        "test": [model_dump(task) for task in suite.test],
-        "proxy": [model_dump(task) for task in suite.proxy],
+        "train": [(task).model_dump() for task in suite.train],
+        "val": [(task).model_dump() for task in suite.val],
+        "test": [(task).model_dump() for task in suite.test],
+        "proxy": [(task).model_dump() for task in suite.proxy],
     }
     path = Path(destination)
     ensure_directory(path.parent)

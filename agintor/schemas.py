@@ -7,16 +7,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, NamedTuple, Optional, Sequence
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, PrivateAttr, root_validator, validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from .utils import cheap_embedding, now_ts, stable_hash
-
-
-class ArtifactMetadata(BaseModel):
-    artifact_id: str
-    schema_version: str
-    content_digest: str
-    creation_stage: str
 
 
 class OpenAITraceContext(BaseModel):
@@ -28,6 +21,9 @@ class OpenAITraceContext(BaseModel):
     task_id: Optional[str] = None
     seed: Optional[int] = None
     request_id: Optional[str] = None
+    evaluation_unit_id: Optional[str] = None
+    episode_kind: Optional[str] = None
+    episode_step_index: Optional[int] = None
     iteration: Optional[int] = None
     objective: Optional[str] = None
     touched_scope: List[str] = Field(default_factory=list)
@@ -114,7 +110,7 @@ class RuntimeEvent(BaseModel):
             "plan_id": self.plan_id,
         }
         if self.trace_context is not None:
-            row["trace_context"] = self.trace_context.dict(exclude_none=True)
+            row["trace_context"] = self.trace_context.model_dump(exclude_none=True)
         if self.frame_id:
             row["frame_id"] = self.frame_id
         if self.branch_id:
@@ -123,48 +119,6 @@ class RuntimeEvent(BaseModel):
             row["node_id"] = self.node_id
         row.update(self.payload)
         return row
-
-
-class GoalAssumption(BaseModel):
-    assumption_id: str
-    statement: str
-    category: str = "default"
-    source: str = "goal_normalization"
-    hard_constraint: bool = False
-
-
-class AssumptionRegister(BaseModel):
-    register_id: str
-    goal_id: str
-    assumptions: List[GoalAssumption] = Field(default_factory=list)
-    artifact_metadata: Optional[ArtifactMetadata] = None
-
-
-class PlanningIssue(BaseModel):
-    issue_id: str
-    severity: str
-    message: str
-    repair_action: Optional[str] = None
-    artifact_refs: List[str] = Field(default_factory=list)
-
-
-class PlanningDiagnostics(BaseModel):
-    diagnostics_id: str
-    goal_id: str
-    issues: List[PlanningIssue] = Field(default_factory=list)
-    repaired: bool = False
-    blocked: bool = False
-    artifact_metadata: Optional[ArtifactMetadata] = None
-
-
-class ReplanContract(BaseModel):
-    contract_id: str
-    goal_id: str
-    repairable_artifacts: List[str] = Field(default_factory=list)
-    blocked_stages: List[str] = Field(default_factory=list)
-    raw_goal_reparse_allowed: bool = False
-    status: str = "stable"
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class ProviderRole(BaseModel):
@@ -179,7 +133,6 @@ class ProviderPlan(BaseModel):
     agintor_provider: ProviderRole
     runtime_provider: ProviderRole
     runtime_backend: str
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class GoalSpec(BaseModel):
@@ -194,7 +147,6 @@ class GoalSpec(BaseModel):
     target_families: List[str] = Field(default_factory=list)
     deployment_preferences: Dict[str, Any] = Field(default_factory=dict)
     assumptions: List[str] = Field(default_factory=list)
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class SuccessCriterion(BaseModel):
@@ -213,7 +165,6 @@ class SuccessCriteriaBundle(BaseModel):
     goal_id: str
     criteria: List[SuccessCriterion] = Field(default_factory=list)
     assumptions: List[str] = Field(default_factory=list)
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class BenchmarkPlan(BaseModel):
@@ -227,7 +178,6 @@ class BenchmarkPlan(BaseModel):
     synthetic_task_ids: List[str] = Field(default_factory=list)
     verifier_bundle_id: str
     frozen: bool = True
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class VerifierSpec(BaseModel):
@@ -247,7 +197,6 @@ class VerifierBundle(BaseModel):
     checker_chain_defaults: List[str] = Field(default_factory=list)
     frozen: bool = True
     created_from: Dict[str, Any] = Field(default_factory=dict)
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class RuntimeIsolationPolicy(BaseModel):
@@ -262,9 +211,7 @@ class RuntimeIsolationPolicy(BaseModel):
 
 class DeploymentContract(BaseModel):
     entry_command: str
-    runtime_abi: str
-    kernel_version: str = ""
-    storage_schema_version: str = ""
+    runtime_contract_version: str
     python_version: str
     supported_backends: List[str] = Field(default_factory=list)
     required_env_names: List[str] = Field(default_factory=list)
@@ -277,26 +224,12 @@ class DeploymentContract(BaseModel):
     capability_flags: List[str] = Field(default_factory=list)
     runtime_isolation_policy: Optional[RuntimeIsolationPolicy] = None
     notes: List[str] = Field(default_factory=list)
-    artifact_metadata: Optional[ArtifactMetadata] = None
-
-
-class FactoryProfile(BaseModel):
-    agintor_provider: str
-    evaluation: Dict[str, Any] = Field(default_factory=dict)
-    evolution: Dict[str, Any] = Field(default_factory=dict)
-    mutation: Dict[str, Any] = Field(default_factory=dict)
-    benchmark_generation: Dict[str, Any] = Field(default_factory=dict)
-    leader_selection: Dict[str, Any] = Field(default_factory=dict)
-    runtime_backend: str
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class RuntimePlan(BaseModel):
     plan_id: str
     goal_id: str
-    runtime_abi: str
-    kernel_version: str = ""
-    storage_schema_version: str = ""
+    runtime_contract_version: str
     seed_template: str
     mutable_files: List[str] = Field(default_factory=list)
     immutable_manifest: List[str] = Field(default_factory=list)
@@ -304,7 +237,6 @@ class RuntimePlan(BaseModel):
     provider_plan: ProviderPlan
     tooling_scope: List[str] = Field(default_factory=list)
     deployment_contract: DeploymentContract
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class BuildSummary(BaseModel):
@@ -317,10 +249,7 @@ class BuildSummary(BaseModel):
     benchmark_plan_path: str
     verifier_bundle_path: str
     runtime_plan_path: str
-    factory_profile_path: str = ""
     deployment_contract_path: str = ""
-    planning_diagnostics_path: str = ""
-    replan_contract_path: str = ""
     workspace: str
     output_runtime_dir: str
     history_path: str = ""
@@ -330,7 +259,7 @@ class BuildSummary(BaseModel):
     leaderboard_path: str = ""
     leader_runtime_hash: str = ""
     leader_runtime_dir: str = ""
-    runtime_abi: str = ""
+    runtime_contract_version: str = ""
     selection_policy: str = ""
     best_train_score: float
     best_goal_score: float
@@ -340,10 +269,7 @@ class BuildSummary(BaseModel):
     agintor_provider: str
     runtime_provider: str
     export_bundle_file: str
-    provenance_bundle_file: str
     export_summary_path: str = ""
-    export_validation_path: str = ""
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class ExportSummary(BaseModel):
@@ -354,43 +280,14 @@ class ExportSummary(BaseModel):
     runtime_hash: str
     code_hash: str
     runtime_id: str
-    runtime_abi: str
-    kernel_version: str
-    storage_schema_version: str
+    runtime_contract_version: str
     source_runtime_dir: str
     source_runtime_hash: str
     runtime_profile_path: str
     deployment_contract_path: str
     export_bundle_path: str
-    provenance_bundle_path: str
     leaderboard_path: str = ""
     runtime_plan_path: str = ""
-    artifact_metadata: Optional[ArtifactMetadata] = None
-
-
-class ExportValidationCheck(BaseModel):
-    check_id: str
-    check_type: str
-    status: str
-    summary: str
-    request_mode: str = ""
-    provider_name: str = ""
-    verification_status: str = ""
-    observed_artifact: Any = None
-    observed_model_calls: int = 0
-
-
-class ExportValidationReceipt(BaseModel):
-    validation_id: str
-    build_id: str
-    goal_id: str
-    runtime_hash: str
-    runtime_id: str
-    runtime_abi: str
-    certified_properties: List[str] = Field(default_factory=list)
-    uncertified_properties: List[str] = Field(default_factory=list)
-    checks: List[ExportValidationCheck] = Field(default_factory=list)
-    artifact_metadata: Optional[ArtifactMetadata] = None
 
 
 class AgentTemplate(BaseModel):
@@ -459,6 +356,13 @@ class Checkpoint(BaseModel):
     verifier_state: Dict[str, Any]
     resume_constraints: Dict[str, Any]
 
+    @field_validator("summary", mode="before")
+    @classmethod
+    def normalize_summary_record(cls, value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return value.model_dump()
+        return value
+
 
 class AsyncHandle(BaseModel):
     handle_id: str
@@ -488,13 +392,18 @@ class MemoryNode(BaseModel):
     provenance: Dict[str, Any]
     tombstoned: bool = False
 
-    @validator("embedding", pre=True, always=True, allow_reuse=True)
-    def default_embedding(cls, value: Any, values: Dict[str, Any]) -> List[float]:
-        if value:
-            return list(value)
+    @model_validator(mode="before")
+    @classmethod
+    def default_embedding(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        if values.get("embedding"):
+            values["embedding"] = list(values["embedding"])
+            return values
         content = values.get("content", "")
         label = values.get("label", "")
-        return cheap_embedding(f"{label} {content}")
+        values["embedding"] = cheap_embedding(f"{label} {content}")
+        return values
 
 
 class ArchiveEntry(BaseModel):
@@ -542,6 +451,198 @@ class LongTermNodeType(str, Enum):
     ARTIFACT_SIGNATURE = "ArtifactSignature"
 
 
+class StrictPersistenceModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+
+class VerifiedFactRef(StrictPersistenceModel):
+    fact_id: str
+    content: str
+    supporting_receipt_ids: List[str] = Field(default_factory=list)
+    supporting_verifier_ids: List[str] = Field(default_factory=list)
+
+
+class WorkingMemorySnapshot(StrictPersistenceModel):
+    current_objective: Optional[str] = None
+    accepted_constraints: List[str] = Field(default_factory=list)
+    active_plan_summary: Optional[str] = None
+    verified_facts: List[VerifiedFactRef] = Field(default_factory=list)
+    unresolved_critical_items: List[str] = Field(default_factory=list)
+    active_branch_refs: List[str] = Field(default_factory=list)
+    selected_checkpoint_refs: List[str] = Field(default_factory=list)
+    active_recovery_warnings: List[str] = Field(default_factory=list)
+    captured_at: float = Field(default_factory=now_ts)
+
+
+class TraceCursorSnapshot(StrictPersistenceModel):
+    runtime_trace_length: int = 0
+    latest_runtime_event: Optional[str] = None
+    latest_runtime_event_sequence_no: int = 0
+    last_session_id: Optional[str] = None
+    last_build_id: Optional[str] = None
+    last_solve_request_id: Optional[str] = None
+    last_runtime_task_key: Optional[str] = None
+    linked_call_ids: List[str] = Field(default_factory=list)
+    materialization_state_ref: Optional[str] = None
+    captured_at: float = Field(default_factory=now_ts)
+
+
+class FingerprintDelta(StrictPersistenceModel):
+    field: str
+    previous: Any = None
+    current: Any = None
+
+
+class EnvironmentFingerprint(StrictPersistenceModel):
+    fingerprint_id: str = ""
+    runtime_backend: str
+    runtime_hash: str
+    runtime_contract_version: str
+    runtime_isolation_policy: str
+    supported_guarantees: List[str] = Field(default_factory=list)
+    provider_identity: List[str] = Field(default_factory=list)
+    model_class: Optional[str] = None
+    sandbox_hash: Optional[str] = None
+    tool_runtime_ids: List[str] = Field(default_factory=list)
+    dependency_digest: Optional[str] = None
+    filesystem_policy: Optional[str] = None
+    network_policy: Optional[str] = None
+    captured_at: float = Field(default_factory=now_ts)
+    source_attempt_id: Optional[str] = None
+    source_checkpoint_ref: Optional[str] = None
+
+    @staticmethod
+    def content_field_names() -> List[str]:
+        return [
+            "runtime_backend",
+            "runtime_hash",
+            "runtime_contract_version",
+            "runtime_isolation_policy",
+            "supported_guarantees",
+            "provider_identity",
+            "model_class",
+            "sandbox_hash",
+            "tool_runtime_ids",
+            "dependency_digest",
+            "filesystem_policy",
+            "network_policy",
+        ]
+
+    @classmethod
+    def content_payload(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        for field_name in cls.content_field_names():
+            value = values.get(field_name)
+            if field_name in {"supported_guarantees", "provider_identity", "tool_runtime_ids"}:
+                payload[field_name] = sorted(str(item) for item in (value or []) if str(item).strip())
+            else:
+                payload[field_name] = value
+        return payload
+
+    @model_validator(mode="after")
+    def validate_fingerprint_id(self) -> "EnvironmentFingerprint":
+        values = self.model_dump()
+        expected = "environment-fingerprint." + stable_hash(
+            "environment-fingerprint",
+            self.content_payload(values),
+        )[:24]
+        supplied = str(self.fingerprint_id or "").strip()
+        if supplied and supplied != expected:
+            raise ValueError("fingerprint_id must be the stable hash of EnvironmentFingerprint content fields")
+        self.fingerprint_id = expected
+        return self
+
+
+class RecoveryAttempt(StrictPersistenceModel):
+    recovery_attempt_id: str
+    run_id: str
+    attempt_id: str
+    selected_checkpoint_ref: str
+    source_checkpoint_ref: Optional[str] = None
+    origin_request_id: Optional[str] = None
+    rebound_request_id: Optional[str] = None
+    reconciliation_policy: Literal["strict", "best_effort"]
+    restore_state: Literal["restored", "restored_with_changes", "blocked"]
+    source_fingerprint_id: Optional[str] = None
+    current_fingerprint_id: str
+    fingerprint_deltas: List[FingerprintDelta] = Field(default_factory=list)
+    receipts_reused: List[str] = Field(default_factory=list)
+    receipts_reissued: List[str] = Field(default_factory=list)
+    receipts_blocked: List[str] = Field(default_factory=list)
+    receipts_invalidated: List[str] = Field(default_factory=list)
+    blocked_node_ids: List[str] = Field(default_factory=list)
+    changed_plan_node_ids: List[str] = Field(default_factory=list)
+    resume_explanation: str
+    attempted_at: float = Field(default_factory=now_ts)
+    completed_at: Optional[float] = None
+
+
+class LongTermWriteRecord(StrictPersistenceModel):
+    write_id: str
+    target_node_id: str
+    action: Literal["upsert", "merge", "refine", "tombstone", "conflict"]
+    payload_ref: str
+    source_task_id: Optional[str] = None
+    source_attempt_id: str = ""
+    source_checkpoint_ref: Optional[str] = None
+    verifier_support_refs: List[str] = Field(default_factory=list)
+    prior_write_id: Optional[str] = None
+    contradiction_target_write_id: Optional[str] = None
+    written_at: float = Field(default_factory=now_ts)
+
+
+class LongTermEdgeType(str, Enum):
+    DERIVED_FROM = "DERIVED_FROM"
+    REFINES = "REFINES"
+    CONTRADICTS = "CONTRADICTS"
+    SUPPORTED_BY = "SUPPORTED_BY"
+
+
+class LongTermEdgeRecord(StrictPersistenceModel):
+    edge_id: str
+    source_node_id: str
+    target_node_id: str
+    edge_type: str
+    introducing_write_id: str
+    tombstoned: bool = False
+    tombstone_write_id: Optional[str] = None
+    written_at: float = Field(default_factory=now_ts)
+
+    @field_validator("edge_type")
+    @classmethod
+    def validate_long_term_edge_type(cls, value: str) -> str:
+        allowed = {item.value for item in LongTermEdgeType}
+        if value not in allowed:
+            raise ValueError(f"unsupported long-term edge type {value}")
+        return value
+
+
+class RetrievalSignalRow(StrictPersistenceModel):
+    node_id: str
+    rank: int
+    exact_file_path_hit: bool = False
+    exact_symbol_hit: bool = False
+    node_id_match: bool = False
+    verifier_support_score: float = 0.0
+    lexical_overlap_score: float = 0.0
+    embedding_similarity_score: float = 0.0
+    same_task_affinity_score: float = 0.0
+    synthesized_neighbor_expansion: bool = False
+
+
+class RetrievalDiagnosticRecord(StrictPersistenceModel):
+    diagnostic_id: str
+    query_hash: str
+    task_id: Optional[str] = None
+    seed: Optional[int] = None
+    request_id: Optional[str] = None
+    scope_id: Optional[str] = None
+    returned_node_ids: List[str] = Field(default_factory=list)
+    signals: List[RetrievalSignalRow] = Field(default_factory=list)
+    exact_first_preserved: bool = False
+    retrieved_at: float = Field(default_factory=now_ts)
+
+
 class RuntimeBudgetTotalsSnapshot(BaseModel):
     normalized: Dict[str, float] = Field(default_factory=dict)
     cost: float = 0.0
@@ -571,10 +672,26 @@ class ShortTermGraphSnapshot(BaseModel):
     nodes: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     edges: List[Dict[str, Any]] = Field(default_factory=list)
     hidden_nodes: List[str] = Field(default_factory=list)
+    summary_backlinks: List[Dict[str, Any]] = Field(default_factory=list)
+    artifact_lineage: List[Dict[str, Any]] = Field(default_factory=list)
+    branch_publication_lineage: List[Dict[str, Any]] = Field(default_factory=list)
+    open_handle_lineage: List[Dict[str, Any]] = Field(default_factory=list)
+    verifier_evidence_refs: List[str] = Field(default_factory=list)
+    receipt_refs: List[str] = Field(default_factory=list)
+    event_refs: List[str] = Field(default_factory=list)
 
 
 class LongTermGraphSnapshot(BaseModel):
     nodes: List[MemoryNode] = Field(default_factory=list)
+    edges: List[LongTermEdgeRecord] = Field(default_factory=list)
+    write_records: List[LongTermWriteRecord] = Field(default_factory=list)
+    retrieval_diagnostics: List[RetrievalDiagnosticRecord] = Field(default_factory=list)
+    write_log_refs: List[str] = Field(default_factory=list)
+    diagnostic_refs: List[str] = Field(default_factory=list)
+
+
+class OpenHandleTableSnapshot(StrictPersistenceModel):
+    handles: List[AsyncHandle] = Field(default_factory=list)
 
 
 class TaskLocalToolSnapshot(BaseModel):
@@ -586,22 +703,67 @@ class TaskLocalToolSnapshot(BaseModel):
     sandbox_hash: Optional[str] = None
     safety_validated: bool = False
 
+    @field_validator("spec", mode="before")
+    @classmethod
+    def normalize_tool_spec(cls, value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return value.model_dump()
+        return value
+
 
 class TaskLocalToolRegistrySnapshot(BaseModel):
     tools: List[TaskLocalToolSnapshot] = Field(default_factory=list)
     category_summaries: Dict[str, str] = Field(default_factory=dict)
 
 
+class PredictorLogisticRegressorSnapshot(StrictPersistenceModel):
+    weights: List[float] = Field(default_factory=list)
+    x_points: List[float] = Field(default_factory=list)
+    y_points: List[float] = Field(default_factory=list)
+    p_min: float = 0.02
+    p_max: float = 0.98
+
+
+class PredictorLogLinearHuberSnapshot(StrictPersistenceModel):
+    weights: List[float] = Field(default_factory=list)
+
+
+class PredictorEnsembleSnapshot(StrictPersistenceModel):
+    probability_models: List[PredictorLogisticRegressorSnapshot] = Field(default_factory=list)
+    positive_models: List[PredictorLogLinearHuberSnapshot] = Field(default_factory=list)
+
+
+class PredictorRankingMixerSnapshot(StrictPersistenceModel):
+    alpha: List[float] = Field(default_factory=list)
+
+
+class PredictorSnapshot(StrictPersistenceModel):
+    ensemble_size: int = 5
+    max_observations_per_family: int = 200
+    frozen: bool = False
+    observations: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
+    models: Dict[str, PredictorEnsembleSnapshot] = Field(default_factory=dict)
+    ranking_weights: Dict[str, PredictorRankingMixerSnapshot] = Field(default_factory=dict)
+
+
 class ShellStateSnapshot(BaseModel):
     short_term_graph: ShortTermGraphSnapshot = Field(default_factory=ShortTermGraphSnapshot)
     long_term_graph: LongTermGraphSnapshot = Field(default_factory=LongTermGraphSnapshot)
     message_board: MessageBoardSnapshot = Field(default_factory=MessageBoardSnapshot)
-    open_handles: List[AsyncHandle] = Field(default_factory=list)
+    open_handles: OpenHandleTableSnapshot = Field(default_factory=OpenHandleTableSnapshot)
     task_local_tool_registry: TaskLocalToolRegistrySnapshot = Field(default_factory=TaskLocalToolRegistrySnapshot)
+    predictor_snapshot: PredictorSnapshot = Field(default_factory=PredictorSnapshot)
     current_task_id: str = ""
     current_episode_id: Optional[str] = None
     memory_scope_kind: str = ""
     memory_scope_id: str = ""
+
+    @field_validator("open_handles", mode="before")
+    @classmethod
+    def normalize_open_handles(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return {"handles": value}
+        return value
 
 
 class AttemptSnapshot(BaseModel):
@@ -660,6 +822,7 @@ class ModelResponse(BaseModel):
     text: str
     raw: Dict[str, Any] = Field(default_factory=dict)
     model_name: Optional[str] = None
+    trace_call_id: Optional[str] = None
     input_tokens: int = 0
     output_tokens: int = 0
     token_estimate: int = 0
@@ -707,12 +870,12 @@ class RequestFileRef(BaseModel):
     host_path: Optional[str] = None
     workspace_relative_path: Optional[str] = None
 
-    @root_validator(pre=False, allow_reuse=True)
-    def validate_request_file_ref(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        path_root = str(values.get("path_root") or "").strip()
-        host_path = str(values.get("host_path") or "").strip()
-        workspace_relative_path = str(values.get("workspace_relative_path") or "").strip()
-        runtime_path = str(values.get("runtime_path") or "").strip()
+    @model_validator(mode="after")
+    def validate_request_file_ref(self) -> "RequestFileRef":
+        path_root = str(self.path_root or "").strip()
+        host_path = str(self.host_path or "").strip()
+        workspace_relative_path = str(self.workspace_relative_path or "").strip()
+        runtime_path = str(self.runtime_path or "").strip()
         if not runtime_path:
             raise ValueError("request file refs require runtime_path")
         if path_root == "host_absolute":
@@ -727,7 +890,7 @@ class RequestFileRef(BaseModel):
                 raise ValueError("runtime_workspace_relative request file refs may not set host_path")
         else:
             raise ValueError(f"unsupported request file ref path_root {path_root!r}")
-        return values
+        return self
 
 
 class PlanOrigin(BaseModel):
@@ -1166,7 +1329,6 @@ class ExecutionFlags(BaseModel):
 
 
 class ExecutionPlan(BaseModel):
-    plan_schema_version: str = "agintor.execution-plan.v1"
     plan_digest: str = ""
     plan_id: str
     request_id: str
@@ -1195,25 +1357,26 @@ class ExecutionPlan(BaseModel):
         "failed",
     ] = "compiled"
 
-    @root_validator(pre=False, allow_reuse=True)
-    def validate_execution_plan(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+    @model_validator(mode="after")
+    def validate_execution_plan(self) -> "ExecutionPlan":
         def to_jsonable(value: Any) -> Any:
-            if hasattr(value, "dict"):
-                return to_jsonable(value.dict())
+            if hasattr(value, "model_dump"):
+                return to_jsonable(value.model_dump())
             if isinstance(value, dict):
                 return {str(key): to_jsonable(item) for key, item in value.items()}
             if isinstance(value, list):
                 return [to_jsonable(item) for item in value]
             return value
 
-        nodes = list(values.get("nodes", []))
+        values = self.model_dump()
+        nodes = list(self.nodes)
         node_map = {node.node_id: node for node in nodes}
         if len(node_map) != len(nodes):
             raise ValueError("execution plan node_id values must be unique")
 
-        verification_plan = values.get("verification_plan") or VerificationPlan()
+        verification_plan = self.verification_plan or VerificationPlan()
 
-        for root_id in values.get("root_node_ids", []):
+        for root_id in self.root_node_ids:
             if root_id not in node_map:
                 raise ValueError(f"execution plan root node {root_id!r} does not exist")
 
@@ -1260,7 +1423,7 @@ class ExecutionPlan(BaseModel):
                 if node_id in child.dependencies:
                     mark(child.node_id)
 
-        for root_id in values.get("root_node_ids", []):
+        for root_id in self.root_node_ids:
             mark(root_id)
 
         produced_outputs: Dict[str, PlanNode] = {}
@@ -1273,7 +1436,7 @@ class ExecutionPlan(BaseModel):
                         f"duplicate execution plan output_key {node.output_key!r} is not allowed"
                     )
                 produced_outputs[node.output_key] = node
-        for terminal_key in values.get("terminal_output_keys", []):
+        for terminal_key in self.terminal_output_keys:
             producer = produced_outputs.get(terminal_key)
             if producer is None:
                 raise ValueError(
@@ -1297,18 +1460,18 @@ class ExecutionPlan(BaseModel):
             if not any(str(node.node_kind) == "verify" for node in nodes):
                 raise ValueError("execution plan requires an explicit verify node when terminal verification is required")
 
-        if not values.get("plan_digest"):
+        if not self.plan_digest:
             digest_payload = {key: value for key, value in values.items() if key != "plan_digest"}
             digest_payload["request_id"] = None
             trace_context = digest_payload.get("trace_context")
-            if hasattr(trace_context, "dict"):
-                trace_context = trace_context.dict()
+            if hasattr(trace_context, "model_dump"):
+                trace_context = trace_context.model_dump()
             if isinstance(trace_context, dict):
                 normalized_trace_context = {str(key): to_jsonable(item) for key, item in trace_context.items()}
                 normalized_trace_context["request_id"] = None
                 digest_payload["trace_context"] = normalized_trace_context
-            values["plan_digest"] = stable_hash(to_jsonable(digest_payload))
-        return values
+            self.plan_digest = stable_hash(to_jsonable(digest_payload))
+        return self
 
 
 class BenchmarkTask(BaseModel):
@@ -1332,8 +1495,7 @@ class BenchmarkTask(BaseModel):
     proxy_scope_tags: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        allow_mutation = False
+    model_config = ConfigDict(frozen=True)
 
 
 class SolveRequest(BaseModel):
@@ -1369,7 +1531,6 @@ class SolveResult(BaseModel):
     budget: Dict[str, Any] = Field(default_factory=dict)
     provider_usage: Dict[str, Any] = Field(default_factory=dict)
     faults: Dict[str, Any] = Field(default_factory=dict)
-    recoverability: str = "none"
     verified: bool = False
     best_effort: bool = False
 
@@ -1388,16 +1549,16 @@ class RuntimeSolveRequest(BaseModel):
     budget_overrides: Dict[str, Any] = Field(default_factory=dict)
     trace_context: Optional[OpenAITraceContext] = None
 
-    @root_validator(pre=False, allow_reuse=True)
-    def validate_mode_payload(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        mode = values.get("mode")
-        task = values.get("task")
-        solve_request = values.get("solve_request")
+    @model_validator(mode="after")
+    def validate_mode_payload(self) -> "RuntimeSolveRequest":
+        mode = self.mode
+        task = self.task
+        solve_request = self.solve_request
         if mode == "benchmark" and task is None:
             raise ValueError("benchmark solve requests require a benchmark task")
         if mode == "user_request" and solve_request is None:
             raise ValueError("user_request solve requests require a solve_request payload")
-        return values
+        return self
 
 
 class RunResult(BaseModel):
@@ -1555,8 +1716,7 @@ class RunManifest(BaseModel):
     evaluation_unit_id: str = ""
     request_mode: Literal["benchmark", "user_request", "batch"] = "benchmark"
     runtime_hash: str = ""
-    runtime_abi: str = ""
-    storage_schema_version: str = ""
+    runtime_contract_version: str = ""
     runtime_backend: str = "local"
     task_id: Optional[str] = None
     seed: Optional[int] = None
@@ -1588,10 +1748,7 @@ class AttemptManifest(BaseModel):
 
 
 class KernelManifest(BaseModel):
-    schema_version: str
-    runtime_abi: str
-    kernel_version: str
-    storage_schema_version: str
+    runtime_contract_version: str
     package_name: str
     entry_module: str
     files: Dict[str, str] = Field(default_factory=dict)
@@ -1653,8 +1810,7 @@ class RecoveryFailureKind(str, Enum):
     CHECKPOINT_NOT_FOUND = "checkpoint_not_found"
     CHECKPOINT_CORRUPT = "checkpoint_corrupt"
     REQUEST_MISMATCH = "request_mismatch"
-    RUNTIME_ABI_MISMATCH = "runtime_abi_mismatch"
-    STORAGE_SCHEMA_MISMATCH = "storage_schema_mismatch"
+    RUNTIME_CONTRACT_MISMATCH = "runtime_contract_mismatch"
     RUNTIME_HASH_MISMATCH = "runtime_hash_mismatch"
     PLAN_DIGEST_MISMATCH = "plan_digest_mismatch"
     FRAME_RECONSTRUCTION_FAILED = "frame_reconstruction_failed"
@@ -1760,29 +1916,29 @@ class BranchState(BaseModel):
     failure_details: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
 
-    @root_validator(pre=False, allow_reuse=True)
-    def validate_terminal_contract(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        status = str(values.get("status", "") or "")
-        cancellation_record = values.get("cancellation_record")
-        failure_kind = values.get("failure_kind")
-        failure_details = dict(values.get("failure_details") or {})
+    @model_validator(mode="after")
+    def validate_terminal_contract(self) -> "BranchState":
+        status = str(self.status or "")
+        cancellation_record = self.cancellation_record
+        failure_kind = self.failure_kind
+        failure_details = dict(self.failure_details or {})
         if status == "cancelled":
             if cancellation_record is None:
                 raise ValueError("cancelled branches require cancellation_record")
             if failure_kind is not None or failure_details:
                 raise ValueError("cancelled branches may not carry failure_kind/failure_details")
-            return values
+            return self
         if status == "failed":
             if cancellation_record is not None:
                 raise ValueError("failed branches may not carry cancellation_record")
             if failure_kind is None:
                 raise ValueError("failed branches require failure_kind")
-            return values
+            return self
         if cancellation_record is not None:
             raise ValueError("only cancelled branches may carry cancellation_record")
         if failure_kind is not None or failure_details:
             raise ValueError("only failed branches may carry failure_kind/failure_details")
-        return values
+        return self
 
 
 class BranchResult(BaseModel):
@@ -1910,7 +2066,7 @@ def terminalize_receipt(
         return normalized
     merged_result_ref = dict(normalized.result_ref or {})
     merged_result_ref.update(dict(result_ref_updates or {}))
-    return normalized.copy(
+    return normalized.model_copy(
         update={
             "status": status,
             "result_ref": merged_result_ref,
@@ -1925,11 +2081,9 @@ def terminalize_receipt(
     )
 
 
-class CheckpointEnvelope(BaseModel):
-    checkpoint_schema_version: str = "agintor.checkpoint-envelope.v3"
+class CheckpointEnvelope(StrictPersistenceModel):
     checkpoint_id: str
-    runtime_abi: str
-    storage_schema_version: str
+    runtime_contract_version: str
     runtime_hash: str
     run_id: str = ""
     run_root: str = ""
@@ -1938,6 +2092,7 @@ class CheckpointEnvelope(BaseModel):
     request_id: str
     origin_request_id: Optional[str] = None
     source_checkpoint_ref: Optional[str] = None
+    environment_fingerprint_id: Optional[str] = None
     plan_id: str
     task_id: str
     seed: int
@@ -1952,16 +2107,14 @@ class CheckpointEnvelope(BaseModel):
     shell_state_snapshot: ShellStateSnapshot = Field(default_factory=ShellStateSnapshot)
     side_effect_ledger: Dict[str, List[SideEffectReceipt]] = Field(default_factory=lambda: {"receipts": []})
     attempt_snapshot: AttemptSnapshot = Field(default_factory=AttemptSnapshot)
-    working_state_summary: Dict[str, Any] = Field(default_factory=dict)
-    trace_cursor: Dict[str, Any] = Field(default_factory=dict)
+    working_state: WorkingMemorySnapshot = Field(default_factory=WorkingMemorySnapshot)
+    trace_cursor: TraceCursorSnapshot = Field(default_factory=TraceCursorSnapshot)
 
 
 class InspectRequest(BaseModel):
     request_id: str
     requested_backend: str = "local"
-    expected_runtime_abi: str
-    expected_kernel_version: Optional[str] = None
-    expected_storage_schema_version: Optional[str] = None
+    expected_runtime_contract_version: str
 
 
 class ResumeRequest(BaseModel):
@@ -1971,13 +2124,13 @@ class ResumeRequest(BaseModel):
     trace_context: Optional[OpenAITraceContext] = None
     reconciliation_policy: Literal["strict", "best_effort"] = "strict"
 
-    @root_validator(pre=False, allow_reuse=True)
-    def validate_resume_target(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        run_ref = str(values.get("run_ref") or "").strip()
-        checkpoint_ref = str(values.get("checkpoint_ref") or "").strip()
+    @model_validator(mode="after")
+    def validate_resume_target(self) -> "ResumeRequest":
+        run_ref = str(self.run_ref or "").strip()
+        checkpoint_ref = str(self.checkpoint_ref or "").strip()
         if not run_ref and not checkpoint_ref:
             raise ValueError("resume requires run_ref or checkpoint_ref")
-        return values
+        return self
 
 
 class RuntimeResumeRequest(BaseModel):
@@ -1993,19 +2146,17 @@ class RuntimeResumeRequest(BaseModel):
     trace_context: Optional[OpenAITraceContext] = None
     reconciliation_policy: Literal["strict", "best_effort"] = "strict"
 
-    @root_validator(pre=False, allow_reuse=True)
-    def validate_resume_target(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        run_ref = str(values.get("run_ref") or "").strip()
-        checkpoint_ref = str(values.get("checkpoint_ref") or "").strip()
+    @model_validator(mode="after")
+    def validate_resume_target(self) -> "RuntimeResumeRequest":
+        run_ref = str(self.run_ref or "").strip()
+        checkpoint_ref = str(self.checkpoint_ref or "").strip()
         if not run_ref and not checkpoint_ref:
             raise ValueError("resume requires run_ref or checkpoint_ref")
-        return values
+        return self
 
 
 class CapabilityExchange(BaseModel):
-    runtime_abi: str
-    kernel_version: str
-    storage_schema_version: str
+    runtime_contract_version: str
     supported_backends: List[str] = Field(default_factory=list)
     tool_runtimes: List[str] = Field(default_factory=list)
     checkpoint_support: bool = True
@@ -2039,10 +2190,10 @@ class RuntimeTaskInvocation(BaseModel):
     task: BenchmarkTask
     trace_context: Optional[OpenAITraceContext] = None
 
-    @root_validator(pre=False, allow_reuse=True)
-    def validate_episode_grouping(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        task = values.get("task")
-        episode_kind = str(values.get("episode_kind") or "single_task")
+    @model_validator(mode="after")
+    def validate_episode_grouping(self) -> "RuntimeTaskInvocation":
+        task = self.task
+        episode_kind = str(self.episode_kind or "single_task")
         if (
             episode_kind == "single_task"
             and task is not None
@@ -2050,13 +2201,13 @@ class RuntimeTaskInvocation(BaseModel):
             and str(getattr(task, "episode_id", "") or "").strip()
         ):
             episode_kind = "transfer_episode"
-            values["episode_kind"] = episode_kind
+            self.episode_kind = episode_kind
         if episode_kind == "transfer_episode":
-            if values.get("episode_step_index") is None and task is not None:
-                values["episode_step_index"] = int(getattr(task, "episode_order", 0) or 0)
+            if self.episode_step_index is None and task is not None:
+                self.episode_step_index = int(getattr(task, "episode_order", 0) or 0)
         else:
-            values["episode_step_index"] = None
-        return values
+            self.episode_step_index = None
+        return self
 
 
 class RuntimeBatchRequest(BaseModel):

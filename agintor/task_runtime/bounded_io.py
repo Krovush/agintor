@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import errno
 import json
 import os
 import tempfile
@@ -18,7 +19,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -248,7 +248,19 @@ class BoundedIOMixin:
             handle.flush()
             os.fsync(handle.fileno())
             temp_path = Path(handle.name)
-        temp_path.replace(path)
+        try:
+            temp_path.replace(path)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY:
+                try:
+                    temp_path.unlink()
+                finally:
+                    raise
+            with path.open("w", encoding="utf-8") as target:
+                target.write(text)
+                target.flush()
+                os.fsync(target.fileno())
+            temp_path.unlink(missing_ok=True)
         cls._fsync_directory(path.parent)
 
     def _execute_repo_patch_node(
@@ -306,7 +318,7 @@ class BoundedIOMixin:
         unresolved_launch: SideEffectReceipt | None = None
         terminal_receipt: SideEffectReceipt | None = None
         for receipt_payload in context.state.side_effect_receipts:
-            receipt = model_validate(SideEffectReceipt, receipt_payload)
+            receipt = (SideEffectReceipt).model_validate(receipt_payload)
             if receipt.action_kind != "filesystem_write" or receipt.idempotency_key != filesystem_write_idempotency_key:
                 continue
             if is_terminal_receipt(receipt):
@@ -521,7 +533,7 @@ class BoundedIOMixin:
         unresolved_launch = False
         terminal_receipt: SideEffectReceipt | None = None
         for receipt_payload in context.state.side_effect_receipts:
-            receipt = model_validate(SideEffectReceipt, receipt_payload)
+            receipt = (SideEffectReceipt).model_validate(receipt_payload)
             if receipt.action_kind != "service_action" or receipt.idempotency_key != service_idempotency_key:
                 continue
             if is_terminal_receipt(receipt):

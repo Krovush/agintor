@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from . import state_store
 from .artifacts import ArtifactMode, ArtifactPolicy
 from .providers import (
     ModelProvider,
@@ -15,7 +16,6 @@ from .providers import (
     provider_payload_file_paths,
     rewrite_provider_payload_file_paths,
 )
-from .pydantic_compat import model_copy, model_dump, model_validate
 from .runtime_loader import resolve_docker_launch_policy
 from .runtime_profile import RuntimeProfile
 from .runtime_sdk import KERNEL_BUNDLE_DIR
@@ -51,7 +51,7 @@ class DockerRuntimeExecutor:
         workspace: Path,
         repo_root: Path | None = None,
         image_name_prefix: str = "agintor-runtime",
-        base_image: str = "python:3.11-slim",
+        base_image: str = "python:3.12-slim",
         artifact_mode: str | ArtifactMode | None = ArtifactMode.ALWAYS,
         sandbox_root: Path | None = None,
     ) -> None:
@@ -217,11 +217,11 @@ class DockerRuntimeExecutor:
         runtime_path = Path(runtime_dir).resolve()
         launch_policy = resolve_docker_launch_policy(runtime_path)
         self.ensure_image()
-        run_dir = ensure_directory(self.workspace / f"inspect_{stable_hash(runtime_path, model_dump(request), self.base_image)[:12]}")
+        run_dir = ensure_directory(self.workspace / f"inspect_{stable_hash(runtime_path, (request).model_dump(), self.base_image)[:12]}")
         input_json = run_dir / "inspect_request.json"
         output_json = run_dir / "inspect_response.json"
         workspace_dir = ensure_directory(run_dir / "workspace")
-        input_json.write_text(json.dumps(model_dump(request), indent=2, sort_keys=True), encoding="utf-8")
+        input_json.write_text(json.dumps((request).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         command = self._docker_run_argv(
             image_tag=self.image_tag,
             entrypoint_argv=[
@@ -258,7 +258,7 @@ class DockerRuntimeExecutor:
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "docker runtime inspect failed")
-        capability = model_validate(CapabilityExchange, json.loads(output_json.read_text(encoding="utf-8")))
+        capability = (CapabilityExchange).model_validate(json.loads(output_json.read_text(encoding="utf-8")))
         self._cleanup_run_dir(run_dir, failed=False)
         return capability
 
@@ -273,11 +273,11 @@ class DockerRuntimeExecutor:
         runtime_path = Path(runtime_dir).resolve()
         launch_policy = resolve_docker_launch_policy(runtime_path)
         self.ensure_image()
-        profile_payload = model_dump(runtime_profile) if runtime_profile is not None else None
+        profile_payload = (runtime_profile).model_dump() if runtime_profile is not None else None
         provider_config = provider_payload(provider)
         run_dir = ensure_directory(
             self.workspace
-            / stable_hash(runtime_path, model_dump(request), provider_config, profile_payload, self.base_image)[:12]
+            / stable_hash(runtime_path, (request).model_dump(), provider_config, profile_payload, self.base_image)[:12]
         )
         task_runs_json = run_dir / "task_runs.json"
         profile_json = run_dir / "profile.json"
@@ -289,7 +289,7 @@ class DockerRuntimeExecutor:
             container_request,
             run_mount_root=run_mount_root,
         )
-        task_runs_json.write_text(json.dumps(model_dump(container_request), indent=2, sort_keys=True), encoding="utf-8")
+        task_runs_json.write_text(json.dumps((container_request).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         if profile_payload is not None:
             profile_json.write_text(json.dumps(profile_payload, indent=2, sort_keys=True), encoding="utf-8")
         mounts = [
@@ -361,16 +361,18 @@ class DockerRuntimeExecutor:
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "docker run failed")
-        response = model_validate(RuntimeBatchResponse, json.loads(output_json.read_text(encoding="utf-8")))
+        response = (RuntimeBatchResponse).model_validate(json.loads(output_json.read_text(encoding="utf-8")))
         self._rewrite_response_paths(
             response,
             workspace_dir,
+            runtime_path=runtime_path,
             run_mount_root=run_mount_root,
             request_file_reverse_map=request_file_reverse_map,
         )
         for run_root in sorted({str(run.run_root or "").strip() for run in response.run_results if str(run.run_root or "").strip()}):
             self._rewrite_durable_run_paths(
                 run_root,
+                runtime_path=runtime_path,
                 run_mount_root=run_mount_root,
                 request_file_reverse_map=request_file_reverse_map,
             )
@@ -389,11 +391,11 @@ class DockerRuntimeExecutor:
         runtime_path = Path(runtime_dir).resolve()
         launch_policy = resolve_docker_launch_policy(runtime_path)
         self.ensure_image()
-        profile_payload = model_dump(runtime_profile) if runtime_profile is not None else None
+        profile_payload = (runtime_profile).model_dump() if runtime_profile is not None else None
         provider_config = provider_payload(provider)
         run_dir = ensure_directory(
             self.workspace
-            / stable_hash("solve", runtime_path, model_dump(request), provider_config, profile_payload, self.base_image)[:12]
+            / stable_hash("solve", runtime_path, (request).model_dump(), provider_config, profile_payload, self.base_image)[:12]
         )
         request_json = run_dir / "solve_request.json"
         profile_json = run_dir / "profile.json"
@@ -405,7 +407,7 @@ class DockerRuntimeExecutor:
             container_request,
             run_mount_root=run_mount_root,
         )
-        request_json.write_text(json.dumps(model_dump(container_request), indent=2, sort_keys=True), encoding="utf-8")
+        request_json.write_text(json.dumps((container_request).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         if profile_payload is not None:
             profile_json.write_text(json.dumps(profile_payload, indent=2, sort_keys=True), encoding="utf-8")
         mounts = [
@@ -477,15 +479,17 @@ class DockerRuntimeExecutor:
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "docker solve failed")
-        response = model_validate(RuntimeSolveResponse, json.loads(output_json.read_text(encoding="utf-8")))
+        response = (RuntimeSolveResponse).model_validate(json.loads(output_json.read_text(encoding="utf-8")))
         self._rewrite_solve_response_paths(
             response,
             workspace_dir,
+            runtime_path=runtime_path,
             run_mount_root=run_mount_root,
             request_file_reverse_map=request_file_reverse_map,
         )
         self._rewrite_durable_run_paths(
             response.solve_result.run_root or request.run_root,
+            runtime_path=runtime_path,
             run_mount_root=run_mount_root,
             request_file_reverse_map=request_file_reverse_map,
         )
@@ -504,11 +508,11 @@ class DockerRuntimeExecutor:
         runtime_path = Path(runtime_dir).resolve()
         launch_policy = resolve_docker_launch_policy(runtime_path)
         self.ensure_image()
-        profile_payload = model_dump(runtime_profile) if runtime_profile is not None else None
+        profile_payload = (runtime_profile).model_dump() if runtime_profile is not None else None
         provider_config = provider_payload(provider)
         run_dir = ensure_directory(
             self.workspace
-            / stable_hash("resume", runtime_path, model_dump(request), provider_config, profile_payload, self.base_image)[:12]
+            / stable_hash("resume", runtime_path, (request).model_dump(), provider_config, profile_payload, self.base_image)[:12]
         )
         request_json = run_dir / "resume_request.json"
         profile_json = run_dir / "profile.json"
@@ -521,7 +525,7 @@ class DockerRuntimeExecutor:
             resume_request_file_refs,
             run_mount_root=run_mount_root,
         )
-        request_json.write_text(json.dumps(model_dump(container_request), indent=2, sort_keys=True), encoding="utf-8")
+        request_json.write_text(json.dumps((container_request).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         if profile_payload is not None:
             profile_json.write_text(json.dumps(profile_payload, indent=2, sort_keys=True), encoding="utf-8")
         mounts = [
@@ -595,16 +599,18 @@ class DockerRuntimeExecutor:
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "docker resume failed")
-        response = model_validate(RuntimeSolveResponse, json.loads(output_json.read_text(encoding="utf-8")))
+        response = (RuntimeSolveResponse).model_validate(json.loads(output_json.read_text(encoding="utf-8")))
         self._rewrite_solve_response_paths(
             response,
             workspace_dir,
             checkpoint_store_dir,
+            runtime_path=runtime_path,
             run_mount_root=run_mount_root,
             request_file_reverse_map=request_file_reverse_map,
         )
         self._rewrite_durable_run_paths(
             response.solve_result.run_root or request.run_root,
+            runtime_path=runtime_path,
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
             request_file_reverse_map=request_file_reverse_map,
@@ -645,7 +651,7 @@ class DockerRuntimeExecutor:
     ) -> tuple[RuntimeSolveRequest, Path | None]:
         run_mount_root = cls._common_run_mount_root([request.run_root])
         return (
-            request.copy(update={"run_root": cls._container_run_path(request.run_root, run_mount_root) or ""}),
+            request.model_copy(update={"run_root": cls._container_run_path(request.run_root, run_mount_root) or ""}),
             run_mount_root,
         )
 
@@ -656,12 +662,12 @@ class DockerRuntimeExecutor:
     ) -> tuple[RuntimeBatchRequest, Path | None]:
         run_mount_root = cls._common_run_mount_root([invocation.run_root for invocation in request.invocations])
         invocations = [
-            invocation.copy(
+            invocation.model_copy(
                 update={"run_root": cls._container_run_path(invocation.run_root, run_mount_root) or ""}
             )
             for invocation in request.invocations
         ]
-        return request.copy(update={"invocations": invocations}), run_mount_root
+        return request.model_copy(update={"invocations": invocations}), run_mount_root
 
     @classmethod
     def _container_resume_request(
@@ -697,7 +703,7 @@ class DockerRuntimeExecutor:
                 checkpoint_ref = f"/mnt/checkpoints/{relative_ref.as_posix()}"
                 checkpoint_store = "/mnt/checkpoints"
         return (
-            request.copy(
+            request.model_copy(
                 update={
                     "checkpoint_ref": checkpoint_ref,
                     "checkpoint_store_dir": checkpoint_store,
@@ -718,8 +724,41 @@ class DockerRuntimeExecutor:
         if isinstance(payload, list):
             return [DockerRuntimeExecutor._rewrite_exact_string_payload(item, replacements) for item in payload]
         if isinstance(payload, str):
-            return replacements.get(payload, payload)
+            rewritten = replacements.get(payload, payload)
+            if rewritten != payload:
+                return rewritten
+            for source, target in replacements.items():
+                prefix = f"{source}/"
+                if source and payload.startswith(prefix):
+                    relative = payload[len(prefix):]
+                    return str((Path(target) / Path(*relative.split("/"))).resolve())
+            for source, target in replacements.items():
+                if source and source in rewritten:
+                    rewritten = rewritten.replace(source, target)
+            return rewritten
         return payload
+
+    @classmethod
+    def _mounted_path_replacements(
+        cls,
+        *,
+        runtime_path: Path | None = None,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+        request_file_reverse_map: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        replacements = {
+            str(source): str(target)
+            for source, target in dict(request_file_reverse_map or {}).items()
+            if str(source).strip() and str(target).strip()
+        }
+        if run_mount_root is not None:
+            replacements[cls.RUNS_MOUNT_ROOT] = str(run_mount_root.resolve())
+        if checkpoint_store_dir is not None:
+            replacements["/mnt/checkpoints"] = str(checkpoint_store_dir.resolve())
+        if runtime_path is not None:
+            replacements["/mnt/runtime"] = str(runtime_path.resolve())
+        return replacements
 
     @classmethod
     def _container_request_file_mount_path(cls, host_path: Path) -> str:
@@ -739,7 +778,7 @@ class DockerRuntimeExecutor:
         mounted_host_paths: set[str] = set()
         for file_ref in request_file_refs:
             if file_ref.path_root != "host_absolute" or not str(file_ref.host_path or "").strip():
-                updated_refs.append(model_copy(file_ref, deep=True))
+                updated_refs.append((file_ref).model_copy(deep=True))
                 continue
             host_path = Path(file_ref.host_path).resolve()
             container_path = cls._container_run_path(str(host_path), run_mount_root)
@@ -748,7 +787,7 @@ class DockerRuntimeExecutor:
                 if str(host_path) not in mounted_host_paths:
                     mounts.append(f"{host_path}:{container_path}:rw")
                     mounted_host_paths.add(str(host_path))
-            updated_ref = model_copy(file_ref, update={"runtime_path": container_path}, deep=True)
+            updated_ref = (file_ref).model_copy(update={"runtime_path": container_path}, deep=True)
             updated_refs.append(updated_ref)
             forward_map[file_ref.source_path] = container_path
             forward_map[str(host_path)] = container_path
@@ -765,7 +804,7 @@ class DockerRuntimeExecutor:
         if request.mode != "user_request" or request.solve_request is None:
             return request, [], {}
         request_file_refs = [
-            model_validate(RequestFileRef, model_dump(file_ref))
+            (RequestFileRef).model_validate((file_ref).model_dump())
             for file_ref in request.solve_request.request_file_refs
         ]
         if not request_file_refs:
@@ -774,12 +813,12 @@ class DockerRuntimeExecutor:
             request_file_refs,
             run_mount_root=run_mount_root,
         )
-        payload = model_dump(request.solve_request)
-        payload["request_file_refs"] = [model_dump(file_ref) for file_ref in updated_refs]
+        payload = (request.solve_request).model_dump()
+        payload["request_file_refs"] = [(file_ref).model_dump() for file_ref in updated_refs]
         payload["file_paths"] = [file_ref.runtime_path for file_ref in updated_refs]
         payload["context_items"] = cls._rewrite_exact_string_payload(payload.get("context_items", []), forward_map)
         return (
-            request.copy(update={"solve_request": model_validate(type(request.solve_request), payload)}),
+            request.model_copy(update={"solve_request": (type(request.solve_request)).model_validate(payload)}),
             mounts,
             reverse_map,
         )
@@ -799,11 +838,11 @@ class DockerRuntimeExecutor:
             request_file_refs,
             run_mount_root=run_mount_root,
         )
-        payload = cls._rewrite_exact_string_payload(model_dump(task), forward_map)
+        payload = cls._rewrite_exact_string_payload((task).model_dump(), forward_map)
         payload["file_paths"] = [forward_map.get(str(path), str(path)) for path in task.file_paths]
         payload.setdefault("metadata", {})
-        payload["metadata"]["request_file_refs"] = [model_dump(file_ref) for file_ref in updated_refs]
-        return model_validate(BenchmarkTask, payload), mounts, reverse_map
+        payload["metadata"]["request_file_refs"] = [(file_ref).model_dump() for file_ref in updated_refs]
+        return (BenchmarkTask).model_validate(payload), mounts, reverse_map
 
     @classmethod
     def _containerize_batch_request_file_refs(
@@ -821,13 +860,13 @@ class DockerRuntimeExecutor:
                 invocation.task,
                 run_mount_root=run_mount_root,
             )
-            updated_invocations.append(invocation.copy(update={"task": rewritten_task}))
+            updated_invocations.append(invocation.model_copy(update={"task": rewritten_task}))
             for mount in task_mounts:
                 if mount not in seen_mounts:
                     mounts.append(mount)
                     seen_mounts.add(mount)
             reverse_map.update(task_reverse_map)
-        return request.copy(update={"invocations": updated_invocations}), mounts, reverse_map
+        return request.model_copy(update={"invocations": updated_invocations}), mounts, reverse_map
 
     @classmethod
     def _checkpoint_request_file_refs(
@@ -841,11 +880,11 @@ class DockerRuntimeExecutor:
         if not checkpoint_path.exists():
             return []
         payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        envelope = model_validate(CheckpointEnvelope, payload)
+        envelope = (CheckpointEnvelope).model_validate(payload)
         request_file_refs_payload = envelope.plan_snapshot.get("file_ref_specs", [])
         if isinstance(request_file_refs_payload, list) and request_file_refs_payload:
             return [
-                model_validate(RequestFileRef, row)
+                (RequestFileRef).model_validate(row)
                 for row in request_file_refs_payload
                 if isinstance(row, Mapping)
             ]
@@ -853,7 +892,7 @@ class DockerRuntimeExecutor:
         metadata_refs = task_metadata.get("request_file_refs", []) if isinstance(task_metadata, Mapping) else []
         if isinstance(metadata_refs, list) and metadata_refs:
             return [
-                model_validate(RequestFileRef, row)
+                (RequestFileRef).model_validate(row)
                 for row in metadata_refs
                 if isinstance(row, Mapping)
             ]
@@ -903,7 +942,7 @@ class DockerRuntimeExecutor:
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
     ) -> AsyncHandle:
-        payload = model_dump(handle)
+        payload = (handle).model_dump()
         payload["working_directory"] = cls._rewrite_known_path(
             handle.working_directory,
             run_mount_root=run_mount_root,
@@ -928,7 +967,62 @@ class DockerRuntimeExecutor:
             or ref
             for ref in handle.artifact_refs
         ]
-        return model_validate(AsyncHandle, payload)
+        return (AsyncHandle).model_validate(payload)
+
+    @staticmethod
+    def _open_handle_payloads(value: Any) -> list[Any]:
+        if hasattr(value, "handles"):
+            return list(getattr(value, "handles") or [])
+        if isinstance(value, Mapping):
+            return list(value.get("handles", []) or [])
+        if isinstance(value, list):
+            return list(value)
+        return []
+
+    @classmethod
+    def _rewrite_working_memory_snapshot_paths(
+        cls,
+        snapshot_payload: Mapping[str, Any],
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(snapshot_payload)
+        selected_refs = payload.get("selected_checkpoint_refs", [])
+        if isinstance(selected_refs, list):
+            payload["selected_checkpoint_refs"] = [
+                cls._rewrite_known_path(
+                    str(ref),
+                    run_mount_root=run_mount_root,
+                    checkpoint_store_dir=checkpoint_store_dir,
+                )
+                or str(ref)
+                for ref in selected_refs
+            ]
+        return payload
+
+    @classmethod
+    def _rewrite_recovery_payload_paths(
+        cls,
+        payload: Any,
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+        path_replacements: Mapping[str, str] | None = None,
+    ) -> Any:
+        rewritten = cls._rewrite_exact_string_payload(payload, dict(path_replacements or {}))
+        if not isinstance(rewritten, Mapping):
+            return rewritten
+        result = dict(rewritten)
+        for key in ("selected_checkpoint_ref", "source_checkpoint_ref"):
+            if key not in result:
+                continue
+            result[key] = cls._rewrite_known_path(
+                result.get(key),
+                run_mount_root=run_mount_root,
+                checkpoint_store_dir=checkpoint_store_dir,
+            ) or result.get(key)
+        return result
 
     @classmethod
     def _rewrite_branch_resume_snapshot_paths(
@@ -940,16 +1034,16 @@ class DockerRuntimeExecutor:
     ) -> dict[str, Any]:
         payload = dict(snapshot_payload)
         payload["shell_state_snapshot"] = dict(payload.get("shell_state_snapshot") or {})
-        payload["shell_state_snapshot"]["open_handles"] = [
-            model_dump(
-                cls._rewrite_async_handle_paths(
-                    model_validate(AsyncHandle, handle_payload),
-                    run_mount_root=run_mount_root,
-                    checkpoint_store_dir=checkpoint_store_dir,
-                )
-            )
-            for handle_payload in payload["shell_state_snapshot"].get("open_handles", [])
-        ]
+        payload["shell_state_snapshot"]["open_handles"] = {
+            "handles": [
+                (cls._rewrite_async_handle_paths(
+                        (AsyncHandle).model_validate(handle_payload),
+                        run_mount_root=run_mount_root,
+                        checkpoint_store_dir=checkpoint_store_dir,
+                    )).model_dump()
+                for handle_payload in cls._open_handle_payloads(payload["shell_state_snapshot"].get("open_handles", []))
+            ]
+        }
         return payload
 
     @classmethod
@@ -960,7 +1054,7 @@ class DockerRuntimeExecutor:
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
     ) -> CheckpointReference:
-        payload = model_dump(reference)
+        payload = (reference).model_dump()
         payload["ref"] = cls._rewrite_known_path(
             reference.ref,
             run_mount_root=run_mount_root,
@@ -971,7 +1065,7 @@ class DockerRuntimeExecutor:
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
         ) or ""
-        return model_validate(CheckpointReference, payload)
+        return (CheckpointReference).model_validate(payload)
 
     @classmethod
     def _rewrite_run_manifest_paths(
@@ -981,7 +1075,7 @@ class DockerRuntimeExecutor:
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
     ) -> RunManifest:
-        payload = model_dump(manifest)
+        payload = (manifest).model_dump()
         payload["run_root"] = cls._rewrite_known_path(
             manifest.run_root,
             run_mount_root=run_mount_root,
@@ -992,7 +1086,7 @@ class DockerRuntimeExecutor:
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
         )
-        return model_validate(RunManifest, payload)
+        return (RunManifest).model_validate(payload)
 
     @classmethod
     def _rewrite_attempt_manifest_paths(
@@ -1002,7 +1096,7 @@ class DockerRuntimeExecutor:
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
     ) -> AttemptManifest:
-        payload = model_dump(manifest)
+        payload = (manifest).model_dump()
         payload["run_root"] = cls._rewrite_known_path(
             manifest.run_root,
             run_mount_root=run_mount_root,
@@ -1023,18 +1117,19 @@ class DockerRuntimeExecutor:
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
         )
-        return model_validate(AttemptManifest, payload)
+        return (AttemptManifest).model_validate(payload)
 
     @classmethod
     def _rewrite_checkpoint_envelope_paths(
         cls,
         envelope: CheckpointEnvelope,
         *,
+        runtime_path: Path | None = None,
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
         request_file_reverse_map: Mapping[str, str] | None = None,
     ) -> CheckpointEnvelope:
-        payload = model_dump(envelope)
+        payload = (envelope).model_dump()
         payload["run_root"] = cls._rewrite_known_path(
             envelope.run_root,
             run_mount_root=run_mount_root,
@@ -1060,16 +1155,16 @@ class DockerRuntimeExecutor:
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
         ) or envelope.attempt_snapshot.resumed_from_checkpoint_ref
-        payload["shell_state_snapshot"]["open_handles"] = [
-            model_dump(
-                cls._rewrite_async_handle_paths(
-                    handle,
-                    run_mount_root=run_mount_root,
-                    checkpoint_store_dir=checkpoint_store_dir,
-                )
-            )
-            for handle in envelope.shell_state_snapshot.open_handles
-        ]
+        payload["shell_state_snapshot"]["open_handles"] = {
+            "handles": [
+                (cls._rewrite_async_handle_paths(
+                        handle,
+                        run_mount_root=run_mount_root,
+                        checkpoint_store_dir=checkpoint_store_dir,
+                    )).model_dump()
+                for handle in envelope.shell_state_snapshot.open_handles.handles
+            ]
+        }
         payload["runtime_state_snapshot"]["branch_resume_snapshots"] = {
             str(key): cls._rewrite_branch_resume_snapshot_paths(
                 dict(value),
@@ -1078,30 +1173,103 @@ class DockerRuntimeExecutor:
             )
             for key, value in dict(payload["runtime_state_snapshot"].get("branch_resume_snapshots", {})).items()
         }
-        if request_file_reverse_map:
-            payload["plan_snapshot"] = cls._rewrite_exact_string_payload(
-                payload.get("plan_snapshot", {}),
-                request_file_reverse_map,
+        payload["working_state"] = cls._rewrite_working_memory_snapshot_paths(
+            payload.get("working_state", {}),
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        path_replacements = cls._mounted_path_replacements(
+            runtime_path=runtime_path,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+            request_file_reverse_map=request_file_reverse_map,
+        )
+        if path_replacements:
+            payload = cls._rewrite_exact_string_payload(payload, path_replacements)
+        return (CheckpointEnvelope).model_validate(payload)
+
+    @classmethod
+    def _rewrite_json_file_payload(
+        cls,
+        path: Path,
+        *,
+        runtime_path: Path | None = None,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+        request_file_reverse_map: Mapping[str, str] | None = None,
+    ) -> bool:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        path_replacements = cls._mounted_path_replacements(
+            runtime_path=runtime_path,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+            request_file_reverse_map=request_file_reverse_map,
+        )
+        if path.parent.name == "working_memory":
+            rewritten = cls._rewrite_working_memory_snapshot_paths(
+                payload if isinstance(payload, Mapping) else {},
+                run_mount_root=run_mount_root,
+                checkpoint_store_dir=checkpoint_store_dir,
             )
-            payload["task_payload"] = cls._rewrite_exact_string_payload(
-                payload.get("task_payload", {}),
-                request_file_reverse_map,
+            rewritten = cls._rewrite_exact_string_payload(rewritten, path_replacements)
+        elif path.parent.name == "recovery" or path.parent.name == "fingerprints":
+            rewritten = cls._rewrite_recovery_payload_paths(
+                payload,
+                run_mount_root=run_mount_root,
+                checkpoint_store_dir=checkpoint_store_dir,
+                path_replacements=path_replacements,
             )
-            payload["runtime_state_snapshot"] = cls._rewrite_exact_string_payload(
-                payload.get("runtime_state_snapshot", {}),
-                request_file_reverse_map,
-            )
-            payload["side_effect_ledger"] = cls._rewrite_exact_string_payload(
-                payload.get("side_effect_ledger", {}),
-                request_file_reverse_map,
-            )
-        return model_validate(CheckpointEnvelope, payload)
+        else:
+            rewritten = cls._rewrite_exact_string_payload(payload, path_replacements)
+        if rewritten == payload:
+            return False
+        path.write_text(json.dumps(rewritten, indent=2, sort_keys=True), encoding="utf-8")
+        return True
+
+    @classmethod
+    def _rewrite_jsonl_file_payloads(
+        cls,
+        path: Path,
+        *,
+        path_replacements: Mapping[str, str] | None = None,
+    ) -> bool:
+        replacements = dict(path_replacements or {})
+        if not replacements:
+            return False
+        try:
+            original_text = path.read_text(encoding="utf-8")
+        except Exception:
+            return False
+        changed = False
+        rewritten_lines: list[str] = []
+        for line in original_text.splitlines():
+            if not line.strip():
+                rewritten_lines.append(line)
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                rewritten_lines.append(line)
+                continue
+            rewritten = cls._rewrite_exact_string_payload(payload, replacements)
+            if rewritten != payload:
+                changed = True
+            rewritten_lines.append(json.dumps(rewritten, sort_keys=True))
+        if not changed:
+            return False
+        suffix = "\n" if original_text.endswith("\n") else ""
+        path.write_text("\n".join(rewritten_lines) + suffix, encoding="utf-8")
+        return True
 
     @classmethod
     def _rewrite_durable_run_paths(
         cls,
         run_root: str | Path | None,
         *,
+        runtime_path: Path | None = None,
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
         request_file_reverse_map: Mapping[str, str] | None = None,
@@ -1110,72 +1278,124 @@ class DockerRuntimeExecutor:
         if not text:
             return
         root = Path(text).resolve()
+        path_replacements = cls._mounted_path_replacements(
+            runtime_path=runtime_path,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+            request_file_reverse_map=request_file_reverse_map,
+        )
         candidate_paths = [root / "run_manifest.json"]
         candidate_paths.extend(sorted((root / "attempts").glob("*/attempt_manifest.json")))
         candidate_paths.extend(sorted((root / "checkpoints").glob("*.json")))
+        rewritten_any = False
         for path in candidate_paths:
             if not path.exists() or not path.is_file():
                 continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if path.name == "run_manifest.json":
-                    rewritten = model_dump(
-                        cls._rewrite_run_manifest_paths(
-                            model_validate(RunManifest, payload),
+                    rewritten = (cls._rewrite_run_manifest_paths(
+                            (RunManifest).model_validate(payload),
                             run_mount_root=run_mount_root,
                             checkpoint_store_dir=checkpoint_store_dir,
-                        )
-                    )
+                        )).model_dump()
                 elif path.name == "attempt_manifest.json":
-                    rewritten = model_dump(
-                        cls._rewrite_attempt_manifest_paths(
-                            model_validate(AttemptManifest, payload),
+                    rewritten = (cls._rewrite_attempt_manifest_paths(
+                            (AttemptManifest).model_validate(payload),
                             run_mount_root=run_mount_root,
                             checkpoint_store_dir=checkpoint_store_dir,
-                        )
-                    )
+                        )).model_dump()
                 elif path.name == "LATEST.json":
-                    rewritten = model_dump(
-                        cls._rewrite_checkpoint_reference_paths(
-                            model_validate(CheckpointReference, payload),
+                    rewritten = (cls._rewrite_checkpoint_reference_paths(
+                            (CheckpointReference).model_validate(payload),
                             run_mount_root=run_mount_root,
                             checkpoint_store_dir=checkpoint_store_dir,
-                        )
-                    )
+                        )).model_dump()
                 elif path.name == "index.json":
                     if not isinstance(payload, list):
                         continue
                     rewritten = [
-                        model_dump(
-                            cls._rewrite_checkpoint_reference_paths(
-                                model_validate(CheckpointReference, row),
+                        (cls._rewrite_checkpoint_reference_paths(
+                                (CheckpointReference).model_validate(row),
                                 run_mount_root=run_mount_root,
                                 checkpoint_store_dir=checkpoint_store_dir,
-                            )
-                        )
+                            )).model_dump()
                         for row in payload
                     ]
                 else:
-                    rewritten = model_dump(
-                        cls._rewrite_checkpoint_envelope_paths(
-                            model_validate(CheckpointEnvelope, payload),
+                    rewritten = (cls._rewrite_checkpoint_envelope_paths(
+                            (CheckpointEnvelope).model_validate(payload),
+                            runtime_path=runtime_path,
                             run_mount_root=run_mount_root,
                             checkpoint_store_dir=checkpoint_store_dir,
                             request_file_reverse_map=request_file_reverse_map,
-                        )
-                    )
+                        )).model_dump()
+                if path_replacements:
+                    rewritten = cls._rewrite_exact_string_payload(rewritten, path_replacements)
             except Exception:
                 continue
+            if rewritten == payload:
+                continue
             path.write_text(json.dumps(rewritten, indent=2, sort_keys=True), encoding="utf-8")
+            rewritten_any = True
+        payload_paths: list[Path] = []
+        payload_paths.extend(sorted((root / "request").glob("*.json")))
+        payload_paths.extend(sorted((root / "side_effects").glob("*.json")))
+        payload_paths.extend(sorted((root / "events").glob("*.json")))
+        payload_paths.extend(sorted((root / "traces").glob("*.json")))
+        payload_paths.extend(
+            path
+            for path in sorted((root / "state").rglob("*.json"))
+            if path.name != state_store.INDEX_DIRTY_FILE
+        )
+        for path in payload_paths:
+            if not path.exists() or not path.is_file():
+                continue
+            rewritten_any = (
+                cls._rewrite_json_file_payload(
+                    path,
+                    runtime_path=runtime_path,
+                    run_mount_root=run_mount_root,
+                    checkpoint_store_dir=checkpoint_store_dir,
+                    request_file_reverse_map=request_file_reverse_map,
+                )
+                or rewritten_any
+            )
+        for path in sorted((root / "state").rglob("*.jsonl")):
+            if not path.exists() or not path.is_file():
+                continue
+            rewritten_any = (
+                cls._rewrite_jsonl_file_payloads(
+                    path,
+                    path_replacements=path_replacements,
+                )
+                or rewritten_any
+            )
+        if rewritten_any and (root / "state").exists():
+            try:
+                state_store.rebuild_from_canonical(root)
+            except Exception:
+                try:
+                    state_store.mark_index_dirty(root, reason="docker_path_rewrite_reindex_failed")
+                except Exception:
+                    pass
 
     def _rewrite_response_paths(
         self,
         response: RuntimeBatchResponse,
         workspace_dir: Path,
         *,
+        runtime_path: Path | None = None,
         run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
         request_file_reverse_map: Mapping[str, str] | None = None,
     ) -> None:
+        path_replacements = self._mounted_path_replacements(
+            runtime_path=runtime_path,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+            request_file_reverse_map=request_file_reverse_map,
+        )
         for run in response.run_results:
             run.trace_path = self._host_workspace_path(run.trace_path, workspace_dir)
             run.checkpoint_ref = self._host_workspace_path(run.checkpoint_ref, workspace_dir)
@@ -1189,7 +1409,7 @@ class DockerRuntimeExecutor:
             run.run_root = self._host_mounted_path(run.run_root, self.RUNS_MOUNT_ROOT, run_mount_root) or ""
             run.artifact = self._rewrite_exact_string_payload(
                 run.artifact,
-                dict(request_file_reverse_map or {}),
+                path_replacements,
             )
 
     def _rewrite_solve_response_paths(
@@ -1198,9 +1418,16 @@ class DockerRuntimeExecutor:
         workspace_dir: Path,
         checkpoint_store_dir: Path | None = None,
         *,
+        runtime_path: Path | None = None,
         run_mount_root: Path | None = None,
         request_file_reverse_map: Mapping[str, str] | None = None,
     ) -> None:
+        path_replacements = self._mounted_path_replacements(
+            runtime_path=runtime_path,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+            request_file_reverse_map=request_file_reverse_map,
+        )
         response.solve_result.trace_ref = self._host_workspace_path(response.solve_result.trace_ref, workspace_dir)
         response.solve_result.checkpoint_ref = self._host_workspace_path(response.solve_result.checkpoint_ref, workspace_dir)
         response.solve_result.trace_ref = self._host_mounted_path(
@@ -1235,5 +1462,5 @@ class DockerRuntimeExecutor:
         ) or ""
         response.solve_result.artifact = self._rewrite_exact_string_payload(
             response.solve_result.artifact,
-            dict(request_file_reverse_map or {}),
+            path_replacements,
         )

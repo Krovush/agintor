@@ -18,7 +18,6 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from .artifacts import ArtifactPolicy
 from .exceptions import SafetyViolation, ValidationError
-from .pydantic_compat import model_copy, model_dump, model_validate
 from .schemas import (
     AsyncHandle,
     TaskLocalToolRegistrySnapshot,
@@ -92,7 +91,7 @@ class SandboxManager:
         self.root = Path(root)
         self._manifests: dict[str, Path] = {}
 
-    def sandbox_hash(self, spec: ToolSpec, base_image_digest: str = "python-3.11", compiler_flags: str = "", mount_spec: str = "ro", test_digest: str | None = None) -> str:
+    def sandbox_hash(self, spec: ToolSpec, base_image_digest: str = "python-3.12", compiler_flags: str = "", mount_spec: str = "ro", test_digest: str | None = None) -> str:
         digest = stable_hash(
             spec.source_digest,
             spec.runtime,
@@ -204,11 +203,11 @@ def _resolve_runtime_file_path(path: str | Path, *, workspace_root: Path) -> Pat
 
 
 def _materialize_generated_tool(spec: ToolSpec, source: str, sandbox_manager: SandboxManager) -> tuple[ToolSpec, Path]:
-    staged_spec = model_copy(spec, update={"source_digest": stable_hash(source)})
+    staged_spec = (spec).model_copy(update={"source_digest": stable_hash(source)})
     staged_dir = sandbox_manager.ensure_environment(staged_spec)
     staged_file = staged_dir / _tool_filename(staged_spec)
     staged_file.write_text(source, encoding="utf-8")
-    finalized_spec = model_copy(staged_spec, update={"source_digest": file_digest(staged_file)})
+    finalized_spec = (staged_spec).model_copy(update={"source_digest": file_digest(staged_file)})
     finalized_dir = sandbox_manager.ensure_environment(finalized_spec)
     finalized_file = finalized_dir / _tool_filename(finalized_spec)
     if not finalized_file.exists():
@@ -373,7 +372,7 @@ class ToolRegistry:
             source = tool_file.read_text(encoding="utf-8") if tool_file.exists() else ""
             tool_snapshots.append(
                 TaskLocalToolSnapshot(
-                    spec=model_copy(tool.spec, deep=True),
+                    spec=(tool.spec).model_copy(deep=True),
                     source=source,
                     historical_passes=tool.historical_passes,
                     historical_runs=tool.historical_runs,
@@ -384,15 +383,18 @@ class ToolRegistry:
             )
             category_summaries[tool.category_key] = self._category_summaries.get(tool.category_key, tool.spec.description)
         return TaskLocalToolRegistrySnapshot(
-            tools=tool_snapshots,
-            category_summaries=category_summaries,
+            tools=sorted(tool_snapshots, key=lambda item: item.spec.name),
+            category_summaries=dict(sorted(category_summaries.items())),
         )
+
+    def snapshot(self) -> TaskLocalToolRegistrySnapshot:
+        return self.snapshot_task_local()
 
     def restore_task_local(self, snapshot: Mapping[str, Any] | TaskLocalToolRegistrySnapshot) -> None:
         registry_snapshot = (
             snapshot
             if isinstance(snapshot, TaskLocalToolRegistrySnapshot)
-            else model_validate(TaskLocalToolRegistrySnapshot, snapshot)
+            else (TaskLocalToolRegistrySnapshot).model_validate(snapshot)
         )
         self.reset_task_local()
         for tool_snapshot in registry_snapshot.tools:
@@ -406,6 +408,26 @@ class ToolRegistry:
                 registered.category_key,
                 registered.spec.description,
             )
+
+    def restore(self, snapshot: Mapping[str, Any] | TaskLocalToolRegistrySnapshot) -> None:
+        self.restore_task_local(snapshot)
+
+    @classmethod
+    def fork_from_snapshot(
+        cls,
+        snapshot: Mapping[str, Any] | TaskLocalToolRegistrySnapshot,
+        *,
+        sandbox_manager: SandboxManager,
+        safety_guard: SafetyGuard,
+        workspace_root: Path,
+    ) -> "ToolRegistry":
+        registry = cls(
+            sandbox_manager,
+            safety_guard,
+            workspace_root=workspace_root,
+        )
+        registry.restore(snapshot)
+        return registry
 
     def register_generated_tool(self, spec: ToolSpec, source: str, executor: Callable[..., Any] | None = None) -> RegisteredTool:
         self.safety_guard.validate_permissions(spec.permissions)

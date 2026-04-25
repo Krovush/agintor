@@ -21,7 +21,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -249,11 +248,7 @@ class BranchExecutionMixin:
             )
         allocation = branch_plan.replay_allocation
         if allocation is not None and self.provider.can_apply_allocation(allocation):
-            prepared_plan = model_copy(
-                branch_plan,
-                update={"replay_allocation": allocation},
-                deep=True,
-            )
+            prepared_plan = (branch_plan).model_copy(update={"replay_allocation": allocation}, deep=True)
             return prepared_plan, self.provider.clone_for_allocation(allocation)
         provider_node_ids = {
             str(node_id)
@@ -295,11 +290,7 @@ class BranchExecutionMixin:
             raise HardInvalidation(
                 f"replay allocation exhausted for branch {branch_plan.branch_id}: need {provider_calls} rows"
             ) from exc
-        prepared_plan = model_copy(
-            branch_plan,
-            update={"replay_allocation": allocation},
-            deep=True,
-        )
+        prepared_plan = (branch_plan).model_copy(update={"replay_allocation": allocation}, deep=True)
         return prepared_plan, self.provider.clone_for_allocation(allocation)
 
     @staticmethod
@@ -317,11 +308,7 @@ class BranchExecutionMixin:
             if branch_plan.replay_allocation is not None
             else f"{branch_plan.request_id}:{branch_plan.branch_id}"
         )
-        return model_copy(
-            branch_plan,
-            update={"replay_allocation": allocation.copy(update={"allocation_key": allocation_key}, deep=True)},
-            deep=True,
-        )
+        return (branch_plan).model_copy(update={"replay_allocation": allocation.model_copy(update={"allocation_key": allocation_key}, deep=True)}, deep=True)
 
     def _resume_horizontal_branches(
         self,
@@ -335,13 +322,13 @@ class BranchExecutionMixin:
     ) -> tuple[list[dict[str, Any]], int]:
         terminal_results: list[BranchResult] = []
         for payload in context.state.branch_states.values():
-            branch_state = model_validate(BranchState, payload)
+            branch_state = (BranchState).model_validate(payload)
             if branch_state.parent_frame_id != frame.frame_id:
                 continue
             if branch_state.status not in {"completed", "cancelled", "failed"}:
                 continue
             publications = branch_state.publications or [
-                model_validate(BranchPublication, publication_payload)
+                (BranchPublication).model_validate(publication_payload)
                 for publication_payload in context.state.branch_publications
                 if str(publication_payload.get("branch_id", "") or "") == branch_state.branch_id
             ]
@@ -367,7 +354,7 @@ class BranchExecutionMixin:
                     verifier_support=branch_state.verifier_support,
                     unresolved_critical=branch_state.unresolved_critical,
                     side_effect_receipts=[
-                        model_validate(SideEffectReceipt, receipt_payload)
+                        (SideEffectReceipt).model_validate(receipt_payload)
                         for receipt_payload in context.state.side_effect_receipts
                         if str(receipt_payload.get("branch_id", "") or "") == branch_state.branch_id
                     ],
@@ -392,7 +379,7 @@ class BranchExecutionMixin:
         for snapshot in branch_snapshots:
             prepared_branch_plan, branch_provider = self._prepare_branch_provider(
                 plan,
-                model_validate(BranchPlan, model_dump(snapshot.branch_plan)),
+                (BranchPlan).model_validate((snapshot.branch_plan).model_dump()),
                 snapshot,
             )
             prepared_branches.append((snapshot, prepared_branch_plan, branch_provider))
@@ -523,8 +510,7 @@ class BranchExecutionMixin:
             )
             return None, 0
         for branch_plan in branch_plans:
-            context.state.branch_states[branch_plan.branch_id] = model_dump(
-                BranchState(
+            context.state.branch_states[branch_plan.branch_id] = (BranchState(
                     branch_id=branch_plan.branch_id,
                     status="pending",
                     parent_frame_id=frame.frame_id,
@@ -532,8 +518,7 @@ class BranchExecutionMixin:
                     merge_priority=branch_plan.merge_priority,
                     predicted_solve=branch_plan.predicted_solve,
                     reserved_budget=branch_plan.reserved_budget,
-                )
-            )
+                )).model_dump()
         self._publish_checkpoint_envelope(context, task, plan, context.seed, "before_branch_fanout")
         cancellation_event = Event()
         persist_lock = Lock()
@@ -709,19 +694,19 @@ class BranchExecutionMixin:
                 result.branch_plan,
                 branch_provider,
             )
-            finalized = result.copy(
+            finalized = result.model_copy(
                 update={"branch_plan": finalized_branch_plan, "provider_usage": provider_usage},
                 deep=True,
             )
             with persist_lock:
-                parent_context.state.branch_states[finalized.branch_plan.branch_id] = model_dump(finalized.branch_state)
+                parent_context.state.branch_states[finalized.branch_plan.branch_id] = (finalized.branch_state).model_dump()
                 parent_context.state.branch_resume_snapshots.pop(finalized.branch_plan.branch_id, None)
                 existing_ids = {
                     str(payload.get("publication_id", ""))
                     for payload in parent_context.state.branch_publications
                 }
                 for publication in finalized.branch_state.publications:
-                    payload = model_dump(publication)
+                    payload = (publication).model_dump()
                     if payload["publication_id"] in existing_ids:
                         continue
                     parent_context.state.branch_publications.append(payload)
@@ -743,8 +728,7 @@ class BranchExecutionMixin:
                     branch_provider,
                 )
                 self._store_branch_resume_snapshot(parent_context, persisted_branch_plan, branch_context)
-                parent_context.state.branch_states[persisted_branch_plan.branch_id] = model_dump(
-                    BranchState(
+                parent_context.state.branch_states[persisted_branch_plan.branch_id] = (BranchState(
                         branch_id=persisted_branch_plan.branch_id,
                         status="running",
                         parent_frame_id=persisted_branch_plan.parent_frame_id,
@@ -754,8 +738,7 @@ class BranchExecutionMixin:
                         reserved_budget=persisted_branch_plan.reserved_budget,
                         publications=self._branch_publications_snapshot(branch_context),
                         budget_consumed=self._branch_budget_consumed(branch_context),
-                    )
-                )
+                    )).model_dump()
                 existing_ids = {
                     str(payload.get("publication_id", ""))
                     for payload in parent_context.state.branch_publications
@@ -907,7 +890,7 @@ class BranchExecutionMixin:
                         branch_context,
                         failure_kind="reservation_exceeded",
                         failure_details={
-                            "reserved_budget": model_dump(branch_plan.reserved_budget),
+                            "reserved_budget": (branch_plan.reserved_budget).model_dump(),
                             "budget_consumed": self._branch_budget_consumed(branch_context),
                         },
                         error=f"branch {branch_plan.branch_id} exceeded reserved budget",
@@ -952,7 +935,7 @@ class BranchExecutionMixin:
             logical_key=f"{branch_plan.branch_id}.artifact",
             payload={
                 "artifact": output,
-                "summary": model_dump(checkpoint.summary),
+                "summary": (checkpoint.summary).model_dump(),
                 "predicted_solve": branch_plan.predicted_solve,
             },
             verifier_support=verifier_support,
@@ -1037,7 +1020,7 @@ class BranchExecutionMixin:
                     }
                 )
             for receipt_payload in branch_context.state.side_effect_receipts:
-                receipt = model_validate(SideEffectReceipt, receipt_payload)
+                receipt = (SideEffectReceipt).model_validate(receipt_payload)
                 if is_terminal_receipt(receipt):
                     receipt_updates.append(receipt)
                     continue
@@ -1120,7 +1103,7 @@ class BranchExecutionMixin:
                 raise HardInvalidation(
                     f"cancelled branch {branch_plan.branch_id} cannot safely reconcile side effect {receipt.side_effect_id!r}"
                 )
-            branch_context.state.side_effect_receipts = [model_dump(receipt) for receipt in receipt_updates]
+            branch_context.state.side_effect_receipts = [(receipt).model_dump() for receipt in receipt_updates]
             branch_context.state.branch_publications = []
             branch_context.record(
                 "branch_cancelled",
@@ -1168,7 +1151,7 @@ class BranchExecutionMixin:
                     allow_when_cancelled=True,
                 )
             publications = [
-                model_validate(BranchPublication, payload)
+                (BranchPublication).model_validate(payload)
                 for payload in branch_context.state.branch_publications
             ]
             side_effect_receipts = receipt_updates

@@ -1,5 +1,5 @@
 {
-  "prompt_id": "tool.spec_repair.v1",
+  "prompt_id": "tool.spec_repair",
   "description": "Repair a failed tool candidate while preserving determinism.",
   "instructions": "Return only JSON with a corrected deterministic expression and a short description. Do not request extra permissions.",
   "model_class": "medium",
@@ -15,3 +15,4 @@
     "description": "string"
   }
 }
+

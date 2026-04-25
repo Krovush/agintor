@@ -9,7 +9,6 @@ import pytest
 
 from agintor.exceptions import RuntimeLoadError
 from agintor.providers import build_provider
-from agintor.pydantic_compat import model_dump
 from agintor.runtime_sdk import bundle_runtime_kernel
 from agintor.runtime_api import (
     compile_execution_plan_from_task,
@@ -21,6 +20,7 @@ from agintor.runtime_api import (
 )
 from agintor.runtime_host import RuntimeHost
 from agintor.runtime_profile import load_runtime_profile
+from agintor.versioning import RUNTIME_CONTRACT_VERSION
 from agintor.schemas import (
     AttemptManifest,
     BenchmarkTask,
@@ -51,9 +51,7 @@ def _capability_exchange() -> CapabilityExchange:
         if name
     ]
     return CapabilityExchange(
-        runtime_abi="agintor-runtime-abi-v5",
-        kernel_version="agintor-kernel-v1",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         supported_backends=["local", "docker"],
         tool_runtimes=["python"],
         checkpoint_support=True,
@@ -123,7 +121,7 @@ def test_task_runtime_facade_is_exported_in_bundled_kernel(tmp_path: Path):
     from agintor.runner import TaskRuntime as HostTaskRuntime
 
     runtime_dir = tmp_path / "runtime"
-    manifest = bundle_runtime_kernel(runtime_dir, runtime_abi="agintor-runtime-abi-v5", force=True)
+    manifest = bundle_runtime_kernel(runtime_dir, force=True)
     sdk_path = str((runtime_dir / "runtime_sdk").resolve())
 
     assert HostTaskRuntime.__name__ == "TaskRuntime"
@@ -217,7 +215,6 @@ def _solve_response(
             budget={},
             provider_usage={},
             faults={"hard_invalid": False},
-            recoverability="terminal",
             verified=False,
             best_effort=True,
         ),
@@ -278,7 +275,6 @@ def test_solve_preflight_allows_builtin_prompt_plan_without_runtime_credentials(
             budget={},
             provider_usage={},
             faults={"hard_invalid": False},
-            recoverability="terminal",
             verified=True,
             best_effort=False,
         ),
@@ -332,7 +328,6 @@ def test_solve_preflight_allows_local_only_symbol_lookup_with_context_items_with
             budget={},
             provider_usage={},
             faults={"hard_invalid": False},
-            recoverability="terminal",
             verified=True,
             best_effort=False,
         ),
@@ -383,7 +378,6 @@ def test_solve_preflight_accepts_resolved_provider_credentials_from_api_key_file
             budget={},
             provider_usage={},
             faults={"hard_invalid": False},
-            recoverability="terminal",
             verified=False,
             best_effort=True,
         ),
@@ -461,7 +455,7 @@ def test_runtime_batch_request_classifies_transfer_and_duplicate_invocations():
         episode_id="episode-alpha",
         episode_order=0,
     )
-    transfer_task_two = transfer_task_one.copy(update={"task_id": "episode.step2", "episode_order": 1})
+    transfer_task_two = transfer_task_one.model_copy(update={"task_id": "episode.step2", "episode_order": 1})
 
     request = runtime_batch_request_for_tasks(
         request_id="batch.classify",
@@ -548,7 +542,6 @@ def test_runtime_host_solve_creates_durable_run_root_and_returns_identity(monkey
             budget={},
             provider_usage={},
             faults={"hard_invalid": False},
-            recoverability="checkpoint_available",
             verified=False,
             best_effort=True,
         ),
@@ -603,7 +596,6 @@ def test_runtime_host_solve_finalization_preserves_external_checkpoint_ref(monke
             budget={},
             provider_usage={},
             faults={"hard_invalid": False},
-            recoverability="checkpoint_available",
             verified=False,
             best_effort=True,
         ),
@@ -753,7 +745,7 @@ def test_runtime_host_resume_uses_run_ref_and_reuses_original_solve_request_for_
     monkeypatch.setattr(
         host.run_store,
         "load_request_bundle",
-        lambda run_ref: {"request_kind": "runtime_solve_request", "payload": json.loads(json.dumps(model_dump(original_request)))},
+        lambda run_ref: {"request_kind": "runtime_solve_request", "payload": json.loads(json.dumps((original_request).model_dump()))},
     )
     checkpoint_task = BenchmarkTask(
         task_id="resume.task",
@@ -775,8 +767,7 @@ def test_runtime_host_resume_uses_run_ref_and_reuses_original_solve_request_for_
         "load_checkpoint_envelope",
         lambda checkpoint_ref: CheckpointEnvelope(
             checkpoint_id="checkpoint.resume.test.0002",
-            runtime_abi="agintor-runtime-abi-v5",
-            storage_schema_version="agintor-storage-v3",
+            runtime_contract_version=RUNTIME_CONTRACT_VERSION,
             runtime_hash="runtime-hash",
             run_id=manifest.run_id,
             run_root=manifest.run_root,
@@ -784,8 +775,8 @@ def test_runtime_host_resume_uses_run_ref_and_reuses_original_solve_request_for_
             plan_id=checkpoint_plan.plan_id,
             task_id=checkpoint_task.task_id,
             seed=0,
-            plan_snapshot=model_dump(checkpoint_plan),
-            task_payload=model_dump(checkpoint_task),
+            plan_snapshot=(checkpoint_plan).model_dump(),
+            task_payload=(checkpoint_task).model_dump(),
         ),
     )
     monkeypatch.setattr(host.run_store, "begin_attempt", lambda *args, **kwargs: attempt)
@@ -808,7 +799,6 @@ def test_runtime_host_resume_uses_run_ref_and_reuses_original_solve_request_for_
                 budget={},
                 provider_usage={},
                 faults={"hard_invalid": False},
-                recoverability="terminal",
                 verified=False,
                 best_effort=True,
             ),
@@ -854,7 +844,7 @@ def test_runtime_host_resume_accepts_runtime_task_invocation_bundle_and_uses_che
         episode_id="episode-alpha",
         episode_order=0,
     )
-    checkpoint_task = request_task.copy(update={"task_id": "episode.step2", "episode_order": 1})
+    checkpoint_task = request_task.model_copy(update={"task_id": "episode.step2", "episode_order": 1})
     checkpoint_path = tmp_path / "host" / "runs" / "run.123" / "checkpoints" / "checkpoint.resume.test.0002.json"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_path.write_text("{}", encoding="utf-8")
@@ -882,8 +872,7 @@ def test_runtime_host_resume_accepts_runtime_task_invocation_bundle_and_uses_che
     )
     checkpoint_envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.resume.test.0002",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="runtime-hash",
         run_id=manifest.run_id,
         run_root=manifest.run_root,
@@ -891,8 +880,8 @@ def test_runtime_host_resume_accepts_runtime_task_invocation_bundle_and_uses_che
         plan_id=checkpoint_plan.plan_id,
         task_id=checkpoint_task.task_id,
         seed=0,
-        plan_snapshot=model_dump(checkpoint_plan),
-        task_payload=model_dump(checkpoint_task),
+        plan_snapshot=(checkpoint_plan).model_dump(),
+        task_payload=(checkpoint_task).model_dump(),
     )
     monkeypatch.setattr(
         host.run_store,
@@ -916,7 +905,7 @@ def test_runtime_host_resume_accepts_runtime_task_invocation_bundle_and_uses_che
                 "payload": {
                     "request_id": "benchmark.episode.step1.seed_0",
                     "seed": 0,
-                    "task": model_dump(request_task),
+                    "task": (request_task).model_dump(),
                 },
             }
         },
@@ -1093,7 +1082,7 @@ def test_runtime_host_run_batch_rejects_mixed_backends_before_launch(monkeypatch
         operations=[],
         expected={},
     )
-    task_two = task_one.copy(update={"task_id": "batch.mixed.two"})
+    task_two = task_one.model_copy(update={"task_id": "batch.mixed.two"})
     original_builder = runtime_batch_request_for_tasks
     called = {"inspect": False, "local": False, "docker": False}
 
@@ -1104,11 +1093,11 @@ def test_runtime_host_run_batch_rejects_mixed_backends_before_launch(monkeypatch
             task_runs=task_runs,
             budget_overrides=budget_overrides,
         )
-        return request.copy(
+        return request.model_copy(
             update={
                 "invocations": [
-                    request.invocations[0].copy(update={"runtime_backend": "docker"}),
-                    request.invocations[1].copy(update={"runtime_backend": "local"}),
+                    request.invocations[0].model_copy(update={"runtime_backend": "docker"}),
+                    request.invocations[1].model_copy(update={"runtime_backend": "local"}),
                 ]
             }
         )
@@ -1162,7 +1151,7 @@ def test_runtime_host_batch_finalization_preserves_external_checkpoint_ref(monke
         episode_id="episode-alpha",
         episode_order=0,
     )
-    task_two = task_one.copy(update={"task_id": "episode.step2", "episode_order": 1, "prompt": "Step two"})
+    task_two = task_one.model_copy(update={"task_id": "episode.step2", "episode_order": 1, "prompt": "Step two"})
 
     def succeed(runtime_dir, request, **kwargs):
         shared_run_id = request.invocations[0].run_id
@@ -1246,7 +1235,7 @@ def test_runtime_host_run_batch_marks_group_paused_from_first_failure_with_check
         episode_id="episode-alpha",
         episode_order=0,
     )
-    task_two = task_one.copy(update={"task_id": "episode.step2", "episode_order": 1, "prompt": "Step two"})
+    task_two = task_one.model_copy(update={"task_id": "episode.step2", "episode_order": 1, "prompt": "Step two"})
 
     def succeed(runtime_dir, request, **kwargs):
         shared_run_id = request.invocations[0].run_id
@@ -1255,8 +1244,7 @@ def test_runtime_host_run_batch_marks_group_paused_from_first_failure_with_check
         checkpoint_ref = str((Path(shared_run_root) / "checkpoints" / "checkpoint.resume.json").resolve())
         checkpoint_payload = CheckpointEnvelope(
             checkpoint_id="checkpoint.resume",
-            runtime_abi=capability_exchange.runtime_abi,
-            storage_schema_version=capability_exchange.storage_schema_version,
+            runtime_contract_version=capability_exchange.runtime_contract_version,
             runtime_hash="runtime-hash",
             run_id=shared_run_id,
             run_root=shared_run_root,
@@ -1268,7 +1256,7 @@ def test_runtime_host_run_batch_marks_group_paused_from_first_failure_with_check
         )
         checkpoint_path = Path(checkpoint_ref)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_path.write_text(json.dumps(model_dump(checkpoint_payload), indent=2, sort_keys=True), encoding="utf-8")
+        checkpoint_path.write_text(json.dumps((checkpoint_payload).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         (checkpoint_path.parent / "LATEST.json").write_text(
             json.dumps({"ref": checkpoint_ref}, indent=2, sort_keys=True),
             encoding="utf-8",
@@ -1350,7 +1338,7 @@ def test_runtime_host_run_batch_marks_group_failed_without_checkpoint(monkeypatc
         episode_id="episode-alpha",
         episode_order=0,
     )
-    task_two = task_one.copy(update={"task_id": "episode.step2", "episode_order": 1, "prompt": "Step two"})
+    task_two = task_one.model_copy(update={"task_id": "episode.step2", "episode_order": 1, "prompt": "Step two"})
 
     def succeed(runtime_dir, request, **kwargs):
         shared_run_id = request.invocations[0].run_id
@@ -1486,7 +1474,7 @@ def test_runtime_host_solve_finalizes_attempt_on_capability_drift(monkeypatch, t
         captured["attempt_id"] = runtime_request.attempt_id
         return RuntimeSolveResponse(
             request_id=runtime_request.request_id,
-            capability_exchange=capability_exchange.copy(update={"effective_guarantees": ["network_disablement"]}),
+            capability_exchange=capability_exchange.model_copy(update={"effective_guarantees": ["network_disablement"]}),
             solve_result=SolveResult(
                 request_id=runtime_request.request_id,
                 runtime_hash="hash",
@@ -1499,7 +1487,6 @@ def test_runtime_host_solve_finalizes_attempt_on_capability_drift(monkeypatch, t
                 budget={},
                 provider_usage={},
                 faults={"hard_invalid": False},
-                recoverability="terminal",
                 verified=False,
                 best_effort=True,
             ),
@@ -1675,7 +1662,6 @@ def test_runtime_host_resume_finalizes_attempt_on_protocol_mismatch(monkeypatch,
                 budget={},
                 provider_usage={},
                 faults={"hard_invalid": False},
-                recoverability="terminal",
                 verified=False,
                 best_effort=True,
             ),
@@ -1730,7 +1716,7 @@ def test_runtime_host_resume_rejects_missing_runtime_resume_support(monkeypatch,
         seed=0,
         solve_request=load_solve_request(prompt="Resume hello."),
     )
-    capability_exchange = _capability_exchange().copy(update={"resume_support": False})
+    capability_exchange = _capability_exchange().model_copy(update={"resume_support": False})
     monkeypatch.setattr(
         host,
         "_resolve_runtime_resume_request",
@@ -1804,7 +1790,7 @@ def test_runtime_host_resume_finalizes_attempt_when_inspect_fails(monkeypatch, t
 
 
 def test_runtime_guarantee_preflight_rejects_missing_required_guarantee(tmp_path: Path):
-    capability_exchange = _capability_exchange().copy(
+    capability_exchange = _capability_exchange().model_copy(
         update={
             "runtime_isolation_policy": RuntimeIsolationPolicy(required_guarantees=["network_disablement"]),
             "effective_guarantees": [
@@ -1876,7 +1862,7 @@ def test_solve_preflight_rejects_network_incompatible_service_action_before_run_
         seed=0,
         solve_request=load_solve_request(prompt="GET https://service.example.test/status"),
     )
-    capability_exchange = _capability_exchange().copy(
+    capability_exchange = _capability_exchange().model_copy(
         update={
             "runtime_isolation_policy": RuntimeIsolationPolicy(
                 required_guarantees=[],
@@ -1934,7 +1920,7 @@ def test_run_batch_preflight_rejects_read_only_runtime_for_repo_patch_plan_befor
     host = RuntimeHost(tmp_path / "host", runtime_backend="local")
     runtime_profile = _runtime_profile()
     provider = build_provider(runtime_profile.runtime_provider.name, provider_profile=runtime_profile.runtime_provider)
-    capability_exchange = _capability_exchange().copy(
+    capability_exchange = _capability_exchange().model_copy(
         update={
             "required_env_names": [],
             "required_env_any_of": [],
@@ -2009,8 +1995,7 @@ def test_runtime_host_resolve_runtime_resume_request_preserves_checkpoint_store_
     )
     checkpoint_envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.resume.external",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="runtime-hash",
         run_id=manifest.run_id,
         run_root=manifest.run_root,
@@ -2018,8 +2003,8 @@ def test_runtime_host_resolve_runtime_resume_request_preserves_checkpoint_store_
         plan_id=checkpoint_plan.plan_id,
         task_id=checkpoint_task.task_id,
         seed=0,
-        plan_snapshot=model_dump(checkpoint_plan),
-        task_payload=model_dump(checkpoint_task),
+        plan_snapshot=(checkpoint_plan).model_dump(),
+        task_payload=(checkpoint_task).model_dump(),
     )
     monkeypatch.setattr(
         host.run_store,
@@ -2037,7 +2022,7 @@ def test_runtime_host_resolve_runtime_resume_request_preserves_checkpoint_store_
     monkeypatch.setattr(
         host.run_store,
         "load_request_bundle",
-        lambda run_ref: {"request_kind": "runtime_solve_request", "payload": json.loads(json.dumps(model_dump(request)))},
+        lambda run_ref: {"request_kind": "runtime_solve_request", "payload": json.loads(json.dumps((request).model_dump()))},
     )
     monkeypatch.setattr(host.run_store, "load_checkpoint_envelope", lambda checkpoint_ref: checkpoint_envelope)
     monkeypatch.setattr(host.run_store, "begin_attempt", lambda *args, **kwargs: attempt)

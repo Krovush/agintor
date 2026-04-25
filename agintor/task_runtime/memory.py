@@ -12,7 +12,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -53,7 +52,23 @@ class MemoryMixin:
         if not self.runtime.memory.should_promote(context, candidate, score):
             return
         action, target_id = self.runtime.memory.dedup_candidates(context, candidate, self.shell.long_term.all_nodes())
-        self.runtime.memory.upsert_memory(context, candidate, action, target_id)
+        provenance = dict(candidate.provenance or {})
+        verifier_support_refs = []
+        for key in ("verifier_support_refs", "supporting_verifier_ids", "supporting_receipt_ids"):
+            raw_refs = provenance.get(key, [])
+            if isinstance(raw_refs, str):
+                raw_refs = [raw_refs]
+            if isinstance(raw_refs, Sequence):
+                verifier_support_refs.extend(str(ref) for ref in raw_refs if str(ref).strip())
+        with self.shell.long_term.write_scope(
+            action=action,
+            target_node_id=target_id,
+            source_task_id=context.task.task_id,
+            source_attempt_id=str(getattr(self.shell, "attempt_id", "") or ""),
+            source_checkpoint_ref=context.state.latest_checkpoint_ref,
+            verifier_support_refs=verifier_support_refs,
+        ):
+            self.runtime.memory.upsert_memory(context, candidate, action, target_id)
         context.state.promoted_nodes += 1
         context.record("memory_promoted", node_id=candidate.node_id, node_type=candidate.type, action=action)
 
@@ -125,13 +140,32 @@ class MemoryMixin:
         for group in selected:
             summary = self.runtime.memory.summarize_span(context, [short_term.nodes[node_id] for node_id in group])
             short_term.summary_replace(group, summary)
-            context.record("compaction", node_ids=group, summary=model_dump(summary))
+            context.record("compaction", node_ids=group, summary=(summary).model_dump())
 
     def _execute_memory_lookup(self, context: PolicyContext, operation: Any, run_node_id: str | None) -> Any:
         required_symbol = str(operation.static_args.get("requires_exact_symbol", "")).strip()
         exact_symbols = [required_symbol] if required_symbol else context.task.symbolic_seeds
-        candidates = self.shell.long_term.retrieve_candidates(context.task.prompt, exact_symbols, context.task.file_paths)
+        candidates = self.shell.long_term.retrieve_candidates(
+            context.task.prompt,
+            exact_symbols,
+            context.task.file_paths,
+            task_id=context.task.task_id,
+            seed=context.seed,
+            request_id=context.request_id,
+            scope_id=str(getattr(self.shell, "_memory_scope_id", "") or context.task.task_id),
+            emit_diagnostic=False,
+        )
         ranked = self.runtime.memory.retrieve_long_term(context, context.task.prompt, exact_symbols, context.task.file_paths, candidates)
+        self.shell.long_term.record_retrieval_diagnostic(
+            context.task.prompt,
+            exact_symbols,
+            context.task.file_paths,
+            ranked,
+            task_id=context.task.task_id,
+            seed=context.seed,
+            request_id=context.request_id,
+            scope_id=str(getattr(self.shell, "_memory_scope_id", "") or context.task.task_id),
+        )
         if not ranked:
             raise HardInvalidation("memory retrieval returned no candidates for exact symbol/path query")
         node = ranked[0]

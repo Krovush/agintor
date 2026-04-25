@@ -31,7 +31,7 @@ def load_prompt_spec(prompt_id: str) -> PromptSpec:
     path = _prompt_path(prompt_id)
     if not path.is_file():
         raise FileNotFoundError(f"unknown prompt id: {prompt_id}")
-    return PromptSpec.parse_obj(json.loads(path.read_text(encoding="utf-8")))
+    return PromptSpec.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
 def prompt_instructions(prompt_id: str) -> str:

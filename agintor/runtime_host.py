@@ -12,7 +12,6 @@ from .artifacts import ArtifactMode, ArtifactPolicy
 from .container_runtime import DockerRuntimeExecutor
 from .exceptions import RuntimeLoadError
 from .providers import ModelProvider, provider_payload, provider_payload_file_paths, rewrite_provider_payload_file_paths
-from .pydantic_compat import model_dump, model_validate
 from .run_store import RunStore
 from .runtime_api import (
     batch_evaluation_unit_key,
@@ -26,8 +25,7 @@ from .runtime_api import (
     runtime_trace_context,
     runtime_batch_request_for_tasks,
 )
-from .runtime_loader import RUNTIME_ABI_VERSION
-from .runtime_sdk import KERNEL_BUNDLE_DIR, KERNEL_VERSION, STORAGE_SCHEMA_VERSION
+from .runtime_sdk import KERNEL_BUNDLE_DIR
 from .schemas import (
     AttemptManifest,
     BenchmarkTask,
@@ -43,6 +41,7 @@ from .schemas import (
     RuntimeSolveResponse,
 )
 from .utils import ensure_directory, stable_hash
+from .versioning import RUNTIME_CONTRACT_VERSION
 
 
 class _HostPostLaunchValidationError(Exception):
@@ -112,11 +111,11 @@ class RuntimeHost:
         request: RuntimeBatchRequest,
     ) -> tuple[str, RuntimeBatchRequest]:
         selected_backend = self._selected_batch_backend(request)
-        return selected_backend, request.copy(
+        return selected_backend, request.model_copy(
             update={
                 "runtime_backend": selected_backend,
                 "invocations": [
-                    invocation.copy(update={"runtime_backend": selected_backend})
+                    invocation.model_copy(update={"runtime_backend": selected_backend})
                     for invocation in request.invocations
                 ],
             }
@@ -136,9 +135,7 @@ class RuntimeHost:
         request = inspect_request_for_runtime(
             request_id=f"inspect.{stable_hash(runtime_dir, selected_backend)[:12]}",
             requested_backend=selected_backend,
-            runtime_abi=RUNTIME_ABI_VERSION,
-            kernel_version=KERNEL_VERSION,
-            storage_schema_version=STORAGE_SCHEMA_VERSION,
+            runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         )
         if selected_backend == "docker":
             return self._docker_executor().inspect(runtime_dir, request)
@@ -181,11 +178,10 @@ class RuntimeHost:
                 evaluation_unit_id=evaluation_unit_id,
                 request_mode="batch",
                 runtime_backend=selected_backend,
-                trace_context=model_dump(first.trace_context) if first.trace_context is not None else None,
+                trace_context=(first.trace_context).model_dump() if first.trace_context is not None else None,
                 task_id=None if grouped_episode else first.task.task_id,
                 seed=first.seed,
-                runtime_abi=capability_exchange.runtime_abi,
-                storage_schema_version=capability_exchange.storage_schema_version,
+                runtime_contract_version=capability_exchange.runtime_contract_version,
             )
             attempt = self.run_store.begin_attempt(manifest, launch_kind="run_batch")
             envelope = ExecutionUnitRequestEnvelope(
@@ -193,9 +189,9 @@ class RuntimeHost:
                 request_mode="batch",
                 request_id=evaluation_unit_id,
                 evaluation_unit_id=evaluation_unit_id,
-                payload=model_dump(first),
+                payload=(first).model_dump(),
                 member_invocations=[
-                    model_validate(type(first), model_dump(item))
+                    (type(first)).model_validate((item).model_dump())
                     for item in invocations
                 ]
                 if grouped_episode
@@ -203,10 +199,9 @@ class RuntimeHost:
             )
             self.run_store.write_request_bundle(
                 manifest,
-                request_envelope=model_dump(envelope),
+                request_envelope=(envelope).model_dump(),
                 runtime_identity={
-                    "runtime_abi": capability_exchange.runtime_abi,
-                    "storage_schema_version": capability_exchange.storage_schema_version,
+                    "runtime_contract_version": capability_exchange.runtime_contract_version,
                     "runtime_backend": selected_backend,
                 },
             )
@@ -269,7 +264,7 @@ class RuntimeHost:
         selected_backend = self._selected_solve_backend(request)
         capability_exchange = self.inspect(runtime_dir, requested_backend=selected_backend)
         evaluation_unit_id = str(request.evaluation_unit_id or request.request_id).strip() or request.request_id
-        preflight_request = request.copy(
+        preflight_request = request.model_copy(
             update={
                 "runtime_backend": selected_backend,
                 "evaluation_unit_id": evaluation_unit_id,
@@ -288,14 +283,13 @@ class RuntimeHost:
             evaluation_unit_id=evaluation_unit_id,
             request_mode=request.mode,
             runtime_backend=selected_backend,
-            trace_context=model_dump(request.trace_context) if request.trace_context is not None else None,
+            trace_context=(request.trace_context).model_dump() if request.trace_context is not None else None,
             task_id=request.task.task_id if request.task is not None else None,
             seed=request.seed,
-            runtime_abi=capability_exchange.runtime_abi,
-            storage_schema_version=capability_exchange.storage_schema_version,
+            runtime_contract_version=capability_exchange.runtime_contract_version,
         )
         attempt = self.run_store.begin_attempt(manifest, launch_kind="solve")
-        request = preflight_request.copy(
+        request = preflight_request.model_copy(
             update={
                 "run_id": manifest.run_id,
                 "run_root": manifest.run_root,
@@ -304,18 +298,15 @@ class RuntimeHost:
         )
         self.run_store.write_request_bundle(
             manifest,
-            request_envelope=model_dump(
-                ExecutionUnitRequestEnvelope(
+            request_envelope=(ExecutionUnitRequestEnvelope(
                     request_kind="runtime_solve_request",
                     request_mode=request.mode,
                     request_id=request.request_id,
                     evaluation_unit_id=evaluation_unit_id,
-                    payload=model_dump(request),
-                )
-            ),
+                    payload=(request).model_dump(),
+                )).model_dump(),
             runtime_identity={
-                "runtime_abi": capability_exchange.runtime_abi,
-                "storage_schema_version": capability_exchange.storage_schema_version,
+                "runtime_contract_version": capability_exchange.runtime_contract_version,
                 "runtime_backend": selected_backend,
             },
         )
@@ -355,8 +346,8 @@ class RuntimeHost:
     ) -> RuntimeSolveResponse:
         runtime_request, original_request, manifest, attempt = self._resolve_runtime_resume_request(request)
         selected_backend = self._selected_resume_backend(runtime_request, manifest)
-        runtime_request = runtime_request.copy(update={"runtime_backend": selected_backend})
-        original_request = original_request.copy(update={"runtime_backend": selected_backend})
+        runtime_request = runtime_request.model_copy(update={"runtime_backend": selected_backend})
+        original_request = original_request.model_copy(update={"runtime_backend": selected_backend})
         try:
             capability_exchange = self.inspect(runtime_dir, requested_backend=selected_backend)
             if not capability_exchange.resume_support:
@@ -426,7 +417,7 @@ class RuntimeHost:
                 if request.task is None:
                     raise RuntimeLoadError("benchmark solve requests require a benchmark task payload")
                 return compile_execution_plan_from_task(
-                    model_validate(BenchmarkTask, model_dump(request.task)),
+                    (BenchmarkTask).model_validate((request.task).model_dump()),
                     request_id=request.request_id,
                     seed=request.seed,
                     runtime_hash="",
@@ -541,7 +532,7 @@ class RuntimeHost:
                 runtime_backend=request.runtime_backend,
                 seed=invocation.seed,
                 mode="benchmark",
-                task=model_validate(BenchmarkTask, model_dump(invocation.task)),
+                task=(BenchmarkTask).model_validate((invocation.task).model_dump()),
                 budget_overrides=dict(request.budget_overrides),
                 trace_context=invocation.trace_context,
             )
@@ -583,6 +574,9 @@ class RuntimeHost:
             runtime_dir=getattr(plan.trace_context, "runtime_dir", None),
             task_id=task.task_id,
             seed=int(rebound_envelope.seed),
+            evaluation_unit_id=evaluation_unit_id,
+            episode_kind=getattr(plan.trace_context, "episode_kind", None),
+            episode_step_index=getattr(plan.trace_context, "episode_step_index", None),
             objective=solve_request.prompt,
         )
         preflight_request = RuntimeSolveRequest(
@@ -724,10 +718,10 @@ class RuntimeHost:
         return [runs_by_request_id[request_id] for request_id in expected_request_ids]
 
     def _run_local_inspect(self, runtime_dir: Path, request, *, runtime_backend: str) -> CapabilityExchange:
-        run_dir = ensure_directory(self.workspace / f"inspect_{stable_hash(runtime_dir, model_dump(request))[:12]}")
+        run_dir = ensure_directory(self.workspace / f"inspect_{stable_hash(runtime_dir, (request).model_dump())[:12]}")
         input_json = run_dir / "inspect_request.json"
         output_json = run_dir / "inspect_response.json"
-        input_json.write_text(json.dumps(model_dump(request), indent=2, sort_keys=True), encoding="utf-8")
+        input_json.write_text(json.dumps((request).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         command = self._runtime_command(runtime_dir, "inspect", input_json=input_json, output_json=output_json)
         completed = subprocess.run(
             command,
@@ -741,7 +735,7 @@ class RuntimeHost:
         )
         if completed.returncode != 0:
             raise RuntimeLoadError(completed.stderr.strip() or completed.stdout.strip() or "runtime inspect failed")
-        capability = model_validate(CapabilityExchange, json.loads(output_json.read_text(encoding="utf-8")))
+        capability = (CapabilityExchange).model_validate(json.loads(output_json.read_text(encoding="utf-8")))
         self._cleanup_run_dir(run_dir, failed=False)
         return capability
 
@@ -754,13 +748,13 @@ class RuntimeHost:
         runtime_profile: object | None,
         runtime_backend: str,
     ) -> RuntimeBatchResponse:
-        run_dir = ensure_directory(self.workspace / f"batch_{stable_hash(runtime_dir, model_dump(request))[:12]}")
+        run_dir = ensure_directory(self.workspace / f"batch_{stable_hash(runtime_dir, (request).model_dump())[:12]}")
         input_json = run_dir / "batch_request.json"
         output_json = run_dir / "batch_response.json"
         provider_json = run_dir / "provider.json"
         profile_json = run_dir / "runtime_profile.json"
         workspace_dir = ensure_directory(run_dir / "workspace")
-        input_json.write_text(json.dumps(model_dump(request), indent=2, sort_keys=True), encoding="utf-8")
+        input_json.write_text(json.dumps((request).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         provider_json.write_text(json.dumps(self._local_provider_payload(provider), indent=2, sort_keys=True), encoding="utf-8")
         command = self._runtime_command(
             runtime_dir,
@@ -772,7 +766,7 @@ class RuntimeHost:
             profile_json=profile_json if runtime_profile is not None else None,
         )
         if runtime_profile is not None:
-            profile_json.write_text(json.dumps(model_dump(runtime_profile), indent=2, sort_keys=True), encoding="utf-8")
+            profile_json.write_text(json.dumps((runtime_profile).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         completed = subprocess.run(
             command,
             env=self._runtime_env(runtime_dir, runtime_backend),
@@ -785,7 +779,7 @@ class RuntimeHost:
         )
         if completed.returncode != 0:
             raise RuntimeLoadError(completed.stderr.strip() or completed.stdout.strip() or "runtime batch failed")
-        response = model_validate(RuntimeBatchResponse, json.loads(output_json.read_text(encoding="utf-8")))
+        response = (RuntimeBatchResponse).model_validate(json.loads(output_json.read_text(encoding="utf-8")))
         failed = any(run.hard_invalid for run in response.run_results)
         self._cleanup_run_dir(run_dir, failed=failed)
         return response
@@ -799,13 +793,13 @@ class RuntimeHost:
         runtime_profile: object | None,
         runtime_backend: str,
     ) -> RuntimeSolveResponse:
-        run_dir = ensure_directory(self.workspace / f"solve_{stable_hash(runtime_dir, model_dump(request))[:12]}")
+        run_dir = ensure_directory(self.workspace / f"solve_{stable_hash(runtime_dir, (request).model_dump())[:12]}")
         input_json = run_dir / "solve_request.json"
         output_json = run_dir / "solve_response.json"
         provider_json = run_dir / "provider.json"
         profile_json = run_dir / "runtime_profile.json"
         workspace_dir = ensure_directory(run_dir / "workspace")
-        input_json.write_text(json.dumps(model_dump(request), indent=2, sort_keys=True), encoding="utf-8")
+        input_json.write_text(json.dumps((request).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         provider_json.write_text(json.dumps(self._local_provider_payload(provider), indent=2, sort_keys=True), encoding="utf-8")
         command = self._runtime_command(
             runtime_dir,
@@ -817,7 +811,7 @@ class RuntimeHost:
             profile_json=profile_json if runtime_profile is not None else None,
         )
         if runtime_profile is not None:
-            profile_json.write_text(json.dumps(model_dump(runtime_profile), indent=2, sort_keys=True), encoding="utf-8")
+            profile_json.write_text(json.dumps((runtime_profile).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         completed = subprocess.run(
             command,
             env=self._runtime_env(runtime_dir, runtime_backend),
@@ -830,7 +824,7 @@ class RuntimeHost:
         )
         if completed.returncode != 0:
             raise RuntimeLoadError(completed.stderr.strip() or completed.stdout.strip() or "runtime solve failed")
-        response = model_validate(RuntimeSolveResponse, json.loads(output_json.read_text(encoding="utf-8")))
+        response = (RuntimeSolveResponse).model_validate(json.loads(output_json.read_text(encoding="utf-8")))
         failed = response.solve_result.status in {"failed", "controlled_failure"} or bool(response.solve_result.faults.get("hard_invalid"))
         self._cleanup_run_dir(run_dir, failed=failed)
         return response
@@ -844,13 +838,13 @@ class RuntimeHost:
         runtime_profile: object | None,
         runtime_backend: str,
     ) -> RuntimeSolveResponse:
-        run_dir = ensure_directory(self.workspace / f"resume_{stable_hash(runtime_dir, model_dump(request))[:12]}")
+        run_dir = ensure_directory(self.workspace / f"resume_{stable_hash(runtime_dir, (request).model_dump())[:12]}")
         input_json = run_dir / "resume_request.json"
         output_json = run_dir / "resume_response.json"
         provider_json = run_dir / "provider.json"
         profile_json = run_dir / "runtime_profile.json"
         workspace_dir = ensure_directory(run_dir / "workspace")
-        input_json.write_text(json.dumps(model_dump(request), indent=2, sort_keys=True), encoding="utf-8")
+        input_json.write_text(json.dumps((request).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         provider_json.write_text(json.dumps(self._local_provider_payload(provider), indent=2, sort_keys=True), encoding="utf-8")
         command = self._runtime_command(
             runtime_dir,
@@ -862,7 +856,7 @@ class RuntimeHost:
             profile_json=profile_json if runtime_profile is not None else None,
         )
         if runtime_profile is not None:
-            profile_json.write_text(json.dumps(model_dump(runtime_profile), indent=2, sort_keys=True), encoding="utf-8")
+            profile_json.write_text(json.dumps((runtime_profile).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
         completed = subprocess.run(
             command,
             env=self._runtime_env(runtime_dir, runtime_backend),
@@ -875,7 +869,7 @@ class RuntimeHost:
         )
         if completed.returncode != 0:
             raise RuntimeLoadError(completed.stderr.strip() or completed.stdout.strip() or "runtime resume failed")
-        response = model_validate(RuntimeSolveResponse, json.loads(output_json.read_text(encoding="utf-8")))
+        response = (RuntimeSolveResponse).model_validate(json.loads(output_json.read_text(encoding="utf-8")))
         failed = response.solve_result.status in {"failed", "controlled_failure"} or bool(response.solve_result.faults.get("hard_invalid"))
         self._cleanup_run_dir(run_dir, failed=failed)
         return response
@@ -1010,12 +1004,6 @@ class RuntimeHost:
     def _is_inline_trace_ref(trace_ref: str | None) -> bool:
         return bool(trace_ref) and str(trace_ref).startswith("inline-json:")
 
-    @staticmethod
-    def _recoverability_without_checkpoint(status: str) -> str:
-        if status in {"verified", "unverified", "partially_checked", "best_effort"}:
-            return "terminal"
-        return "none"
-
     def _run_result_from_solve_result(self, manifest: RunManifest, solve_result) -> RunResult:
         return RunResult(
             request_id=str(solve_result.request_id or manifest.request_id),
@@ -1097,7 +1085,7 @@ class RuntimeHost:
                 str(manifest.runtime_hash or ""),
             )
         )
-        manifest = manifest.copy(update={"runtime_hash": resolved_runtime_hash})
+        manifest = manifest.model_copy(update={"runtime_hash": resolved_runtime_hash})
         self.run_store.finish_attempt(
             attempt,
             lifecycle_state=attempt_state,
@@ -1125,11 +1113,6 @@ class RuntimeHost:
             response.solve_result.run_prune_eligible = updated.prune_eligible
             if updated.lifecycle_state == "pruned":
                 response.solve_result.trace_ref = None
-            response.solve_result.recoverability = (
-                "checkpoint_available"
-                if response.solve_result.latest_checkpoint_ref
-                else self._recoverability_without_checkpoint(response.solve_result.status)
-            )
         for run in effective_runs:
             run.run_id = updated.run_id
             run.run_root = updated.run_root

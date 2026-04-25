@@ -11,7 +11,6 @@ from types import ModuleType
 from typing import Any, Dict
 
 from .exceptions import RuntimeLoadError
-from .pydantic_compat import model_dump, model_validate
 from .schemas import CapabilityExchange, DeploymentContract, KernelManifest, RuntimeIsolationPolicy, RuntimeManifest
 from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, profile_to_json
 try:
@@ -19,28 +18,27 @@ try:
         KERNEL_BUNDLE_DIR,
         KERNEL_MANIFEST_FILE,
         KERNEL_PACKAGE_NAME,
-        KERNEL_VERSION,
-        STORAGE_SCHEMA_VERSION,
     )
 except ImportError:
     KERNEL_BUNDLE_DIR = "runtime_sdk"
     KERNEL_MANIFEST_FILE = "kernel_manifest.json"
     KERNEL_PACKAGE_NAME = "agintor_runtime"
-    KERNEL_VERSION = "agintor-kernel-v1"
-    STORAGE_SCHEMA_VERSION = "agintor-storage-v3"
 from .utils import ast_node_count, file_digest, stable_hash
+from .versioning import RUNTIME_CONTRACT_VERSION
 
-RUNTIME_ABI_VERSION = "agintor-runtime-abi-v5"
 DEPLOYMENT_CONTRACT_FILE = "deployment_contract.json"
 RUNTIME_EXPORT_BUNDLE_FILE = "runtime_export_bundle.json"
-RUNTIME_PROVENANCE_BUNDLE_FILE = "runtime_provenance_bundle.json"
 
 
-def _validate_runtime_abi(runtime_path: Path, manifest: RuntimeManifest) -> None:
-    runtime_abi = str(manifest.metadata.get("runtime_abi", "")).strip() if isinstance(manifest.metadata, dict) else ""
-    if runtime_abi and runtime_abi != RUNTIME_ABI_VERSION:
+def _validate_runtime_contract(runtime_path: Path, manifest: RuntimeManifest) -> None:
+    contract_version = (
+        str(manifest.metadata.get("runtime_contract_version", "")).strip()
+        if isinstance(manifest.metadata, dict)
+        else ""
+    )
+    if contract_version and contract_version != RUNTIME_CONTRACT_VERSION:
         raise RuntimeLoadError(
-            f"runtime ABI mismatch for {runtime_path}: runtime={runtime_abi} loader={RUNTIME_ABI_VERSION}"
+            f"runtime contract mismatch for {runtime_path}: runtime={contract_version} loader={RUNTIME_CONTRACT_VERSION}"
         )
 
 
@@ -72,8 +70,8 @@ def _load_manifest(runtime_path: Path) -> RuntimeManifest:
     manifest_path = runtime_path / "runtime_manifest.json"
     if not manifest_path.exists():
         raise RuntimeLoadError(f"missing runtime_manifest.json in {runtime_path}")
-    manifest = model_validate(RuntimeManifest, json.loads(manifest_path.read_text(encoding="utf-8")))
-    _validate_runtime_abi(runtime_path, manifest)
+    manifest = (RuntimeManifest).model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
+    _validate_runtime_contract(runtime_path, manifest)
     return manifest
 
 
@@ -88,20 +86,12 @@ def _load_deployment_contract(runtime_path: Path) -> DeploymentContract:
     except json.JSONDecodeError as exc:
         raise RuntimeLoadError(f"invalid JSON in deployment contract {contract_path}: {exc.msg}") from exc
     try:
-        contract = model_validate(DeploymentContract, payload)
+        contract = (DeploymentContract).model_validate(payload)
     except Exception as exc:
         raise RuntimeLoadError(f"invalid deployment contract schema in {contract_path}: {exc}") from exc
-    if contract.runtime_abi != RUNTIME_ABI_VERSION:
+    if contract.runtime_contract_version != RUNTIME_CONTRACT_VERSION:
         raise RuntimeLoadError(
-            f"deployment contract ABI mismatch for {runtime_path}: contract={contract.runtime_abi} loader={RUNTIME_ABI_VERSION}"
-        )
-    if contract.kernel_version != KERNEL_VERSION:
-        raise RuntimeLoadError(
-            f"deployment contract kernel mismatch for {runtime_path}: contract={contract.kernel_version} loader={KERNEL_VERSION}"
-        )
-    if contract.storage_schema_version != STORAGE_SCHEMA_VERSION:
-        raise RuntimeLoadError(
-            f"deployment contract storage schema mismatch for {runtime_path}: contract={contract.storage_schema_version} loader={STORAGE_SCHEMA_VERSION}"
+            f"deployment contract mismatch for {runtime_path}: contract={contract.runtime_contract_version} loader={RUNTIME_CONTRACT_VERSION}"
         )
     return contract
 
@@ -322,18 +312,10 @@ def _load_kernel_manifest(runtime_path: Path) -> KernelManifest:
     manifest_path = runtime_path / KERNEL_BUNDLE_DIR / KERNEL_MANIFEST_FILE
     if not manifest_path.exists():
         raise RuntimeLoadError(f"missing {KERNEL_BUNDLE_DIR}/{KERNEL_MANIFEST_FILE} in {runtime_path}")
-    manifest = model_validate(KernelManifest, json.loads(manifest_path.read_text(encoding="utf-8")))
-    if manifest.runtime_abi != RUNTIME_ABI_VERSION:
+    manifest = (KernelManifest).model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
+    if manifest.runtime_contract_version != RUNTIME_CONTRACT_VERSION:
         raise RuntimeLoadError(
-            f"kernel ABI mismatch for {runtime_path}: kernel={manifest.runtime_abi} loader={RUNTIME_ABI_VERSION}"
-        )
-    if manifest.kernel_version != KERNEL_VERSION:
-        raise RuntimeLoadError(
-            f"kernel version mismatch for {runtime_path}: kernel={manifest.kernel_version} loader={KERNEL_VERSION}"
-        )
-    if manifest.storage_schema_version != STORAGE_SCHEMA_VERSION:
-        raise RuntimeLoadError(
-            f"storage schema mismatch for {runtime_path}: kernel={manifest.storage_schema_version} loader={STORAGE_SCHEMA_VERSION}"
+            f"kernel contract mismatch for {runtime_path}: kernel={manifest.runtime_contract_version} loader={RUNTIME_CONTRACT_VERSION}"
         )
     return manifest
 
@@ -428,16 +410,10 @@ def load_runtime(
         runtime_profile=runtime_profile,
         profile_path=profile_path,
     )
-    code_hash = stable_hash(
-        identity_inputs,
-        kernel_manifest.kernel_version,
-        kernel_manifest.storage_schema_version,
-    )
-    runtime_hash = stable_hash(model_dump(manifest), model_dump(kernel_manifest), code_hash)
+    code_hash = stable_hash(identity_inputs, kernel_manifest.runtime_contract_version)
+    runtime_hash = stable_hash((manifest).model_dump(), (kernel_manifest).model_dump(), code_hash)
     capability_exchange = CapabilityExchange(
-        runtime_abi=RUNTIME_ABI_VERSION,
-        kernel_version=kernel_manifest.kernel_version,
-        storage_schema_version=kernel_manifest.storage_schema_version,
+        runtime_contract_version=kernel_manifest.runtime_contract_version,
         supported_backends=list(deployment_contract.supported_backends),
         tool_runtimes=["python"],
         checkpoint_support=True,
@@ -477,12 +453,9 @@ def load_runtime(
 __all__ = [
     "DEPLOYMENT_CONTRACT_FILE",
     "DockerLaunchPolicy",
-    "KERNEL_VERSION",
     "LoadedRuntime",
-    "RUNTIME_ABI_VERSION",
+    "RUNTIME_CONTRACT_VERSION",
     "RUNTIME_EXPORT_BUNDLE_FILE",
-    "RUNTIME_PROVENANCE_BUNDLE_FILE",
-    "STORAGE_SCHEMA_VERSION",
     "load_runtime",
     "resolve_docker_launch_policy",
     "runtime_identity_inputs",

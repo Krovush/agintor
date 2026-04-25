@@ -3,21 +3,17 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-
-from ..pydantic_compat import model_dump
 from ..schemas import KernelManifest
 from ..utils import ensure_directory, file_digest
+from ..versioning import RUNTIME_CONTRACT_VERSION
 
 KERNEL_BUNDLE_DIR = "runtime_sdk"
 KERNEL_MANIFEST_FILE = "kernel_manifest.json"
 KERNEL_PACKAGE_NAME = "agintor_runtime"
-KERNEL_VERSION = "agintor-kernel-v1"
-STORAGE_SCHEMA_VERSION = "agintor-storage-v3"
 KERNEL_CAPABILITY_FLAGS = [
     "inspect",
     "run_batch",
     "resume",
-    "execution_plan_v1",
     "checkpoint_refs",
     "checkpoint_envelopes",
     "provider_usage",
@@ -38,7 +34,6 @@ _KERNEL_SOURCE_FILES = [
     "providers.py",
     "predictors.py",
     "prompts.py",
-    "pydantic_compat.py",
     "run_store.py",
     "runner.py",
     "task_runtime/__init__.py",
@@ -60,8 +55,10 @@ _KERNEL_SOURCE_FILES = [
     "runtime_profile.py",
     "schemas.py",
     "shell.py",
+    "state_store.py",
     "tool_runtime.py",
     "utils.py",
+    "versioning.py",
     "verifiers.py",
 ]
 _KERNEL_TEMPLATE_FILES = [
@@ -87,7 +84,7 @@ def _kernel_files_payload(package_root: Path) -> dict[str, str]:
     return files
 
 
-def preview_kernel_manifest(*, runtime_abi: str) -> KernelManifest:
+def preview_kernel_manifest() -> KernelManifest:
     source_root = _package_root()
     bundle_root = source_root / "runtime_sdk"
     files: dict[str, str] = {}
@@ -106,10 +103,7 @@ def preview_kernel_manifest(*, runtime_abi: str) -> KernelManifest:
         else:
             files[f"{KERNEL_PACKAGE_NAME}/{bundle_rel}"] = file_digest(source_path)
     return KernelManifest(
-        schema_version="agintor.kernel.manifest.v1",
-        runtime_abi=runtime_abi,
-        kernel_version=KERNEL_VERSION,
-        storage_schema_version=STORAGE_SCHEMA_VERSION,
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         package_name=KERNEL_PACKAGE_NAME,
         entry_module=f"{KERNEL_PACKAGE_NAME}.runtime_entry",
         files=files,
@@ -117,7 +111,7 @@ def preview_kernel_manifest(*, runtime_abi: str) -> KernelManifest:
     )
 
 
-def bundle_runtime_kernel(runtime_dir: str | Path, *, runtime_abi: str, force: bool = False) -> KernelManifest:
+def bundle_runtime_kernel(runtime_dir: str | Path, *, force: bool = False) -> KernelManifest:
     runtime_path = Path(runtime_dir)
     bundle_root = runtime_path / KERNEL_BUNDLE_DIR
     package_root = bundle_root / KERNEL_PACKAGE_NAME
@@ -145,10 +139,7 @@ def bundle_runtime_kernel(runtime_dir: str | Path, *, runtime_abi: str, force: b
             ensure_directory(dest_path.parent)
             shutil.copy2(source_path, dest_path)
     manifest = KernelManifest(
-        schema_version="agintor.kernel.manifest.v1",
-        runtime_abi=runtime_abi,
-        kernel_version=KERNEL_VERSION,
-        storage_schema_version=STORAGE_SCHEMA_VERSION,
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         package_name=KERNEL_PACKAGE_NAME,
         entry_module=f"{KERNEL_PACKAGE_NAME}.runtime_entry",
         files=_kernel_files_payload(package_root),
@@ -156,5 +147,5 @@ def bundle_runtime_kernel(runtime_dir: str | Path, *, runtime_abi: str, force: b
     )
     manifest_path = bundle_root / KERNEL_MANIFEST_FILE
     ensure_directory(manifest_path.parent)
-    manifest_path.write_text(json.dumps(model_dump(manifest), indent=2, sort_keys=True), encoding="utf-8")
+    manifest_path.write_text(json.dumps((manifest).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
     return manifest

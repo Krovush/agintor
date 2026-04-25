@@ -1,26 +1,25 @@
 from __future__ import annotations
 
-import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .artifacts import ArtifactMode, ArtifactPolicy
 from .exceptions import HardInvalidation
 from .memory_graph import GraphEdge, LongTermGraph, ShortTermGraph
 from .predictors import DecisionFamilyModelBank
-from .pydantic_compat import model_copy
-from .pydantic_compat import model_dump, model_validate
 from .run_store import RunStore, _write_json_atomic
 from .schemas import (
     AgentTemplate,
     AsyncHandle,
     AttemptSnapshot,
+    BranchPublication,
     CheckpointEnvelope,
     CheckpointReference,
     MessageBoardSnapshot,
+    OpenHandleTableSnapshot,
     RuntimeEvent,
     ShellStateSnapshot,
     SideEffectReceipt,
@@ -42,6 +41,30 @@ class MessageBoard:
         result = self.entries[cursor:]
         self.cursors[worker_id] = len(self.entries)
         return result
+
+    def snapshot(self) -> MessageBoardSnapshot:
+        return MessageBoardSnapshot(
+            entries=[dict(entry) for entry in self.entries],
+            cursors={str(worker_id): int(cursor) for worker_id, cursor in self.cursors.items()},
+        )
+
+    def restore(self, snapshot: Mapping[str, Any] | MessageBoardSnapshot) -> None:
+        board_snapshot = (
+            snapshot
+            if isinstance(snapshot, MessageBoardSnapshot)
+            else (MessageBoardSnapshot).model_validate(snapshot)
+        )
+        self.entries = [dict(entry) for entry in board_snapshot.entries]
+        self.cursors = {
+            str(worker_id): int(cursor)
+            for worker_id, cursor in board_snapshot.cursors.items()
+        }
+
+    @classmethod
+    def fork_from_snapshot(cls, snapshot: Mapping[str, Any] | MessageBoardSnapshot) -> "MessageBoard":
+        board = cls()
+        board.restore(snapshot)
+        return board
 
 
 class OpenHandleTable:
@@ -65,8 +88,33 @@ class OpenHandleTable:
             if any(value in (None, "") for value in required):
                 raise HardInvalidation("open-handle table becomes inconsistent")
 
+    def snapshot(self) -> OpenHandleTableSnapshot:
+        return OpenHandleTableSnapshot(
+            handles=[
+                (handle).model_copy(deep=True)
+                for handle in sorted(self.handles.values(), key=lambda item: item.handle_id)
+            ]
+        )
+
+    def restore(self, snapshot: Mapping[str, Any] | OpenHandleTableSnapshot) -> None:
+        table_snapshot = (
+            snapshot
+            if isinstance(snapshot, OpenHandleTableSnapshot)
+            else (OpenHandleTableSnapshot).model_validate(snapshot)
+        )
+        restored: dict[str, AsyncHandle] = {}
+        for handle in table_snapshot.handles:
+            restored[handle.handle_id] = (handle).model_copy(deep=True)
+        self.handles = restored
+
+    @classmethod
+    def fork_from_snapshot(cls, snapshot: Mapping[str, Any] | OpenHandleTableSnapshot) -> "OpenHandleTable":
+        table = cls()
+        table.restore(snapshot)
+        return table
+
     def to_jsonable(self) -> list[dict[str, Any]]:
-        return [handle.dict() for handle in self.handles.values()]
+        return [(handle).model_dump() for handle in self.snapshot().handles]
 
 
 class AgentPool:
@@ -83,19 +131,19 @@ class AgentPool:
             AgentTemplate(agent_id="verifier", description="Verification specialist", capability_set=["verify", "check"], symbol_set=["verifier"], default_tool_scope=[], success_stats={"global": 0.75}, staleness_clock=0, model_policy_tag="small"),
         ]
         for agent in defaults:
-            self._agents[agent.agent_id] = model_copy(agent, deep=True)
+            self._agents[agent.agent_id] = (agent).model_copy(deep=True)
 
     def list(self) -> list[AgentTemplate]:
-        return [model_copy(agent, deep=True) for agent in self._agents.values()]
+        return [(agent).model_copy(deep=True) for agent in self._agents.values()]
 
     def get_canonical(self, agent_id: str) -> AgentTemplate:
-        agent = model_copy(self._agents[agent_id], deep=True)
+        agent = (self._agents[agent_id]).model_copy(deep=True)
         setattr(agent, "_canonical", True)
         setattr(agent, "_clone", False)
         return agent
 
     def clone(self, agent_id: str) -> AgentTemplate:
-        agent = model_copy(self._agents[agent_id], deep=True)
+        agent = (self._agents[agent_id]).model_copy(deep=True)
         setattr(agent, "_canonical", False)
         setattr(agent, "_clone", True)
         return agent
@@ -157,6 +205,7 @@ class FixedShell:
         self._current_episode_id: str | None = None
         self._memory_scope_kind: str | None = None
         self._memory_scope_id: str | None = None
+        self._trace_save_counter = 0
 
     def reset_for_task(self, task_id: str = "", transfer_scored: bool = False, episode_id: str | None = None) -> None:
         self.short_term = ShortTermGraph()
@@ -178,8 +227,21 @@ class FixedShell:
         if not self.retain_artifacts:
             return None
         ensure_directory(self.trace_dir)
+        self._trace_save_counter += 1
+        episode_step_index = 0
+        for row in reversed(trace):
+            if not isinstance(row, Mapping):
+                continue
+            trace_context = row.get("trace_context")
+            if isinstance(trace_context, Mapping) and trace_context.get("episode_step_index") is not None:
+                try:
+                    episode_step_index = int(trace_context.get("episode_step_index") or 0)
+                except Exception:
+                    episode_step_index = 0
+                break
         prefix = f"{self.attempt_id}." if self.attempt_id else ""
-        path = self.trace_dir / f"{prefix}{task_id.replace('/', '_')}_{seed}.json"
+        safe_task_id = task_id.replace("/", "_")
+        path = self.trace_dir / f"{prefix}{safe_task_id}_{seed}_step{episode_step_index}_{self._trace_save_counter:04d}.json"
         _write_json_atomic(path, trace)
         return path
 
@@ -214,13 +276,12 @@ class FixedShell:
             next_sequence_no = int(self._runtime_event_state.get("next_sequence_no", 0) or 0) + 1
             self._runtime_event_state["next_sequence_no"] = next_sequence_no
             event_id = event.event_id or f"runtime-event.{next_sequence_no:06d}.{stable_hash(event.request_id, event.plan_id, event.event, next_sequence_no)[:12]}"
-            persisted = model_copy(
-                event,
-                update={"event_id": event_id, "sequence_no": next_sequence_no},
-                deep=True,
-            )
-            path = self.event_dir / f"{next_sequence_no:06d}.{persisted.event}.json"
-            _write_json_atomic(path, model_dump(persisted))
+            persisted = (event).model_copy(update={"event_id": event_id, "sequence_no": next_sequence_no}, deep=True)
+            if self.run_store is not None:
+                self.run_store.write_runtime_event(self.run_root, persisted)
+            else:
+                path = self.event_dir / f"{next_sequence_no:06d}.{persisted.event}.json"
+                _write_json_atomic(path, (persisted).model_dump())
             return persisted
 
     def load_runtime_events(
@@ -234,7 +295,7 @@ class FixedShell:
         events: list[RuntimeEvent] = []
         for path in sorted(self.event_dir.glob("*.json")):
             payload = json.loads(path.read_text(encoding="utf-8"))
-            event = model_validate(RuntimeEvent, payload)
+            event = (RuntimeEvent).model_validate(payload)
             if request_id and str(event.request_id or "") != str(request_id):
                 continue
             if after_sequence_no is not None and int(event.sequence_no or 0) <= int(after_sequence_no or 0):
@@ -248,7 +309,7 @@ class FixedShell:
             return self.run_store.write_checkpoint(envelope)
         request_dir = ensure_directory(self.checkpoint_dir / envelope.request_id)
         path = request_dir / f"{envelope.checkpoint_id}.json"
-        _write_json_atomic(path, model_dump(envelope))
+        _write_json_atomic(path, (envelope).model_dump())
         index_path = request_dir / "index.json"
         index_rows: list[dict[str, Any]] = []
         if index_path.exists():
@@ -384,12 +445,14 @@ class FixedShell:
             target_ref = latest
         path = Path(target_ref)
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return model_validate(CheckpointEnvelope, payload)
+        return (CheckpointEnvelope).model_validate(payload)
 
     def save_side_effect_receipt(self, receipt: SideEffectReceipt) -> Path:
+        if self.run_store is not None:
+            return self.run_store.write_side_effect_receipt(self.run_root, receipt)
         ensure_directory(self.side_effect_dir)
         path = self.side_effect_dir / f"{receipt.side_effect_id}.json"
-        _write_json_atomic(path, model_dump(receipt))
+        _write_json_atomic(path, (receipt).model_dump())
         return path
 
     def snapshot_attempt_state(self, *, boundary: str, published_at: float) -> AttemptSnapshot:
@@ -401,16 +464,40 @@ class FixedShell:
             published_at=published_at,
         )
 
-    def snapshot_checkpoint_shell_state(self) -> ShellStateSnapshot:
+    def snapshot_checkpoint_shell_state(
+        self,
+        *,
+        checkpoint_id: str = "",
+        boundary: str = "",
+        branch_publications: Iterable[Mapping[str, Any] | BranchPublication] = (),
+        side_effect_receipts: Iterable[Mapping[str, Any] | SideEffectReceipt] = (),
+        runtime_event_refs: Iterable[str] = (),
+    ) -> ShellStateSnapshot:
+        safe_checkpoint_id = str(checkpoint_id or "checkpoint").replace("/", "_")
+        write_log_ref = f"state/long_term/writes/{safe_checkpoint_id}.jsonl" if checkpoint_id else ""
+        diagnostic_ref = f"state/long_term/retrieval/{safe_checkpoint_id}.jsonl" if checkpoint_id else ""
+        publication_rows = [
+            (item).model_dump() if isinstance(item, BranchPublication) else dict(item)
+            for item in branch_publications
+        ]
+        receipt_rows = [
+            (item).model_dump() if isinstance(item, SideEffectReceipt) else dict(item)
+            for item in side_effect_receipts
+        ]
         return ShellStateSnapshot(
-            short_term_graph=self.short_term.to_jsonable(),
-            long_term_graph={"nodes": [model_copy(node, deep=True) for node in self.long_term.all_nodes()]},
-            message_board=MessageBoardSnapshot(
-                entries=[dict(item) for item in self.message_board.entries],
-                cursors={str(key): int(value) for key, value in self.message_board.cursors.items()},
+            short_term_graph=self.short_term.snapshot(
+                branch_publications=publication_rows,
+                side_effect_receipts=receipt_rows,
+                runtime_event_refs=list(runtime_event_refs),
             ),
-            open_handles=[model_copy(handle, deep=True) for handle in self.open_handles.handles.values()],
-            task_local_tool_registry=self.tool_registry.snapshot_task_local(),
+            long_term_graph=self.long_term.snapshot(
+                write_log_refs=[write_log_ref] if write_log_ref else [],
+                diagnostic_refs=[diagnostic_ref] if diagnostic_ref else [],
+            ),
+            message_board=self.message_board.snapshot(),
+            open_handles=self.open_handles.snapshot(),
+            task_local_tool_registry=self.tool_registry.snapshot(),
+            predictor_snapshot=self.predictors.snapshot(),
             current_task_id=self._current_task_id or "",
             current_episode_id=self._current_episode_id,
             memory_scope_kind=self._memory_scope_kind or "",
@@ -421,39 +508,24 @@ class FixedShell:
         shell_snapshot = (
             snapshot
             if isinstance(snapshot, ShellStateSnapshot)
-            else model_validate(ShellStateSnapshot, snapshot)
+            else (ShellStateSnapshot).model_validate(snapshot)
         )
-        self.short_term = ShortTermGraph()
-        self.short_term.nodes = copy.deepcopy(shell_snapshot.short_term_graph.nodes)
-        self.short_term.edges = [
-            GraphEdge(
-                src=str(edge.get("src", "")),
-                dst=str(edge.get("dst", "")),
-                type=str(edge.get("type", "")),
-                metadata=dict(edge.get("metadata", {})),
-            )
-            for edge in shell_snapshot.short_term_graph.edges
-        ]
-        self.short_term.hidden_nodes = set(shell_snapshot.short_term_graph.hidden_nodes)
-        self.long_term = LongTermGraph()
-        for node in shell_snapshot.long_term_graph.nodes:
-            self.long_term.upsert(model_copy(node, deep=True))
-        self.message_board = MessageBoard(
-            entries=[dict(item) for item in shell_snapshot.message_board.entries],
-            cursors={str(key): int(value) for key, value in shell_snapshot.message_board.cursors.items()},
-        )
-        self.restore_open_handles(shell_snapshot.open_handles)
-        self.tool_registry.restore_task_local(shell_snapshot.task_local_tool_registry)
+        self.short_term = ShortTermGraph.fork_from_snapshot(shell_snapshot.short_term_graph)
+        self.long_term = LongTermGraph.fork_from_snapshot(shell_snapshot.long_term_graph)
+        self.message_board = MessageBoard.fork_from_snapshot(shell_snapshot.message_board)
+        self.open_handles = OpenHandleTable.fork_from_snapshot(shell_snapshot.open_handles)
+        self.tool_registry.restore(shell_snapshot.task_local_tool_registry)
+        self.predictors.restore(shell_snapshot.predictor_snapshot)
         self._current_task_id = shell_snapshot.current_task_id or None
         self._current_episode_id = shell_snapshot.current_episode_id
         self._memory_scope_kind = shell_snapshot.memory_scope_kind or None
         self._memory_scope_id = shell_snapshot.memory_scope_id or None
 
-    def restore_open_handles(self, handles: Iterable[AsyncHandle]) -> None:
-        restored: dict[str, AsyncHandle] = {}
-        for handle in handles:
-            restored[handle.handle_id] = model_copy(handle, deep=True)
-        self.open_handles.handles = restored
+    def restore_open_handles(self, handles: Iterable[AsyncHandle] | OpenHandleTableSnapshot) -> None:
+        if isinstance(handles, OpenHandleTableSnapshot):
+            self.open_handles.restore(handles)
+            return
+        self.open_handles.restore(OpenHandleTableSnapshot(handles=list(handles)))
 
     def load_open_handle_output(self, handle: AsyncHandle) -> Any:
         if not handle.artifact_refs:
@@ -467,6 +539,13 @@ class FixedShell:
             return None
 
     def fork_branch(self, branch_id: str) -> "FixedShell":
+        short_term_snapshot = self.short_term.snapshot()
+        long_term_snapshot = self.long_term.snapshot()
+        message_board_snapshot = self.message_board.snapshot()
+        open_handle_snapshot = self.open_handles.snapshot()
+        task_local_snapshot = self.tool_registry.snapshot()
+        predictor_snapshot = self.predictors.snapshot()
+
         branch_workspace = ensure_directory(self.workspace / "branches" / branch_id)
         branch_shell = FixedShell(
             branch_workspace,
@@ -476,15 +555,28 @@ class FixedShell:
             run_id=self.run_id,
             attempt_id=self.attempt_id,
         )
-        branch_shell.short_term = copy.deepcopy(self.short_term)
-        branch_shell.long_term = copy.deepcopy(self.long_term)
-        branch_shell.message_board = copy.deepcopy(self.message_board)
-        branch_shell.open_handles = copy.deepcopy(self.open_handles)
-        branch_shell.tool_registry._tools = copy.deepcopy(self.tool_registry._tools)
-        branch_shell.tool_registry._category_summaries = dict(self.tool_registry._category_summaries)
-        branch_shell.predictors._observations = copy.deepcopy(self.predictors._observations)
-        branch_shell.predictors._models = copy.deepcopy(self.predictors._models)
-        branch_shell.predictors._ranking_weights = copy.deepcopy(self.predictors._ranking_weights)
+        branch_shell.short_term = ShortTermGraph.fork_from_snapshot(short_term_snapshot)
+        branch_shell.long_term = LongTermGraph.fork_from_snapshot(long_term_snapshot)
+        branch_shell.message_board = MessageBoard.fork_from_snapshot(message_board_snapshot)
+        branch_shell.open_handles = OpenHandleTable.fork_from_snapshot(open_handle_snapshot)
+        branch_shell.tool_registry = ToolRegistry.fork_from_snapshot(
+            task_local_snapshot,
+            sandbox_manager=branch_shell.sandbox_manager,
+            safety_guard=branch_shell.safety_guard,
+            workspace_root=branch_shell.workspace,
+        )
+        branch_shell.tool_executor = ToolExecutor(
+            branch_shell.tool_registry,
+            branch_shell.sandbox_manager,
+            persist_artifacts=branch_shell.artifact_policy.persist_tool_artifacts,
+        )
+        branch_shell.predictors = DecisionFamilyModelBank.fork_from_snapshot(predictor_snapshot)
+        branch_shell._shared_predictors = False
+        if self.run_store is not None:
+            branch_shell.run_root = self.run_root
+            branch_shell.trace_dir = self.trace_dir
+            branch_shell.checkpoint_dir = self.checkpoint_dir
+            branch_shell.side_effect_dir = self.side_effect_dir
         branch_shell.event_dir = self.event_dir
         branch_shell._runtime_event_lock = self._runtime_event_lock
         branch_shell._runtime_event_state = self._runtime_event_state

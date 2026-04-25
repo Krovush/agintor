@@ -292,7 +292,7 @@ class ReplayProvider(ModelProvider):
         if current is None:
             return None
         allocation_key = current.allocation_key or ""
-        return current.copy(update={"allocation_key": allocation_key}, deep=True)
+        return current.model_copy(update={"allocation_key": allocation_key}, deep=True)
 
     def can_apply_allocation(self, allocation: ReplayAllocation | None) -> bool:
         return self._coordinator.can_apply_allocation(allocation)
@@ -314,6 +314,7 @@ class ReplayProvider(ModelProvider):
             token_estimate=int(row.get("token_estimate", 0) or 0),
             latency_s=float(row.get("latency_s", 0.0) or 0.0),
             dollar_cost=float(row.get("dollar_cost", 0.0) or 0.0),
+            trace_call_id=str(row.get("trace_call_id") or row.get("call_id") or "").strip() or None,
         )
         self._record_usage(response)
         return response

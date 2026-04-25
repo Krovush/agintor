@@ -13,7 +13,6 @@ from .exceptions import AgintorError
 from .evaluator import RuntimeEvaluator
 from .evolution import EvolutionEngine
 from .project import init_runtime as init_runtime_dir, write_demo_suite
-from .pydantic_compat import model_dump
 from .providers import build_provider
 from .runtime_api import (
     load_solve_request,
@@ -182,9 +181,9 @@ def solve_cmd(
             "task_id": task.task_id if task_id else None,
             "suite": suite if task_id else None,
             "partition": resolved_partition if task_id else None,
-            "request": model_dump(runtime_request),
-            "capability_exchange": model_dump(response.capability_exchange),
-            "solve_result": model_dump(response.solve_result),
+            "request": (runtime_request).model_dump(),
+            "capability_exchange": (response.capability_exchange).model_dump(),
+            "solve_result": (response.solve_result).model_dump(),
         }
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
         failed = False
@@ -223,7 +222,7 @@ def eval_cmd(
             **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
         )
         evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=_parse_seeds(seeds), use_cache=False)
-        typer.echo(json.dumps({**model_dump(evaluation), "provider_usage": dict(getattr(evaluator, "last_provider_usage", {}))}, indent=2, sort_keys=True))
+        typer.echo(json.dumps({**(evaluation).model_dump(), "provider_usage": dict(getattr(evaluator, "last_provider_usage", {}))}, indent=2, sort_keys=True))
         failed = False
     finally:
         workspace_lease.release(failed=failed)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from agintor.goal_rubric import build_goal_spec
-from agintor.pydantic_compat import model_dump, model_validate
 from agintor.runtime_builder import (
     _build_benchmark_plan,
     _build_verifier_bundle,
@@ -41,12 +40,12 @@ def test_normalization_resets_train_partition_when_synthetic_ids_are_updated_but
     new_suite = _suite(new_goal)
     expected_plan = _build_benchmark_plan(new_goal, new_suite)
 
-    payload = model_dump(old_plan)
+    payload = (old_plan).model_dump()
     payload["family_targets"] = list(new_goal.target_families)
     payload["synthetic_task_ids"] = list(expected_plan.synthetic_task_ids)
 
     normalized = _normalize_benchmark_plan_against_suite(
-        model_validate(BenchmarkPlan, payload),
+        (BenchmarkPlan).model_validate(payload),
         new_suite,
         goal_spec=new_goal,
     )
@@ -63,11 +62,11 @@ def test_normalization_resets_stale_synthetic_and_train_task_ids_to_rebuilt_defa
     new_suite = _suite(new_goal)
     expected_plan = _build_benchmark_plan(new_goal, new_suite)
 
-    payload = model_dump(old_plan)
+    payload = (old_plan).model_dump()
     payload["family_targets"] = list(new_goal.target_families)
 
     normalized = _normalize_benchmark_plan_against_suite(
-        model_validate(BenchmarkPlan, payload),
+        (BenchmarkPlan).model_validate(payload),
         new_suite,
         goal_spec=new_goal,
     )
@@ -82,7 +81,7 @@ def test_normalization_preserves_valid_train_coverage_when_synthetic_ids_are_alr
     plan = _build_benchmark_plan(goal_spec, suite)
 
     normalized = _normalize_benchmark_plan_against_suite(
-        model_validate(BenchmarkPlan, model_dump(plan)),
+        (BenchmarkPlan).model_validate((plan).model_dump()),
         suite,
         goal_spec=goal_spec,
     )
@@ -98,12 +97,12 @@ def test_verifier_bundle_covers_goal_conditioned_tasks_after_partial_plan_update
     new_suite = _suite(new_goal)
     expected_plan = _build_benchmark_plan(new_goal, new_suite)
 
-    payload = model_dump(old_plan)
+    payload = (old_plan).model_dump()
     payload["family_targets"] = list(new_goal.target_families)
     payload["synthetic_task_ids"] = list(expected_plan.synthetic_task_ids)
 
     normalized = _normalize_benchmark_plan_against_suite(
-        model_validate(BenchmarkPlan, payload),
+        (BenchmarkPlan).model_validate(payload),
         new_suite,
         goal_spec=new_goal,
     )
@@ -122,7 +121,7 @@ def test_normalization_restores_missing_target_family_pressure_for_partial_parti
     suite = _suite(goal_spec)
     plan = _build_benchmark_plan(goal_spec, suite)
 
-    payload = model_dump(plan)
+    payload = (plan).model_dump()
     payload["train_task_ids"] = [
         task_id for task_id in plan.train_task_ids if task_id.startswith("top.")
     ] + list(plan.synthetic_task_ids)
@@ -134,7 +133,7 @@ def test_normalization_restores_missing_target_family_pressure_for_partial_parti
     ]
 
     normalized = _normalize_benchmark_plan_against_suite(
-        model_validate(BenchmarkPlan, payload),
+        (BenchmarkPlan).model_validate(payload),
         suite,
         goal_spec=goal_spec,
     )
@@ -165,7 +164,7 @@ def test_normalization_preserves_partial_partition_hints_when_family_coverage_is
     val_family_map = suite.task_family_map("val")
     test_family_map = suite.task_family_map("test")
 
-    payload = model_dump(plan)
+    payload = (plan).model_dump()
     payload["train_task_ids"] = [
         next(task_id for task_id in plan.train_task_ids if train_family_map[task_id] == "top"),
         next(task_id for task_id in plan.train_task_ids if train_family_map[task_id] == "mem"),
@@ -181,7 +180,7 @@ def test_normalization_preserves_partial_partition_hints_when_family_coverage_is
     ]
 
     normalized = _normalize_benchmark_plan_against_suite(
-        model_validate(BenchmarkPlan, payload),
+        (BenchmarkPlan).model_validate(payload),
         suite,
         goal_spec=goal_spec,
     )

@@ -12,10 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from agintor.artifacts import ArtifactMode
+from agintor import state_store
 from agintor.exceptions import HardInvalidation, PromptAdaptationError, ResumeRecoveryError
 from agintor.project import init_runtime
 from agintor.providers import LocalDeterministicProvider, ReplayProvider, clone_provider
-from agintor.pydantic_compat import model_dump
 from agintor.runtime_api import (
     AgentFrame,
     PolicyContext,
@@ -50,6 +50,7 @@ from agintor.schemas import (
     Checkpoint,
     CheckpointEnvelope,
     ChildSpec,
+    ExecutionUnitRequestEnvelope,
     OpenAITraceContext,
     ModelResponse,
     OperationSpec,
@@ -67,6 +68,7 @@ from agintor.schemas import (
 from agintor.shell import FixedShell
 from agintor.tool_runtime import _AsyncProcessRecord
 from agintor.utils import now_ts, stable_hash
+from agintor.versioning import RUNTIME_CONTRACT_VERSION
 
 
 class ReconcilingReplayProvider(ReplayProvider):
@@ -518,8 +520,7 @@ def _pending_provider_launch_envelope(
     )
     return CheckpointEnvelope(
         checkpoint_id=f"checkpoint.{task_id}.0001",
-        runtime_abi=runtime.kernel_manifest.runtime_abi,
-        storage_schema_version=runtime.kernel_manifest.storage_schema_version,
+        runtime_contract_version=runtime.kernel_manifest.runtime_contract_version,
         runtime_hash=runtime.runtime_hash,
         request_id=plan.request_id,
         plan_id=plan.plan_id,
@@ -528,18 +529,18 @@ def _pending_provider_launch_envelope(
         sequence_no=1,
         boundary="after_provider_launch",
         created_at=now_ts(),
-        plan_snapshot=model_dump(plan),
-        task_payload=model_dump(task),
+        plan_snapshot=(plan).model_dump(),
+        task_payload=(task).model_dump(),
         runtime_state_snapshot={
             "request_id": plan.request_id,
             "plan_id": plan.plan_id,
             "execution_state": "running",
             "checkpoint_sequence_no": 1,
-            "queued_frames": [model_dump(queued_frame)],
+            "queued_frames": [(queued_frame).model_dump()],
             "visible_tool_names": sorted(shell.tool_registry.tools),
             "plan_node_status": {"respond": "running"},
         },
-        shell_state_snapshot=model_dump(shell.snapshot_checkpoint_shell_state()),
+        shell_state_snapshot=(shell.snapshot_checkpoint_shell_state()).model_dump(),
         side_effect_ledger={
             "receipts": [
                 SideEffectReceipt(
@@ -598,8 +599,7 @@ def _pending_sync_tool_launch_envelope(
     idempotency_key = stable_hash(plan.request_id, "sum", tool_name, {"numbers": [2, 3, 5]})
     return CheckpointEnvelope(
         checkpoint_id=f"checkpoint.{task_id}.0001",
-        runtime_abi=runtime.kernel_manifest.runtime_abi,
-        storage_schema_version=runtime.kernel_manifest.storage_schema_version,
+        runtime_contract_version=runtime.kernel_manifest.runtime_contract_version,
         runtime_hash=runtime.runtime_hash,
         request_id=plan.request_id,
         plan_id=plan.plan_id,
@@ -608,18 +608,18 @@ def _pending_sync_tool_launch_envelope(
         sequence_no=1,
         boundary="after_tool_launch",
         created_at=now_ts(),
-        plan_snapshot=model_dump(plan),
-        task_payload=model_dump(task),
+        plan_snapshot=(plan).model_dump(),
+        task_payload=(task).model_dump(),
         runtime_state_snapshot={
             "request_id": plan.request_id,
             "plan_id": plan.plan_id,
             "execution_state": "running",
             "checkpoint_sequence_no": 1,
-            "queued_frames": [model_dump(queued_frame)],
+            "queued_frames": [(queued_frame).model_dump()],
             "visible_tool_names": sorted(shell.tool_registry.tools),
             "plan_node_status": {"sum": "running"},
         },
-        shell_state_snapshot=model_dump(shell.snapshot_checkpoint_shell_state()),
+        shell_state_snapshot=(shell.snapshot_checkpoint_shell_state()).model_dump(),
         side_effect_ledger={
             "receipts": [
                 SideEffectReceipt(
@@ -692,8 +692,7 @@ def _pending_async_tool_launch_envelope(
     shell.open_handles.add(handle)
     return CheckpointEnvelope(
         checkpoint_id=f"checkpoint.{task_id}.0001",
-        runtime_abi=runtime.kernel_manifest.runtime_abi,
-        storage_schema_version=runtime.kernel_manifest.storage_schema_version,
+        runtime_contract_version=runtime.kernel_manifest.runtime_contract_version,
         runtime_hash=runtime.runtime_hash,
         request_id=plan.request_id,
         plan_id=plan.plan_id,
@@ -702,19 +701,19 @@ def _pending_async_tool_launch_envelope(
         sequence_no=1,
         boundary="after_tool_launch",
         created_at=now_ts(),
-        plan_snapshot=model_dump(plan),
-        task_payload=model_dump(task),
+        plan_snapshot=(plan).model_dump(),
+        task_payload=(task).model_dump(),
         runtime_state_snapshot={
             "request_id": plan.request_id,
             "plan_id": plan.plan_id,
             "execution_state": "running",
             "checkpoint_sequence_no": 1,
-            "queued_frames": [model_dump(queued_frame)],
+            "queued_frames": [(queued_frame).model_dump()],
             "visible_tool_names": sorted(shell.tool_registry.tools),
             "plan_node_status": {"sum": "running"},
             "open_handle_ids": [handle.handle_id],
         },
-        shell_state_snapshot=model_dump(shell.snapshot_checkpoint_shell_state()),
+        shell_state_snapshot=(shell.snapshot_checkpoint_shell_state()).model_dump(),
         side_effect_ledger={
             "receipts": [
                 SideEffectReceipt(
@@ -795,8 +794,7 @@ def _pending_service_action_launch_envelope(
     )
     return CheckpointEnvelope(
         checkpoint_id=f"checkpoint.{task_id}.0001",
-        runtime_abi=runtime.kernel_manifest.runtime_abi,
-        storage_schema_version=runtime.kernel_manifest.storage_schema_version,
+        runtime_contract_version=runtime.kernel_manifest.runtime_contract_version,
         runtime_hash=runtime.runtime_hash,
         request_id=plan.request_id,
         plan_id=plan.plan_id,
@@ -805,18 +803,18 @@ def _pending_service_action_launch_envelope(
         sequence_no=1,
         boundary="after_service_action_launch",
         created_at=now_ts(),
-        plan_snapshot=model_dump(plan),
-        task_payload=model_dump(task),
+        plan_snapshot=(plan).model_dump(),
+        task_payload=(task).model_dump(),
         runtime_state_snapshot={
             "request_id": plan.request_id,
             "plan_id": plan.plan_id,
             "execution_state": "running",
             "checkpoint_sequence_no": 1,
-            "queued_frames": [model_dump(queued_frame)],
+            "queued_frames": [(queued_frame).model_dump()],
             "visible_tool_names": sorted(shell.tool_registry.tools),
             "plan_node_status": {"service_call": "running"},
         },
-        shell_state_snapshot=model_dump(shell.snapshot_checkpoint_shell_state()),
+        shell_state_snapshot=(shell.snapshot_checkpoint_shell_state()).model_dump(),
         side_effect_ledger={
             "receipts": [
                 SideEffectReceipt(
@@ -929,9 +927,9 @@ def _branch_resume_checkpoint_envelope(
             reserved_budget=branch_plan.reserved_budget,
         )
         snapshot_payload = {
-            "branch_plan": model_dump(branch_plan),
+            "branch_plan": (branch_plan).model_dump(),
             "execution_state": "branching",
-            "active_frame": model_dump(branch_frame),
+            "active_frame": (branch_frame).model_dump(),
             "queued_frames": [],
             "visible_tool_names": sorted(branch_shell.tool_registry.tools),
             "artifacts": {},
@@ -940,7 +938,7 @@ def _branch_resume_checkpoint_envelope(
             "branch_publications": [],
             "side_effect_receipts": [],
             "budget_totals": {"normalized": {}, "cost": 0.0, "latency": 0.0, "calls": 0, "checks": 0, "tokens": 0},
-            "shell_state_snapshot": model_dump(branch_shell.snapshot_checkpoint_shell_state()),
+            "shell_state_snapshot": (branch_shell.snapshot_checkpoint_shell_state()).model_dump(),
             "created_tools": 0,
             "promoted_nodes": 0,
             "checks_used": 0,
@@ -952,8 +950,7 @@ def _branch_resume_checkpoint_envelope(
         elif snapshot_kind == "provider_launch":
             receipt_key = f"{branch_id}.provider.pending"
             snapshot_payload["side_effect_receipts"] = [
-                model_dump(
-                    SideEffectReceipt(
+                (SideEffectReceipt(
                         side_effect_id=f"provider-request.{branch_id}",
                         action_fingerprint=receipt_key,
                         idempotency_key=receipt_key,
@@ -969,13 +966,12 @@ def _branch_resume_checkpoint_envelope(
                         status="launched",
                         result_ref={"request": {"prompt": task.prompt, "model_class": "small"}},
                         created_at=now_ts(),
-                    )
-                )
+                    )).model_dump()
             ]
             snapshot_payload["plan_node_status"] = {node_id: "running"}
         else:
             snapshot_payload["plan_node_status"] = {}
-        return model_dump(branch_state), snapshot_payload, receipt_key
+        return (branch_state).model_dump(), snapshot_payload, receipt_key
 
     left_state, left_snapshot, left_receipt_key = make_branch_snapshot(
         "w0",
@@ -993,8 +989,7 @@ def _branch_resume_checkpoint_envelope(
     )
     envelope = CheckpointEnvelope(
         checkpoint_id=f"checkpoint.{task_id}.0001",
-        runtime_abi=runtime.kernel_manifest.runtime_abi,
-        storage_schema_version=runtime.kernel_manifest.storage_schema_version,
+        runtime_contract_version=runtime.kernel_manifest.runtime_contract_version,
         runtime_hash=runtime.runtime_hash,
         request_id=plan.request_id,
         plan_id=plan.plan_id,
@@ -1003,24 +998,24 @@ def _branch_resume_checkpoint_envelope(
         sequence_no=1,
         boundary="after_branch_node_completion",
         created_at=now_ts(),
-        plan_snapshot=model_dump(plan),
-        task_payload=model_dump(task),
+        plan_snapshot=(plan).model_dump(),
+        task_payload=(task).model_dump(),
         runtime_state_snapshot={
             "request_id": plan.request_id,
             "plan_id": plan.plan_id,
             "execution_state": "running",
             "checkpoint_sequence_no": 1,
-            "queued_frames": [model_dump(root_frame)],
+            "queued_frames": [(root_frame).model_dump()],
             "visible_tool_names": sorted(shell.tool_registry.tools),
             "plan_node_status": {},
             "branch_states": {"w0": left_state, "w1": right_state},
             "branch_publications": [],
             "branch_resume_snapshots": {
-                "w0": model_dump(BranchResumeSnapshot(**left_snapshot)),
-                "w1": model_dump(BranchResumeSnapshot(**right_snapshot)),
+                "w0": (BranchResumeSnapshot(**left_snapshot)).model_dump(),
+                "w1": (BranchResumeSnapshot(**right_snapshot)).model_dump(),
             },
         },
-        shell_state_snapshot=model_dump(shell.snapshot_checkpoint_shell_state()),
+        shell_state_snapshot=(shell.snapshot_checkpoint_shell_state()).model_dump(),
     )
     receipt_keys = {
         key: value
@@ -1063,8 +1058,7 @@ def _branch_owned_terminal_provider_receipt_envelope(
     )
     return CheckpointEnvelope(
         checkpoint_id=f"checkpoint.{task_id}.0001",
-        runtime_abi=runtime.kernel_manifest.runtime_abi,
-        storage_schema_version=runtime.kernel_manifest.storage_schema_version,
+        runtime_contract_version=runtime.kernel_manifest.runtime_contract_version,
         runtime_hash=runtime.runtime_hash,
         request_id=plan.request_id,
         plan_id=plan.plan_id,
@@ -1073,18 +1067,18 @@ def _branch_owned_terminal_provider_receipt_envelope(
         sequence_no=1,
         boundary="after_provider_completion",
         created_at=now_ts(),
-        plan_snapshot=model_dump(plan),
-        task_payload=model_dump(task),
+        plan_snapshot=(plan).model_dump(),
+        task_payload=(task).model_dump(),
         runtime_state_snapshot={
             "request_id": plan.request_id,
             "plan_id": plan.plan_id,
             "execution_state": "running",
             "checkpoint_sequence_no": 1,
-            "queued_frames": [model_dump(queued_frame)],
+            "queued_frames": [(queued_frame).model_dump()],
             "visible_tool_names": sorted(shell.tool_registry.tools),
             "plan_node_status": {"respond": "running"},
         },
-        shell_state_snapshot=model_dump(shell.snapshot_checkpoint_shell_state()),
+        shell_state_snapshot=(shell.snapshot_checkpoint_shell_state()).model_dump(),
         side_effect_ledger={
             "receipts": [
                 SideEffectReceipt(
@@ -2033,8 +2027,10 @@ def test_runtime_bundle_includes_run_store_module(tmp_path):
     runtime_dir = init_runtime(tmp_path / "runtime")
 
     bundled_run_store = runtime_dir / "runtime_sdk" / "agintor_runtime" / "run_store.py"
+    bundled_state_store = runtime_dir / "runtime_sdk" / "agintor_runtime" / "state_store.py"
 
     assert bundled_run_store.exists()
+    assert bundled_state_store.exists()
 
 
 def test_run_store_canonicalizes_relative_workspace_run_roots_and_checkpoint_refs(tmp_path, monkeypatch):
@@ -2051,8 +2047,7 @@ def test_run_store_canonicalizes_relative_workspace_run_roots_and_checkpoint_ref
     )
     envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.req.relative.0001",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="runtime-hash",
         run_id=manifest.run_id,
         run_root=manifest.run_root,
@@ -2070,14 +2065,18 @@ def test_run_store_canonicalizes_relative_workspace_run_roots_and_checkpoint_ref
     assert reloaded_manifest.run_root == str((store.workspace / "runs" / manifest.run_id).resolve())
     assert checkpoint_ref.ref == str(Path(checkpoint_ref.ref).resolve())
     assert store.latest_checkpoint_ref(manifest.run_id) == checkpoint_ref.ref
+    indexed_latest = state_store.open_state_store(reloaded_manifest.run_root).latest_usable_checkpoint(
+        run_id=manifest.run_id
+    )
+    assert indexed_latest is not None
+    assert indexed_latest["checkpoint_id"] == envelope.checkpoint_id
 
 
 def test_fixed_shell_checkpoint_lookup_can_resume_from_external_store_with_container_refs(tmp_path):
     store_shell = FixedShell(tmp_path / "store-workspace", artifact_mode=ArtifactMode.ALWAYS)
     envelope_one = CheckpointEnvelope(
         checkpoint_id="checkpoint.req.0001",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="runtime-hash",
         request_id="req",
         plan_id="plan",
@@ -2087,7 +2086,7 @@ def test_fixed_shell_checkpoint_lookup_can_resume_from_external_store_with_conta
         boundary="after_provider_completion",
         created_at=1.0,
     )
-    envelope_two = envelope_one.copy(
+    envelope_two = envelope_one.model_copy(
         update={
             "checkpoint_id": "checkpoint.req.0002",
             "sequence_no": 2,
@@ -2197,6 +2196,172 @@ def test_batch_evaluation_unit_key_keeps_benchmark_duplicates_separate_even_if_t
     assert batch_evaluation_unit_key(first) == first.request_id
     assert batch_evaluation_unit_key(second) == second.request_id
     assert batch_evaluation_unit_key(first) != batch_evaluation_unit_key(second)
+
+
+def test_compile_transfer_plan_fills_missing_episode_step_from_task_order():
+    task = BenchmarkTask(
+        task_id="episode.partial-trace.step3",
+        family="top",
+        prompt="Step three",
+        task_type="structured_ops",
+        operations=[],
+        expected={},
+        transfer_scored=True,
+        episode_id="episode-partial-trace",
+        episode_order=3,
+    )
+
+    plan = compile_execution_plan_from_task(
+        task,
+        request_id="benchmark.episode.partial-trace.step3.seed_5",
+        seed=5,
+        runtime_hash="runtime-hash",
+        runtime_dir="runtime-dir",
+        trace_context=OpenAITraceContext(session_id="session.partial"),
+    )
+
+    assert plan.trace_context.episode_kind == "transfer_episode"
+    assert plan.trace_context.episode_step_index == 3
+
+
+def test_state_store_indexes_execution_unit_members_from_request_envelope(tmp_path):
+    store = RunStore(tmp_path / "runs")
+    manifest = store.create_run(
+        request_id="episode.ledger.seed_9",
+        evaluation_unit_id="episode.ledger.seed_9",
+        request_mode="batch",
+        runtime_backend="local",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
+    )
+    first_task = BenchmarkTask(
+        task_id="episode.ledger.step1",
+        family="top",
+        prompt="Step one",
+        task_type="structured_ops",
+        operations=[],
+        expected={},
+        transfer_scored=True,
+        episode_id="episode-ledger",
+        episode_order=0,
+    )
+    second_task = BenchmarkTask(
+        task_id="episode.ledger.step2",
+        family="top",
+        prompt="Step two",
+        task_type="structured_ops",
+        operations=[],
+        expected={},
+        transfer_scored=True,
+        episode_id="episode-ledger",
+        episode_order=1,
+    )
+    invocations = [
+        RuntimeTaskInvocation(
+            request_id="benchmark.episode.ledger.step1.seed_9",
+            evaluation_unit_id=manifest.evaluation_unit_id,
+            episode_kind="transfer_episode",
+            episode_step_index=0,
+            runtime_backend="local",
+            seed=9,
+            task=first_task,
+            trace_context=OpenAITraceContext(
+                request_id="benchmark.episode.ledger.step1.seed_9",
+                evaluation_unit_id=manifest.evaluation_unit_id,
+                episode_kind="transfer_episode",
+                episode_step_index=0,
+            ),
+        ),
+        RuntimeTaskInvocation(
+            request_id="benchmark.episode.ledger.step2.seed_9",
+            evaluation_unit_id=manifest.evaluation_unit_id,
+            episode_kind="transfer_episode",
+            episode_step_index=1,
+            runtime_backend="local",
+            seed=9,
+            task=second_task,
+            trace_context=OpenAITraceContext(
+                request_id="benchmark.episode.ledger.step2.seed_9",
+                evaluation_unit_id=manifest.evaluation_unit_id,
+                episode_kind="transfer_episode",
+                episode_step_index=1,
+            ),
+        ),
+    ]
+    envelope = ExecutionUnitRequestEnvelope(
+        request_kind="runtime_task_invocation_group",
+        request_mode="batch",
+        request_id=manifest.request_id,
+        evaluation_unit_id=manifest.evaluation_unit_id,
+        payload=(invocations[0]).model_dump(),
+        member_invocations=invocations,
+    )
+
+    store.write_request_bundle(manifest, request_envelope=(envelope).model_dump())
+
+    with state_store.open_state_store(manifest.run_root)._connection() as conn:
+        episodes = conn.execute(
+            "SELECT request_id, episode_kind, episode_step_index, task_id FROM episodes ORDER BY episode_step_index"
+        ).fetchall()
+        tasks = conn.execute("SELECT task_id, request_id, evaluation_unit_id FROM tasks ORDER BY task_id").fetchall()
+
+    assert [dict(row) for row in episodes] == [
+        {
+            "request_id": "benchmark.episode.ledger.step1.seed_9",
+            "episode_kind": "transfer_episode",
+            "episode_step_index": 0,
+            "task_id": "episode.ledger.step1",
+        },
+        {
+            "request_id": "benchmark.episode.ledger.step2.seed_9",
+            "episode_kind": "transfer_episode",
+            "episode_step_index": 1,
+            "task_id": "episode.ledger.step2",
+        },
+    ]
+    assert {row["task_id"] for row in tasks} == {"episode.ledger.step1", "episode.ledger.step2"}
+    assert {row["evaluation_unit_id"] for row in tasks} == {manifest.evaluation_unit_id}
+
+
+def test_trace_cursor_links_persisted_model_call_ids(tmp_path):
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    runtime = load_runtime(runtime_dir, runtime_backend="local")
+    shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
+    task = _make_direct_response_task("trace.call.cursor")
+    plan = compile_execution_plan_from_task(
+        task,
+        request_id="benchmark.trace.call.cursor.seed_0",
+        seed=0,
+        runtime_hash=runtime.runtime_hash,
+        runtime_dir=str(runtime.runtime_dir),
+    )
+    context = PolicyContext(
+        runtime_dir=runtime.runtime_dir,
+        shell=shell,
+        task=task,
+        request_id=plan.request_id,
+        plan=plan,
+        trace_context=plan.trace_context,
+        provider=LocalDeterministicProvider(),
+        seed=0,
+        state=RuntimeState(request_id=plan.request_id, plan_id=plan.plan_id),
+        budget=RuntimeBudget(),
+        trace=[],
+        objective=plan.objective,
+    )
+    response = ModelResponse(
+        text="ok",
+        model_name="hosted/small",
+        trace_call_id="20260424T000000Z__pid1__call0001__user_request__create__model",
+    )
+
+    context.consume_model_response(response, purpose="user_request")
+    cursor = TaskRuntime(
+        runtime,
+        shell,
+        LocalDeterministicProvider(),
+    )._build_trace_cursor_snapshot(context, task, 0)
+
+    assert cursor.linked_call_ids == ["20260424T000000Z__pid1__call0001__user_request__create__model"]
 
 
 def test_resume_from_checkpoint_restores_budget_state_and_reuses_completed_receipts(tmp_path):
@@ -2456,8 +2621,7 @@ def test_run_store_resolve_resume_target_accepts_external_checkpoint_ref(tmp_pat
     checkpoint_path = checkpoint_dir / "checkpoint.resume.external.json"
     checkpoint_envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.resume.external",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="runtime-hash",
         run_id=manifest.run_id,
         run_root=manifest.run_root,
@@ -2466,7 +2630,7 @@ def test_run_store_resolve_resume_target_accepts_external_checkpoint_ref(tmp_pat
         task_id="task.external",
         seed=0,
     )
-    checkpoint_path.write_text(json.dumps(model_dump(checkpoint_envelope), indent=2, sort_keys=True), encoding="utf-8")
+    checkpoint_path.write_text(json.dumps((checkpoint_envelope).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
 
     target = store.resolve_resume_target(checkpoint_ref=str(checkpoint_path))
 
@@ -2488,8 +2652,7 @@ def test_run_store_resolve_resume_target_uses_manifest_external_latest_checkpoin
     checkpoint_path = checkpoint_dir / "checkpoint.resume.manifest.latest-external.json"
     checkpoint_envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.resume.manifest.latest-external",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="runtime-hash",
         run_id=manifest.run_id,
         run_root=manifest.run_root,
@@ -2498,9 +2661,9 @@ def test_run_store_resolve_resume_target_uses_manifest_external_latest_checkpoin
         task_id="task.manifest.latest-external",
         seed=0,
     )
-    checkpoint_path.write_text(json.dumps(model_dump(checkpoint_envelope), indent=2, sort_keys=True), encoding="utf-8")
+    checkpoint_path.write_text(json.dumps((checkpoint_envelope).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
     store.write_run_manifest(
-        manifest.copy(update={"latest_checkpoint_ref": str(checkpoint_path.resolve()), "resumable": True})
+        manifest.model_copy(update={"latest_checkpoint_ref": str(checkpoint_path.resolve()), "resumable": True})
     )
 
     assert store.latest_usable_checkpoint_ref(manifest.run_id) == str(checkpoint_path.resolve())
@@ -2524,8 +2687,7 @@ def test_run_store_resolve_resume_target_falls_back_from_stale_run_root_to_run_i
     checkpoint_path = checkpoint_dir / "checkpoint.resume.external.stale-root.json"
     checkpoint_envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.resume.external.stale-root",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="runtime-hash",
         run_id=manifest.run_id,
         run_root="/mnt/runs/run.resume.external.stale-root",
@@ -2534,7 +2696,7 @@ def test_run_store_resolve_resume_target_falls_back_from_stale_run_root_to_run_i
         task_id="task.external.stale-root",
         seed=0,
     )
-    checkpoint_path.write_text(json.dumps(model_dump(checkpoint_envelope), indent=2, sort_keys=True), encoding="utf-8")
+    checkpoint_path.write_text(json.dumps((checkpoint_envelope).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
 
     target = store.resolve_resume_target(checkpoint_ref=str(checkpoint_path))
 
@@ -2562,8 +2724,7 @@ def test_run_store_resolve_resume_target_prefers_matching_run_id_over_mismatched
     checkpoint_path = checkpoint_dir / "checkpoint.resume.external.mismatched-root.json"
     checkpoint_envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.resume.external.mismatched-root",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="runtime-hash",
         run_id=expected_manifest.run_id,
         run_root=mismatched_manifest.run_root,
@@ -2572,7 +2733,7 @@ def test_run_store_resolve_resume_target_prefers_matching_run_id_over_mismatched
         task_id="task.external.mismatched-root",
         seed=0,
     )
-    checkpoint_path.write_text(json.dumps(model_dump(checkpoint_envelope), indent=2, sort_keys=True), encoding="utf-8")
+    checkpoint_path.write_text(json.dumps((checkpoint_envelope).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
 
     target = store.resolve_resume_target(checkpoint_ref=str(checkpoint_path))
 
@@ -2609,8 +2770,7 @@ def test_resume_rebinds_request_identity_and_carries_forward_resume_provenance(t
     )
     checkpoint_envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.resume.rebind.identity.0001",
-        runtime_abi=runtime.kernel_manifest.runtime_abi,
-        storage_schema_version=runtime.kernel_manifest.storage_schema_version,
+        runtime_contract_version=runtime.kernel_manifest.runtime_contract_version,
         runtime_hash=runtime.runtime_hash,
         run_id="run.resume.rebind.identity",
         run_root=str(shell.workspace.resolve()),
@@ -2623,21 +2783,21 @@ def test_resume_rebinds_request_identity_and_carries_forward_resume_provenance(t
         sequence_no=1,
         boundary="before_resume",
         created_at=now_ts(),
-        plan_snapshot=model_dump(plan),
-        task_payload=model_dump(task),
+        plan_snapshot=(plan).model_dump(),
+        task_payload=(task).model_dump(),
         runtime_state_snapshot={
             "request_id": plan.request_id,
             "plan_id": plan.plan_id,
             "execution_state": "running",
             "checkpoint_sequence_no": 1,
-            "queued_frames": [model_dump(queued_frame)],
+            "queued_frames": [(queued_frame).model_dump()],
             "visible_tool_names": sorted(shell.tool_registry.tools),
             "plan_node_status": {},
             "branch_states": {},
             "branch_publications": [],
         },
-        working_state_summary={"boundary": "before_resume", "request_id": plan.request_id},
-        trace_cursor={"request_id": plan.request_id, "latest_event_sequence_no": 0},
+        working_state={"current_objective": task.prompt, "selected_checkpoint_refs": [plan.request_id]},
+        trace_cursor={"last_solve_request_id": plan.request_id, "latest_runtime_event_sequence_no": 0},
     )
 
     solve_request, rebound_envelope, effective_request_id = solve_request_from_resume_checkpoint(
@@ -2654,8 +2814,8 @@ def test_resume_rebinds_request_identity_and_carries_forward_resume_provenance(t
     assert rebound_envelope.runtime_state_snapshot.request_id == effective_request_id
     assert rebound_envelope.runtime_state_snapshot.queued_frames[0].request_id == effective_request_id
     assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.request_id == effective_request_id
-    assert rebound_envelope.working_state_summary["request_id"] == effective_request_id
-    assert rebound_envelope.trace_cursor["request_id"] == effective_request_id
+    assert rebound_envelope.working_state.selected_checkpoint_refs == [plan.request_id]
+    assert rebound_envelope.trace_cursor.last_solve_request_id == effective_request_id
     assert rebound_envelope.origin_request_id == plan.request_id
     assert rebound_envelope.source_checkpoint_ref == "checkpoint://resume-source"
     assert rebound_envelope.plan_id == plan.plan_id
@@ -3073,10 +3233,10 @@ def test_host_run_batch_reports_sum_of_run_result_provider_usage(tmp_path):
 def test_host_run_batch_scopes_grouped_episode_trace_rows_to_each_invocation(tmp_path):
     runtime_dir = init_runtime(tmp_path / "runtime")
     host = RuntimeHost(tmp_path / "host", runtime_backend="local")
-    task_one = _make_direct_response_task("episode.trace.one").copy(
+    task_one = _make_direct_response_task("episode.trace.one").model_copy(
         update={"transfer_scored": True, "episode_id": "episode-trace", "episode_order": 0}
     )
-    task_two = _make_direct_response_task("episode.trace.two").copy(
+    task_two = _make_direct_response_task("episode.trace.two").model_copy(
         update={"transfer_scored": True, "episode_id": "episode-trace", "episode_order": 1}
     )
 
@@ -3100,7 +3260,7 @@ def test_vertical_mode_executes_explicit_merge_and_verify_plan_nodes(tmp_path, m
     runtime_dir = init_runtime(tmp_path / "runtime")
     runtime = load_runtime(runtime_dir, runtime_backend="local")
     shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
-    task = _make_parallel_direct_response_task("vertical.plan").copy(
+    task = _make_parallel_direct_response_task("vertical.plan").model_copy(
         update={
             "verifier_type": "trace_event",
             "expected": "merge_completed",
@@ -3165,7 +3325,7 @@ def test_root_empty_frontier_does_not_reschedule_completed_plan_nodes(tmp_path, 
     runtime_dir = init_runtime(tmp_path / "runtime")
     runtime = load_runtime(runtime_dir, runtime_backend="local")
     shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
-    task = _make_parallel_direct_response_task("vertical.plan.empty-frontier").copy(
+    task = _make_parallel_direct_response_task("vertical.plan.empty-frontier").model_copy(
         update={
             "verifier_type": "trace_event",
             "expected": "merge_completed",
@@ -3197,8 +3357,7 @@ def test_root_empty_frontier_does_not_reschedule_completed_plan_nodes(tmp_path, 
     )
     envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.vertical.plan.empty-frontier.0001",
-        runtime_abi=runtime.kernel_manifest.runtime_abi,
-        storage_schema_version=runtime.kernel_manifest.storage_schema_version,
+        runtime_contract_version=runtime.kernel_manifest.runtime_contract_version,
         runtime_hash=runtime.runtime_hash,
         request_id=plan.request_id,
         plan_id=plan.plan_id,
@@ -3207,14 +3366,14 @@ def test_root_empty_frontier_does_not_reschedule_completed_plan_nodes(tmp_path, 
         sequence_no=1,
         boundary="before_terminal_result",
         created_at=now_ts(),
-        plan_snapshot=model_dump(plan),
-        task_payload=model_dump(task),
+        plan_snapshot=(plan).model_dump(),
+        task_payload=(task).model_dump(),
         runtime_state_snapshot={
             "request_id": plan.request_id,
             "plan_id": plan.plan_id,
             "execution_state": "running",
             "checkpoint_sequence_no": 1,
-            "queued_frames": [model_dump(queued_frame)],
+            "queued_frames": [(queued_frame).model_dump()],
             "visible_tool_names": sorted(shell.tool_registry.tools),
             "plan_node_status": {node.node_id: "completed" for node in plan.nodes},
             "artifacts": {
@@ -3225,7 +3384,7 @@ def test_root_empty_frontier_does_not_reschedule_completed_plan_nodes(tmp_path, 
             "branch_states": {},
             "branch_publications": [],
         },
-        shell_state_snapshot=model_dump(shell.snapshot_checkpoint_shell_state()),
+        shell_state_snapshot=(shell.snapshot_checkpoint_shell_state()).model_dump(),
     )
 
     select_mode_calls = []
@@ -3271,7 +3430,7 @@ def test_horizontal_mode_executes_explicit_verify_node_after_merge(tmp_path, mon
     runtime_dir = init_runtime(tmp_path / "runtime")
     runtime = load_runtime(runtime_dir, runtime_backend="local")
     shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
-    task = _make_parallel_direct_response_task("horizontal.plan.verify").copy(
+    task = _make_parallel_direct_response_task("horizontal.plan.verify").model_copy(
         update={
             "expected": {"response_a": "left", "response_b": "right"},
             "verifier_type": "json_exact",
@@ -3368,7 +3527,7 @@ def test_horizontal_branch_reservations_respect_remaining_model_calls(tmp_path, 
     assert result.model_calls == 2
     assert (
         sum(
-            int(model_dump(branch_state)["reserved_budget"]["model_calls_max"])
+            int((branch_state).model_dump()["reserved_budget"]["model_calls_max"])
             for branch_state in envelope.runtime_state_snapshot.branch_states.values()
         )
         <= 2
@@ -3728,8 +3887,7 @@ def test_cancelled_branch_cleanup_emits_only_cleanup_and_reconciliation_records(
     branch_context.shell.open_handles.add(handle)
     branch_context.state.open_handle_ids.append(handle.handle_id)
     branch_context.state.side_effect_receipts.append(
-        model_dump(
-            SideEffectReceipt(
+        (SideEffectReceipt(
                 side_effect_id="tool-launch.branch",
                 action_fingerprint="tool-launch.branch",
                 idempotency_key="tool-launch.branch",
@@ -3745,8 +3903,7 @@ def test_cancelled_branch_cleanup_emits_only_cleanup_and_reconciliation_records(
                 status="launched",
                 result_ref={"tool_name": handle.tool_name, "launch_mode": "async", "handle_id": handle.handle_id},
                 created_at=now_ts(),
-            )
-        )
+            )).model_dump()
     )
 
     def fake_cancel(handle_id, handle_table):
@@ -3786,8 +3943,7 @@ def test_cancelled_branch_cleanup_fails_closed_when_handle_cannot_be_cleaned_up(
     branch_context.shell.open_handles.add(handle)
     branch_context.state.open_handle_ids.append(handle.handle_id)
     branch_context.state.side_effect_receipts.append(
-        model_dump(
-            SideEffectReceipt(
+        (SideEffectReceipt(
                 side_effect_id="tool-launch.failure",
                 action_fingerprint="tool-launch.failure",
                 idempotency_key="tool-launch.failure",
@@ -3803,8 +3959,7 @@ def test_cancelled_branch_cleanup_fails_closed_when_handle_cannot_be_cleaned_up(
                 status="launched",
                 result_ref={"tool_name": handle.tool_name, "launch_mode": "async", "handle_id": handle.handle_id},
                 created_at=now_ts(),
-            )
-        )
+            )).model_dump()
     )
 
     monkeypatch.setattr(
@@ -3826,8 +3981,7 @@ def test_cancelled_branch_cleanup_fails_closed_when_handle_cannot_be_cleaned_up(
 def test_cancelled_branch_fails_closed_on_unresolved_sync_tool_launch(tmp_path):
     runner, branch_plan, branch_context = _make_branch_cleanup_context(tmp_path)
     branch_context.state.side_effect_receipts.append(
-        model_dump(
-            SideEffectReceipt(
+        (SideEffectReceipt(
                 side_effect_id="tool-launch.sync",
                 action_fingerprint="tool-launch.sync",
                 idempotency_key="tool-launch.sync",
@@ -3843,8 +3997,7 @@ def test_cancelled_branch_fails_closed_on_unresolved_sync_tool_launch(tmp_path):
                 status="launched",
                 result_ref={"tool_name": "math/basic/sum_numbers", "launch_mode": "sync"},
                 created_at=now_ts(),
-            )
-        )
+            )).model_dump()
     )
 
     with pytest.raises(Exception, match="unresolved sync tool launch"):
@@ -4037,7 +4190,7 @@ def test_multi_output_verification_keeps_mapping_artifact(tmp_path, monkeypatch)
     runtime_dir = init_runtime(tmp_path / "runtime")
     runtime = load_runtime(runtime_dir, runtime_backend="local")
     shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
-    task = _make_parallel_direct_response_task("verify.multi-output").copy(
+    task = _make_parallel_direct_response_task("verify.multi-output").model_copy(
         update={
             "expected": {"response_a": "left", "response_b": "right"},
             "verifier_type": "json_exact",

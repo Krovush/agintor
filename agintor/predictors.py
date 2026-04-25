@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 import numpy as np
-
+from .schemas import (
+    PredictorEnsembleSnapshot,
+    PredictorLogLinearHuberSnapshot,
+    PredictorLogisticRegressorSnapshot,
+    PredictorRankingMixerSnapshot,
+    PredictorSnapshot,
+)
 from .utils import EPS, clip, isotonic_predict, monotonic_isotonic_fit, sigmoid
 
 
@@ -111,6 +117,69 @@ class Ensemble:
         return float(np.mean(preds)), float(np.std(preds))
 
 
+def _snapshot_logistic_model(model: BootstrapLogisticRegressor) -> PredictorLogisticRegressorSnapshot:
+    return PredictorLogisticRegressorSnapshot(
+        weights=model.weights.astype(float).tolist(),
+        x_points=[float(value) for value in model.x_points],
+        y_points=[float(value) for value in model.y_points],
+        p_min=float(model.p_min),
+        p_max=float(model.p_max),
+    )
+
+
+def _restore_logistic_model(snapshot: PredictorLogisticRegressorSnapshot) -> BootstrapLogisticRegressor:
+    return BootstrapLogisticRegressor(
+        weights=np.array(snapshot.weights, dtype=float),
+        x_points=[float(value) for value in snapshot.x_points],
+        y_points=[float(value) for value in snapshot.y_points],
+        p_min=float(snapshot.p_min),
+        p_max=float(snapshot.p_max),
+    )
+
+
+def _snapshot_huber_model(model: BootstrapLogLinearHuber) -> PredictorLogLinearHuberSnapshot:
+    return PredictorLogLinearHuberSnapshot(weights=model.weights.astype(float).tolist())
+
+
+def _restore_huber_model(snapshot: PredictorLogLinearHuberSnapshot) -> BootstrapLogLinearHuber:
+    return BootstrapLogLinearHuber(weights=np.array(snapshot.weights, dtype=float))
+
+
+def _snapshot_ensemble(ensemble: Ensemble) -> PredictorEnsembleSnapshot:
+    return PredictorEnsembleSnapshot(
+        probability_models=[
+            _snapshot_logistic_model(model)
+            for model in ensemble.probability_models
+        ],
+        positive_models=[
+            _snapshot_huber_model(model)
+            for model in ensemble.positive_models
+        ],
+    )
+
+
+def _restore_ensemble(snapshot: PredictorEnsembleSnapshot) -> Ensemble:
+    return Ensemble(
+        probability_models=[
+            _restore_logistic_model(model)
+            for model in snapshot.probability_models
+        ],
+        positive_models=[
+            _restore_huber_model(model)
+            for model in snapshot.positive_models
+        ],
+    )
+
+
+def _normalize_observation(payload: Mapping[str, Any]) -> dict[str, object]:
+    return {
+        "x": [float(value) for value in payload.get("x", [])],
+        "p": None if payload.get("p") is None else float(payload["p"]),
+        "q": None if payload.get("q") is None else float(payload["q"]),
+        "metadata": dict(payload.get("metadata", {})),
+    }
+
+
 class DecisionFamilyModelBank:
     def __init__(self, ensemble_size: int = 5, max_observations_per_family: int = 200) -> None:
         self.ensemble_size = ensemble_size
@@ -125,6 +194,67 @@ class DecisionFamilyModelBank:
 
     def unfreeze(self) -> None:
         self._frozen = False
+
+    def snapshot(self) -> PredictorSnapshot:
+        return PredictorSnapshot(
+            ensemble_size=int(self.ensemble_size),
+            max_observations_per_family=int(self.max_observations_per_family),
+            frozen=bool(self._frozen),
+            observations={
+                str(family): [
+                    _normalize_observation(observation)
+                    for observation in observations
+                ]
+                for family, observations in self._observations.items()
+            },
+            models={
+                str(family): _snapshot_ensemble(model)
+                for family, model in self._models.items()
+            },
+            ranking_weights={
+                str(family): PredictorRankingMixerSnapshot(alpha=mixer.alpha.astype(float).tolist())
+                for family, mixer in self._ranking_weights.items()
+            },
+        )
+
+    def restore(self, snapshot: Mapping[str, Any] | PredictorSnapshot) -> None:
+        predictor_snapshot = (
+            snapshot
+            if isinstance(snapshot, PredictorSnapshot)
+            else (PredictorSnapshot).model_validate(snapshot)
+        )
+        self.ensemble_size = int(predictor_snapshot.ensemble_size)
+        self.max_observations_per_family = int(predictor_snapshot.max_observations_per_family)
+        self._frozen = bool(predictor_snapshot.frozen)
+        self._observations = {
+            str(family): [
+                _normalize_observation(observation)
+                for observation in observations
+            ][-self.max_observations_per_family :]
+            for family, observations in predictor_snapshot.observations.items()
+        }
+        self._models = {
+            str(family): _restore_ensemble(model_snapshot)
+            for family, model_snapshot in predictor_snapshot.models.items()
+        }
+        self._ranking_weights = {
+            str(family): RankingMixer(alpha=np.array(weight_snapshot.alpha, dtype=float))
+            for family, weight_snapshot in predictor_snapshot.ranking_weights.items()
+        }
+
+    @classmethod
+    def fork_from_snapshot(cls, snapshot: Mapping[str, Any] | PredictorSnapshot) -> "DecisionFamilyModelBank":
+        predictor_snapshot = (
+            snapshot
+            if isinstance(snapshot, PredictorSnapshot)
+            else (PredictorSnapshot).model_validate(snapshot)
+        )
+        bank = cls(
+            ensemble_size=int(predictor_snapshot.ensemble_size),
+            max_observations_per_family=int(predictor_snapshot.max_observations_per_family),
+        )
+        bank.restore(predictor_snapshot)
+        return bank
 
     def add_observation(
         self,

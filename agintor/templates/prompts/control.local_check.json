@@ -1,5 +1,5 @@
 {
-  "prompt_id": "control.local_check.v1",
+  "prompt_id": "control.local_check",
   "description": "Cheap local self-check for a candidate artifact.",
   "instructions": "Check the artifact for obvious incompleteness, missing fields, or unsupported claims. Return only structured data.",
   "model_class": "small",
@@ -13,3 +13,4 @@
     "issues": ["string"]
   }
 }
+

@@ -1,0 +1,17 @@
+{
+  "prompt_id": "control.repo_check",
+  "description": "Repository-level contract check for externally visible artifacts.",
+  "instructions": "Assess whether the artifact satisfies the expected benchmark or repository contract. Return only structured data.",
+  "model_class": "small",
+  "max_output_tokens": 300,
+  "allowed_tools": [],
+  "input_schema": {
+    "artifact": {},
+    "expected": {}
+  },
+  "output_schema": {
+    "passed": "boolean",
+    "issues": ["string"]
+  }
+}
+

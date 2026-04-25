@@ -12,7 +12,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -49,10 +48,10 @@ from ..utils import count_tokens_rough, ensure_directory, merge_provider_usage, 
 
 class SideEffectsMixin:
     def _persist_side_effect_receipt(self, receipt: SideEffectReceipt) -> None:
-        self.shell.save_side_effect_receipt(model_validate(SideEffectReceipt, receipt))
+        self.shell.save_side_effect_receipt((SideEffectReceipt).model_validate(receipt))
 
     def _record_side_effect_receipt(self, context: PolicyContext, receipt: SideEffectReceipt) -> None:
-        normalized = model_validate(SideEffectReceipt, receipt)
+        normalized = (SideEffectReceipt).model_validate(receipt)
         self.shell.save_side_effect_receipt(normalized)
         deduped: list[dict[str, Any]] = []
         for payload in context.state.side_effect_receipts:
@@ -61,7 +60,7 @@ class SideEffectsMixin:
             if same_idempotency and same_kind and is_terminal_receipt(normalized):
                 continue
             deduped.append(payload)
-        deduped.append(model_dump(normalized))
+        deduped.append((normalized).model_dump())
         context.state.side_effect_receipts = deduped
 
     def _reconcile_side_effect_receipts(
@@ -200,7 +199,7 @@ class SideEffectsMixin:
                         reconciliation_status="terminalized_from_provider_hook",
                         reconciliation_source="resume_reconciliation",
                         reconciliation_details={"idempotency_key": receipt.idempotency_key},
-                        result_ref_updates=model_dump(reconciled) if hasattr(reconciled, "model_dump") else dict(reconciled),
+                        result_ref_updates=(reconciled).model_dump() if hasattr(reconciled, "model_dump") else dict(reconciled),
                     )
                     append_resolved(terminalized)
                     context.record(
@@ -213,7 +212,7 @@ class SideEffectsMixin:
             if receipt.action_kind == "filesystem_write":
                 reconciliation_state = self._filesystem_write_reconciliation_state(receipt)
                 if reconciliation_state == "completed":
-                    reconciled_receipt = receipt.copy(update={"status": "reconciled"}, deep=True)
+                    reconciled_receipt = receipt.model_copy(update={"status": "reconciled"}, deep=True)
                     append_resolved(reconciled_receipt)
                     context.record(
                         "side_effect_reconciled",

@@ -1,5 +1,5 @@
 {
-  "prompt_id": "tool.spec_generate.v1",
+  "prompt_id": "tool.spec_generate",
   "description": "Generate a deterministic tool expression and description.",
   "instructions": "Return only JSON with keys expression and description for a deterministic Python tool. Favor the simplest correct expression and keep the interface explicit.",
   "model_class": "medium",
@@ -14,3 +14,4 @@
     "description": "string"
   }
 }
+

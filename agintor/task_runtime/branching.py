@@ -11,7 +11,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -80,7 +79,7 @@ class BranchingMixin:
             branch_rank=int(getattr(context.active_frame, "metadata", {}).get("merge_priority", 0) or 0),
             payload=dict(payload),
         )
-        context.state.branch_publications.append(model_dump(publication))
+        context.state.branch_publications.append((publication).model_dump())
         return publication
 
     def _candidate_artifact_publication(
@@ -105,7 +104,7 @@ class BranchingMixin:
         frame: AgentFrame,
     ) -> list[dict[str, Any]] | None:
         branch_states = [
-            model_validate(BranchState, payload)
+            (BranchState).model_validate(payload)
             for payload in context.state.branch_states.values()
             if str(payload.get("parent_frame_id", "")) == frame.frame_id
         ]
@@ -123,7 +122,7 @@ class BranchingMixin:
         if any(branch_state.status not in {"completed", "cancelled"} for branch_state in branch_states):
             return None
         publications = [
-            model_validate(BranchPublication, payload)
+            (BranchPublication).model_validate(payload)
             for payload in context.state.branch_publications
         ]
         worker_outputs: list[dict[str, Any]] = []
@@ -153,7 +152,7 @@ class BranchingMixin:
     ) -> list[BranchResumeSnapshot]:
         snapshots: list[BranchResumeSnapshot] = []
         for payload in context.state.branch_resume_snapshots.values():
-            snapshot = model_validate(BranchResumeSnapshot, payload)
+            snapshot = (BranchResumeSnapshot).model_validate(payload)
             if snapshot.branch_plan.parent_frame_id != frame.frame_id:
                 continue
             snapshots.append(snapshot)
@@ -171,7 +170,7 @@ class BranchingMixin:
             if str(payload.get("side_effect_id", ""))
         }
         for receipt in receipts:
-            payload = model_dump(receipt)
+            payload = (receipt).model_dump()
             by_id[payload["side_effect_id"]] = payload
         context.state.side_effect_receipts = list(by_id.values())
 
@@ -192,14 +191,14 @@ class BranchingMixin:
     @staticmethod
     def _branch_publications_snapshot(branch_context: PolicyContext) -> list[BranchPublication]:
         return [
-            model_validate(BranchPublication, payload)
+            (BranchPublication).model_validate(payload)
             for payload in branch_context.state.branch_publications
         ]
 
     @staticmethod
     def _branch_receipts_snapshot(branch_context: PolicyContext) -> list[SideEffectReceipt]:
         return [
-            model_validate(SideEffectReceipt, payload)
+            (SideEffectReceipt).model_validate(payload)
             for payload in branch_context.state.side_effect_receipts
         ]
 
@@ -209,7 +208,7 @@ class BranchingMixin:
         branch_context: PolicyContext,
     ) -> BranchResumeSnapshot:
         return BranchResumeSnapshot(
-            branch_plan=model_copy(branch_plan, deep=True),
+            branch_plan=(branch_plan).model_copy(deep=True),
             execution_state=branch_context.state.execution_state,
             active_frame=self._frame_payload(branch_context.active_frame)
             if branch_context.active_frame is not None
@@ -246,9 +245,7 @@ class BranchingMixin:
         branch_plan: BranchPlan,
         branch_context: PolicyContext,
     ) -> None:
-        parent_context.state.branch_resume_snapshots[branch_plan.branch_id] = model_dump(
-            self._branch_resume_snapshot(branch_plan, branch_context)
-        )
+        parent_context.state.branch_resume_snapshots[branch_plan.branch_id] = (self._branch_resume_snapshot(branch_plan, branch_context)).model_dump()
 
     def _restore_branch_resume_snapshot(
         self,
@@ -264,7 +261,7 @@ class BranchingMixin:
         branch_context.state.open_handle_ids = list(snapshot.open_handle_ids)
         branch_context.state.plan_node_status = dict(snapshot.plan_node_status)
         branch_context.state.branch_publications = [
-            model_dump(publication)
+            (publication).model_dump()
             for publication in snapshot.branch_publications
         ]
         branch_context.state.created_tools = snapshot.created_tools
@@ -296,7 +293,7 @@ class BranchingMixin:
             receipts,
             branch_id=snapshot.branch_plan.branch_id,
         )
-        branch_context.state.side_effect_receipts = [model_dump(receipt) for receipt in receipts]
+        branch_context.state.side_effect_receipts = [(receipt).model_dump() for receipt in receipts]
         for node_id in blocked_node_ids:
             if branch_context.state.plan_node_status.get(node_id) != "completed":
                 branch_context.state.plan_node_status[node_id] = "recovery_blocked"
@@ -341,7 +338,7 @@ class BranchingMixin:
         budget_consumed = self._branch_budget_consumed(branch_context)
         if "exceeded reserved budget" in message:
             return "reservation_exceeded", {
-                "reserved_budget": model_dump(branch_plan.reserved_budget),
+                "reserved_budget": (branch_plan.reserved_budget).model_dump(),
                 "budget_consumed": budget_consumed,
             }
         if any(
@@ -430,20 +427,20 @@ class BranchingMixin:
             return
         updated_publications: list[dict[str, Any]] = []
         for payload in context.state.branch_publications:
-            publication = model_validate(BranchPublication, payload)
+            publication = (BranchPublication).model_validate(payload)
             if publication.publication_id in accepted_ids:
-                publication = publication.copy(update={"accepted": True}, deep=True)
-            updated_publications.append(model_dump(publication))
+                publication = publication.model_copy(update={"accepted": True}, deep=True)
+            updated_publications.append((publication).model_dump())
         context.state.branch_publications = updated_publications
         for branch_id, payload in list(context.state.branch_states.items()):
-            branch_state = model_validate(BranchState, payload)
+            branch_state = (BranchState).model_validate(payload)
             branch_state.publications = [
-                publication.copy(update={"accepted": True}, deep=True)
+                publication.model_copy(update={"accepted": True}, deep=True)
                 if publication.publication_id in accepted_ids
                 else publication
                 for publication in branch_state.publications
             ]
-            context.state.branch_states[branch_id] = model_dump(branch_state)
+            context.state.branch_states[branch_id] = (branch_state).model_dump()
 
     def _apply_branch_group_results(
         self,
@@ -461,14 +458,14 @@ class BranchingMixin:
         faults = 0
         failed_results: list[BranchResult] = []
         for branch_result in branch_results:
-            context.state.branch_states[branch_result.branch_plan.branch_id] = model_dump(branch_result.branch_state)
+            context.state.branch_states[branch_result.branch_plan.branch_id] = (branch_result.branch_state).model_dump()
             self._merge_provider_usage_into(provider_usage_ledger, branch_result.provider_usage)
             existing_publication_ids = {
                 str(payload.get("publication_id", ""))
                 for payload in context.state.branch_publications
             }
             for publication in branch_result.branch_state.publications:
-                payload = model_dump(publication)
+                payload = (publication).model_dump()
                 if payload["publication_id"] in existing_publication_ids:
                     continue
                 context.state.branch_publications.append(payload)

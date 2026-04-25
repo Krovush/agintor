@@ -5,8 +5,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-
-from .pydantic_compat import model_copy
 from .schemas import ArchiveEntry, ArchiveRecord, ObjectiveKind, ObjectiveSpec, RuntimeDescriptor, SuiteEvaluation
 from .utils import mean, normalize01, softmax, stable_hash
 
@@ -199,7 +197,7 @@ class QualityDiversityArchive:
             interface_diff_mask=interface_diff_mask or interface_bitmask(scope),
         )
         bucket = self._complexity_bucket(descriptor)
-        return model_copy(descriptor, update={"complexity_bucket": bucket, "code_hash": code_hash})
+        return (descriptor).model_copy(update={"complexity_bucket": bucket, "code_hash": code_hash})
 
     def _cell_key(self, objective: str, descriptor: RuntimeDescriptor, scope: Sequence[str]) -> str:
         return stable_hash(objective, descriptor.interface_diff_mask, descriptor.behavior_bin, descriptor.scope_tag, descriptor.complexity_bucket)

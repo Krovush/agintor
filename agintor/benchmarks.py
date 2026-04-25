@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from pydantic import BaseModel
-
-from .pydantic_compat import model_copy, model_validate
 from .schemas import BenchmarkTask, OperationSpec
 
 
@@ -21,7 +19,7 @@ class BenchmarkSuite:
     proxy: list[BenchmarkTask]
 
     def all_tasks(self, partition: str = "train") -> list[BenchmarkTask]:
-        return [model_copy(task, deep=True) for task in getattr(self, partition)]
+        return [(task).model_copy(deep=True) for task in getattr(self, partition)]
 
     def task_family_map(self, partition: str) -> dict[str, str]:
         return {task.task_id: task.family for task in self.all_tasks(partition)}
@@ -30,7 +28,7 @@ class BenchmarkSuite:
         for partition in ("train", "val", "test", "proxy"):
             for task in getattr(self, partition):
                 if task.task_id == task_id:
-                    return model_copy(task, deep=True)
+                    return (task).model_copy(deep=True)
         raise KeyError(task_id)
 
     def representative_family_tasks(self, family: str, partition: str = "train", limit: int = 4) -> list[BenchmarkTask]:
@@ -385,15 +383,12 @@ def unregister_suite_provider(name: str) -> None:
 
 
 def _suite_from_payload(data: dict[str, Any], source: str) -> BenchmarkSuite:
-    schema_version = str(data.get("schema_version", "1")).strip()
-    if schema_version not in {"1", "agintor.benchmark.v1"}:
-        raise ValueError(f"unsupported benchmark schema version {schema_version!r} from {source}")
     return BenchmarkSuite(
         name=data["name"],
-        train=[model_validate(BenchmarkTask, item) for item in data["train"]],
-        val=[model_validate(BenchmarkTask, item) for item in data["val"]],
-        test=[model_validate(BenchmarkTask, item) for item in data["test"]],
-        proxy=[model_validate(BenchmarkTask, item) for item in data["proxy"]],
+        train=[(BenchmarkTask).model_validate(item) for item in data["train"]],
+        val=[(BenchmarkTask).model_validate(item) for item in data["val"]],
+        test=[(BenchmarkTask).model_validate(item) for item in data["test"]],
+        proxy=[(BenchmarkTask).model_validate(item) for item in data["proxy"]],
     )
 
 

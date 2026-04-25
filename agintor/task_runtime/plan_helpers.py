@@ -12,7 +12,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -190,7 +189,7 @@ class PlanHelpersMixin:
         return any(state.plan_node_status.get(node.node_id) != "completed" for node in plan.nodes)
 
     def _validate_execution_plan(self, plan: ExecutionPlan) -> ExecutionPlan:
-        return model_validate(ExecutionPlan, model_dump(plan))
+        return (ExecutionPlan).model_validate((plan).model_dump())
 
     @staticmethod
     def _node_operation_kind(node: PlanNode) -> str:

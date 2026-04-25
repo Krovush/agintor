@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .exceptions import BranchCancelled, HardInvalidation, PromptAdaptationError
-from .pydantic_compat import model_copy, model_dump, model_validate
 from .providers import ModelProvider
 from .runtime_profile import RuntimeProfile, default_runtime_profile
 from .schemas import (
@@ -63,6 +62,7 @@ _PROMPT_ABSOLUTE_PATH_RE = re.compile(r"(?P<path>(?:[A-Za-z]:[\\/]|/)[^\n\r\t\"'
 _URL_RE = re.compile(r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+)", re.IGNORECASE)
 _HTTP_METHOD_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\b", re.IGNORECASE)
 _TRAILING_PATH_PUNCTUATION = "\"'`,;:!?)]}"
+_PATH_CLAUSE_BOUNDARY_WORDS = "to|and|using|then|that|which|please|for|by|with|while"
 _REPO_PATCH_TOKENS = (
     "edit",
     "modify",
@@ -270,25 +270,27 @@ class PolicyContext:
         if hasattr(self.shell, "append_runtime_event"):
             runtime_event = self.shell.append_runtime_event(runtime_event)
         else:
-            runtime_event = model_copy(
-                runtime_event,
-                update={"sequence_no": int(self.state.event_sequence_no or 0) + 1},
-                deep=True,
-            )
+            runtime_event = (runtime_event).model_copy(update={"sequence_no": int(self.state.event_sequence_no or 0) + 1}, deep=True)
         self.state.event_sequence_no = max(int(self.state.event_sequence_no or 0), int(runtime_event.sequence_no or 0))
         self.trace.append(runtime_event.trace_row())
 
     def consume_model_response(self, response: ModelResponse, purpose: str) -> None:
         self.budget.consume_model_response(response)
+        trace_call_id = str(response.trace_call_id or response.raw.get("trace_call_id") or "").strip()
+        event_payload: dict[str, Any] = {
+            "purpose": purpose,
+            "model_class": response.model_name,
+            "input_tokens": response.input_tokens,
+            "output_tokens": response.output_tokens,
+            "total_tokens": response.token_estimate,
+            "dollar_cost": response.dollar_cost,
+            "latency_s": response.latency_s,
+        }
+        if trace_call_id:
+            event_payload["trace_call_id"] = trace_call_id
         self.record(
             "model_response",
-            purpose=purpose,
-            model_class=response.model_name,
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
-            total_tokens=response.token_estimate,
-            dollar_cost=response.dollar_cost,
-            latency_s=response.latency_s,
+            **event_payload,
         )
 
     def derive_trace_context(self, **updates: Any) -> OpenAITraceContext:
@@ -313,12 +315,12 @@ class PolicyContext:
             metadata={
                 "mode": purpose,
                 "payload": dict(payload or {}),
-                "trace_context": model_dump(effective_trace_context),
+                "trace_context": (effective_trace_context).model_dump(),
             },
         )
 
     def record_side_effect(self, receipt: SideEffectReceipt) -> None:
-        self.state.side_effect_receipts.append(model_dump(receipt))
+        self.state.side_effect_receipts.append((receipt).model_dump())
         self.record(
             "side_effect_recorded",
             side_effect_id=receipt.side_effect_id,
@@ -351,13 +353,13 @@ class PolicyContext:
         if self.budget.remaining_model_calls() <= 0:
             raise HardInvalidation(f"model-call budget exhausted before provider request for {purpose}")
         effective_trace_context = trace_context or self.trace_context
-        idempotency_trace_context = model_dump(effective_trace_context)
+        idempotency_trace_context = (effective_trace_context).model_dump()
         idempotency_trace_context.pop("run_node_id", None)
         request_digest = stable_hash(instructions, prompt, model_class, payload or {}, idempotency_trace_context)
         unresolved_launch = False
         terminal_receipt: SideEffectReceipt | None = None
         for receipt_payload in self.state.side_effect_receipts:
-            receipt = model_validate(SideEffectReceipt, receipt_payload)
+            receipt = (SideEffectReceipt).model_validate(receipt_payload)
             if receipt.idempotency_key != request_digest:
                 continue
             if is_terminal_receipt(receipt):
@@ -378,6 +380,7 @@ class PolicyContext:
                     text=str(result_ref.get("text", "")),
                     raw={"replayed_from_receipt": terminal_receipt.side_effect_id},
                     model_name=result_ref.get("model_name"),
+                    trace_call_id=str(result_ref.get("trace_call_id") or "").strip() or None,
                     input_tokens=int(result_ref.get("input_tokens", 0) or 0),
                     output_tokens=int(result_ref.get("output_tokens", 0) or 0),
                     token_estimate=int(result_ref.get("input_tokens", 0) or 0) + int(result_ref.get("output_tokens", 0) or 0),
@@ -447,6 +450,7 @@ class PolicyContext:
             result_ref={
                 "text": response.text,
                 "model_name": response.model_name,
+                "trace_call_id": str(response.trace_call_id or response.raw.get("trace_call_id") or "").strip() or None,
                 "input_tokens": response.input_tokens,
                 "output_tokens": response.output_tokens,
                 "token_estimate": response.token_estimate,
@@ -502,7 +506,7 @@ def _trim_prompt_path_to_absolute_candidate(raw_path: str) -> str | None:
     if path.is_absolute() and path.exists():
         return str(path.resolve())
     extension_match = re.match(
-        r"^(?P<path>.+\.[A-Za-z0-9]{1,8})(?=(?:\s+(?:to|and|using|then|that|which|please|for)\b|$))",
+        rf"^(?P<path>.+\.[A-Za-z0-9]{{1,8}})(?=(?:\s+(?:{_PATH_CLAUSE_BOUNDARY_WORDS})\b|$))",
         candidate,
         flags=re.IGNORECASE,
     )
@@ -511,7 +515,7 @@ def _trim_prompt_path_to_absolute_candidate(raw_path: str) -> str | None:
         if Path(trimmed).expanduser().is_absolute():
             return str(Path(trimmed).expanduser().resolve(strict=False))
     clause_patterns = (
-        r"\s+(?:to|and|using|then|that|which|please|for)\b.*$",
+        rf"\s+(?:{_PATH_CLAUSE_BOUNDARY_WORDS})\b.*$",
         r"[,:;].*$",
     )
     for pattern in clause_patterns:
@@ -594,7 +598,7 @@ def load_solve_request(prompt: str | None = None, prompt_file: str | Path | None
         verification_preference = "verified_if_available"
     initial_file_paths = _coerce_string_list(payload.get("file_paths"))
     request_file_refs = [
-        model_validate(RequestFileRef, row)
+        (RequestFileRef).model_validate(row)
         for row in payload.get("request_file_refs", [])
         if isinstance(row, Mapping)
     ] or [
@@ -612,7 +616,7 @@ def load_solve_request(prompt: str | None = None, prompt_file: str | Path | None
         "budget_overrides": dict(payload.get("budget_overrides", {})) if isinstance(payload.get("budget_overrides", {}), dict) else {},
     }
     request_id_payload = dict(request_payload)
-    request_id_payload["request_file_refs"] = [model_dump(file_ref) for file_ref in request_file_refs]
+    request_id_payload["request_file_refs"] = [(file_ref).model_dump() for file_ref in request_file_refs]
     request_id = str(payload.get("request_id", "")).strip() or f"solve.{stable_hash(request_id_payload)[:12]}"
     return SolveRequest(request_id=request_id, **request_payload)
 
@@ -712,6 +716,22 @@ def evaluation_unit_id_for_invocation(
     return normalize_benchmark_request_id(task.task_id, seed, duplicate_ordinal=duplicate_ordinal)
 
 
+def benchmark_task_episode_kind(task: BenchmarkTask) -> str:
+    return "transfer_episode" if task.transfer_scored and str(task.episode_id or "").strip() else "single_task"
+
+
+def benchmark_task_episode_step_index(task: BenchmarkTask) -> int | None:
+    if benchmark_task_episode_kind(task) != "transfer_episode":
+        return None
+    return int(getattr(task, "episode_order", 0) or 0)
+
+
+def trace_context_field(parent: OpenAITraceContext | None, field_name: str) -> Any:
+    if parent is None:
+        return None
+    return getattr(parent, field_name, None)
+
+
 def batch_evaluation_unit_key(invocation: RuntimeTaskInvocation) -> str:
     episode_kind = str(getattr(invocation, "episode_kind", "") or "single_task").strip()
     if episode_kind == "transfer_episode":
@@ -744,6 +764,9 @@ def build_trace_context(
     runtime_dir: str | None = None,
     task_id: str | None = None,
     seed: int | None = None,
+    evaluation_unit_id: str | None = None,
+    episode_kind: str | None = None,
+    episode_step_index: int | None = None,
     objective: str | None = None,
     session_id: str | None = None,
     build_id: str | None = None,
@@ -757,12 +780,15 @@ def build_trace_context(
         task_id=task_id,
         seed=seed,
         request_id=request_id,
+        evaluation_unit_id=evaluation_unit_id,
+        episode_kind=episode_kind,
+        episode_step_index=episode_step_index,
         objective=objective,
     )
 
 
 def derive_trace_context(parent: OpenAITraceContext | None, **updates: Any) -> OpenAITraceContext:
-    payload = model_dump(parent) if parent is not None else {}
+    payload = (parent).model_dump() if parent is not None else {}
     for key, value in updates.items():
         if value is not None:
             payload[key] = value
@@ -777,6 +803,9 @@ def runtime_trace_context(
     runtime_dir: str | None = None,
     task_id: str | None = None,
     seed: int | None = None,
+    evaluation_unit_id: str | None = None,
+    episode_kind: str | None = None,
+    episode_step_index: int | None = None,
     objective: str | None = None,
 ) -> OpenAITraceContext:
     return derive_trace_context(
@@ -787,8 +816,33 @@ def runtime_trace_context(
         runtime_dir=runtime_dir,
         task_id=task_id,
         seed=seed,
+        evaluation_unit_id=evaluation_unit_id,
+        episode_kind=episode_kind,
+        episode_step_index=episode_step_index,
         objective=objective,
     )
+
+
+def runtime_task_materialization_key(
+    *,
+    request_id: str,
+    task_id: str | None = None,
+    seed: int | None = None,
+    evaluation_unit_id: str | None = None,
+    episode_kind: str | None = None,
+    episode_step_index: int | None = None,
+) -> str:
+    unit = str(evaluation_unit_id or request_id).strip() or request_id
+    parts = [unit]
+    if task_id:
+        parts.append(str(task_id))
+    if seed is not None:
+        parts.append(f"seed_{int(seed)}")
+    if episode_kind:
+        parts.append(str(episode_kind))
+    if episode_step_index is not None:
+        parts.append(f"step_{int(episode_step_index)}")
+    return ".".join(part.replace("/", "_") for part in parts if str(part).strip())
 
 
 def execution_plan_requires_default_provider(plan: ExecutionPlan) -> bool:
@@ -934,7 +988,7 @@ def _compile_request_file_ref(path_text: str) -> RequestFileRef:
 
 def _compiled_request_file_refs(request: SolveRequest) -> list[RequestFileRef]:
     if request.request_file_refs:
-        return [model_validate(RequestFileRef, model_dump(ref)) for ref in request.request_file_refs]
+        return [(RequestFileRef).model_validate((ref).model_dump()) for ref in request.request_file_refs]
     explicit = _dedupe_prompt_paths(list(request.file_paths))
     raw_paths = explicit or _dedupe_prompt_paths(_extract_prompt_file_paths(request.prompt))
     return [_compile_request_file_ref(path) for path in raw_paths]
@@ -1116,7 +1170,7 @@ def solve_request_to_task(request: SolveRequest) -> BenchmarkTask:
             template_kind="direct_answer",
             file_paths=source_file_paths,
         ),
-        "request_file_refs": [model_dump(file_ref) for file_ref in file_ref_specs],
+        "request_file_refs": [(file_ref).model_dump() for file_ref in file_ref_specs],
         "request_file_runtime_paths": runtime_file_paths,
     }
     numbers = _parse_number_list(prompt)
@@ -1664,7 +1718,7 @@ def _attach_branch_groups(nodes: Sequence[PlanNode]) -> tuple[list[PlanNode], di
         for node in grouped_nodes:
             branch_assignments[node.node_id] = group_id
     updated_nodes = [
-        model_copy(node, update={"branch_group_id": branch_assignments.get(node.node_id)})
+        (node).model_copy(update={"branch_group_id": branch_assignments.get(node.node_id)})
         for node in nodes
     ]
     return updated_nodes, grouped_members
@@ -1717,7 +1771,7 @@ def _append_merge_nodes(nodes: Sequence[PlanNode], grouped_members: Mapping[str,
             for merge_dependency in extra_dependencies:
                 if merge_dependency not in merged_dependencies:
                     merged_dependencies.append(merge_dependency)
-            adjusted_nodes.append(model_copy(node, update={"dependencies": merged_dependencies}))
+            adjusted_nodes.append((node).model_copy(update={"dependencies": merged_dependencies}))
         else:
             adjusted_nodes.append(node)
     return adjusted_nodes
@@ -1833,7 +1887,7 @@ def _compile_plan_nodes(task: BenchmarkTask) -> tuple[list[PlanNode], dict[str, 
                 )
             )
         for binding_payload in binding_overrides_by_node.get(operation.op_id, []):
-            input_bindings.append(model_validate(InputBinding, binding_payload))
+            input_bindings.append((InputBinding).model_validate(binding_payload))
         nodes.append(
             PlanNode(
                 node_id=operation.op_id,
@@ -1882,6 +1936,10 @@ def compile_execution_plan_from_task(
     has_terminal_outputs = bool(terminal_output_keys)
     root_node_ids = [node.node_id for node in nodes if not node.dependencies]
     file_ref_specs = _task_file_ref_specs(task)
+    episode_kind = trace_context_field(trace_context, "episode_kind") or benchmark_task_episode_kind(task)
+    episode_step_index = trace_context_field(trace_context, "episode_step_index")
+    if episode_step_index is None:
+        episode_step_index = benchmark_task_episode_step_index(task)
     plan_trace_context = runtime_trace_context(
         trace_context,
         request_id=request_id,
@@ -1889,6 +1947,9 @@ def compile_execution_plan_from_task(
         runtime_dir=runtime_dir,
         task_id=task.task_id,
         seed=seed,
+        evaluation_unit_id=trace_context_field(trace_context, "evaluation_unit_id") or request_id,
+        episode_kind=episode_kind,
+        episode_step_index=episode_step_index,
         objective=task.prompt,
     )
     exact_verifier_exists = str(task.verifier_type or "").strip().lower() not in {"", "none"}
@@ -1952,7 +2013,7 @@ def _task_file_ref_specs(task: BenchmarkTask) -> list[RequestFileRef]:
     payload = task.metadata.get("request_file_refs", [])
     if isinstance(payload, list) and payload:
         return [
-            model_validate(RequestFileRef, row)
+            (RequestFileRef).model_validate(row)
             for row in payload
             if isinstance(row, Mapping)
         ]
@@ -1975,6 +2036,8 @@ def compile_execution_plan_from_solve_request(
         runtime_dir=runtime_dir,
         task_id=task.task_id,
         seed=seed,
+        evaluation_unit_id=getattr(trace_context, "evaluation_unit_id", None) or solve_request.request_id,
+        episode_kind=getattr(trace_context, "episode_kind", None) or "user_request",
         objective=solve_request.prompt,
     )
     return (
@@ -2025,8 +2088,8 @@ def prompt_mode_request_requires_default_provider(
 def resume_task_and_plan_from_checkpoint(
     envelope: CheckpointEnvelope,
 ) -> tuple[BenchmarkTask, ExecutionPlan]:
-    task = model_validate(BenchmarkTask, envelope.task_payload)
-    plan = model_validate(ExecutionPlan, envelope.plan_snapshot)
+    task = (BenchmarkTask).model_validate(envelope.task_payload)
+    plan = (ExecutionPlan).model_validate(envelope.plan_snapshot)
     return task, plan
 
 
@@ -2156,7 +2219,7 @@ def rebind_checkpoint_envelope_for_resume(
     active_request_id: str,
     source_checkpoint_ref: str | None = None,
 ) -> CheckpointEnvelope:
-    payload = model_dump(model_copy(envelope, deep=True))
+    payload = ((envelope).model_copy(deep=True)).model_dump()
     original_request_id = (
         str(payload.get("origin_request_id") or payload.get("request_id") or "").strip()
         or str(envelope.request_id)
@@ -2164,7 +2227,7 @@ def rebind_checkpoint_envelope_for_resume(
     payload["request_id"] = active_request_id
     payload["origin_request_id"] = original_request_id
     payload["source_checkpoint_ref"] = (
-        str(payload.get("source_checkpoint_ref") or source_checkpoint_ref or "").strip() or None
+        str(source_checkpoint_ref or payload.get("source_checkpoint_ref") or "").strip() or None
     )
     plan_snapshot = dict(payload.get("plan_snapshot") or {})
     plan_snapshot["request_id"] = active_request_id
@@ -2207,15 +2270,21 @@ def rebind_checkpoint_envelope_for_resume(
         if receipt_payload is not None
     ]
     payload["side_effect_ledger"] = side_effect_ledger
-    payload["working_state_summary"] = _rebind_request_id_mirrors(
-        payload.get("working_state_summary", {}),
+    payload.pop("working_state_summary", None)
+    payload["working_state"] = _rebind_request_id_mirrors(
+        payload.get("working_state", {}),
         active_request_id,
     )
-    payload["trace_cursor"] = _rebind_request_id_mirrors(
+    trace_cursor = _rebind_request_id_mirrors(
         payload.get("trace_cursor", {}),
         active_request_id,
     )
-    return model_validate(CheckpointEnvelope, payload)
+    if isinstance(trace_cursor, Mapping):
+        trace_cursor = dict(trace_cursor)
+        if str(trace_cursor.get("last_solve_request_id") or "").strip() in {"", original_request_id}:
+            trace_cursor["last_solve_request_id"] = active_request_id
+    payload["trace_cursor"] = trace_cursor
+    return (CheckpointEnvelope).model_validate(payload)
 
 
 def solve_request_from_resume_checkpoint(
@@ -2241,10 +2310,10 @@ def solve_request_from_resume_checkpoint(
 
     payload = bundle.get("payload")
     if bundle.get("request_kind") == "runtime_solve_request" and isinstance(payload, Mapping):
-        original_request = model_validate(RuntimeSolveRequest, dict(payload))
+        original_request = (RuntimeSolveRequest).model_validate(dict(payload))
         if original_request.mode == "user_request" and original_request.solve_request is not None:
-            solve_request = model_validate(SolveRequest, model_dump(original_request.solve_request))
-            return model_copy(solve_request, update={"request_id": effective_request_id}), rebound_envelope, effective_request_id
+            solve_request = (SolveRequest).model_validate((original_request.solve_request).model_dump())
+            return (solve_request).model_copy(update={"request_id": effective_request_id}), rebound_envelope, effective_request_id
 
     raise ValueError(
         "resume for user_request checkpoints requires the stored runtime_solve_request envelope with solve_request payload"
@@ -2396,7 +2465,6 @@ def runtime_solve_failure_response(
                 "code": fault_code,
                 "contract_error": True,
             },
-            recoverability="checkpoint_available" if latest_checkpoint_ref else "none",
             verified=False,
             best_effort=False,
         ),
@@ -2407,16 +2475,12 @@ def inspect_request_for_runtime(
     *,
     request_id: str,
     requested_backend: str,
-    runtime_abi: str,
-    kernel_version: str,
-    storage_schema_version: str,
+    runtime_contract_version: str,
 ) -> InspectRequest:
     return InspectRequest(
         request_id=request_id,
         requested_backend=requested_backend,
-        expected_runtime_abi=runtime_abi,
-        expected_kernel_version=kernel_version,
-        expected_storage_schema_version=storage_schema_version,
+        expected_runtime_contract_version=runtime_contract_version,
     )
 
 
@@ -2430,9 +2494,17 @@ def runtime_solve_request_for_task(
     trace_context: OpenAITraceContext | None = None,
 ) -> RuntimeSolveRequest:
     normalized_request_id = request_id or normalize_benchmark_request_id(task.task_id, seed)
+    episode_kind = trace_context_field(trace_context, "episode_kind") or benchmark_task_episode_kind(task)
+    episode_step_index = trace_context_field(trace_context, "episode_step_index")
+    if episode_step_index is None:
+        episode_step_index = benchmark_task_episode_step_index(task)
+    evaluation_unit_id = (
+        trace_context_field(trace_context, "evaluation_unit_id")
+        or evaluation_unit_id_for_invocation(task, seed, episode_kind=episode_kind)
+    )
     return RuntimeSolveRequest(
         request_id=normalized_request_id,
-        evaluation_unit_id=normalized_request_id,
+        evaluation_unit_id=evaluation_unit_id,
         runtime_backend=runtime_backend,
         mode="benchmark",
         seed=int(seed),
@@ -2441,6 +2513,9 @@ def runtime_solve_request_for_task(
         trace_context=runtime_trace_context(
             trace_context,
             request_id=normalized_request_id,
+            evaluation_unit_id=evaluation_unit_id,
+            episode_kind=episode_kind,
+            episode_step_index=episode_step_index,
             task_id=task.task_id,
             seed=seed,
             objective=task.prompt,
@@ -2457,7 +2532,7 @@ def runtime_solve_request_for_user_request(
 ) -> RuntimeSolveRequest:
     effective_solve_request = solve_request
     if not solve_request.request_file_refs:
-        effective_solve_request = solve_request.copy(
+        effective_solve_request = solve_request.model_copy(
             update={
                 "request_file_refs": _compiled_request_file_refs(solve_request),
                 "file_paths": _request_file_source_paths(solve_request),
@@ -2474,6 +2549,8 @@ def runtime_solve_request_for_user_request(
         trace_context=runtime_trace_context(
             trace_context,
             request_id=effective_solve_request.request_id,
+            evaluation_unit_id=effective_solve_request.request_id,
+            episode_kind="user_request",
             seed=seed,
             objective=effective_solve_request.prompt,
         ),
@@ -2528,6 +2605,9 @@ def runtime_batch_request_for_tasks(
                 task=task,
                 trace_context=runtime_trace_context(
                     request_id=request_key,
+                    evaluation_unit_id=evaluation_unit_id,
+                    episode_kind=episode_kind,
+                    episode_step_index=episode_step_index,
                     task_id=task.task_id,
                     seed=seed,
                     objective=task.prompt,
@@ -2541,6 +2621,8 @@ def runtime_batch_request_for_tasks(
         invocations=invocations,
         trace_context=runtime_trace_context(
             request_id=request_id,
+            evaluation_unit_id=request_id,
+            episode_kind="batch",
         ),
     )
 
@@ -2599,11 +2681,6 @@ def solve_result_from_run_result_with_context(
         verification_status = "best_effort"
         summary = "The runtime produced a best-effort artifact without exact verification."
     latest_checkpoint_ref = run.latest_checkpoint_ref or run.checkpoint_ref
-    recoverability = "none"
-    if latest_checkpoint_ref:
-        recoverability = "checkpoint_available"
-    elif not run.hard_invalid and not controlled_failure:
-        recoverability = "terminal"
     return SolveResult(
         request_id=request.request_id,
         runtime_hash=runtime_hash,
@@ -2638,7 +2715,6 @@ def solve_result_from_run_result_with_context(
             "invalid_reason": run.invalid_reason,
             "failure_kind": run.failure_kind,
         },
-        recoverability=recoverability,
         verified=verified,
         best_effort=best_effort,
     )

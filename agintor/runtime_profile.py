@@ -7,16 +7,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .pydantic_compat import model_dump, model_validate
-
 
 RUNTIME_PROFILE_FILE = "runtime_profile.json"
 
 
 class PromptProfile(BaseModel):
-    mutation_patch: str = "evolve.mutator_patch.v1"
-    memory_summary: str = "memory.span_summarize.v1"
-    tool_spec: str = "tool.spec_generate.v1"
+    mutation_patch: str = "evolve.mutator_patch"
+    memory_summary: str = "memory.span_summarize"
+    tool_spec: str = "tool.spec_generate"
 
 
 class HostedProviderProfile(BaseModel):
@@ -208,7 +206,7 @@ class ControlProfile(BaseModel):
 
 class RuntimeProfile(BaseModel):
     prompts: PromptProfile = Field(default_factory=PromptProfile)
-    runtime_provider: HostedProviderProfile = Field(default_factory=HostedProviderProfile, alias="provider")
+    runtime_provider: HostedProviderProfile = Field(default_factory=HostedProviderProfile)
     execution: ExecutionProfile = Field(default_factory=ExecutionProfile)
     evaluation: EvaluationProfile = Field(default_factory=EvaluationProfile)
     evolution: EvolutionProfile = Field(default_factory=EvolutionProfile)
@@ -216,9 +214,6 @@ class RuntimeProfile(BaseModel):
     memory: MemoryProfile = Field(default_factory=MemoryProfile)
     tooling: ToolingProfile = Field(default_factory=ToolingProfile)
     control: ControlProfile = Field(default_factory=ControlProfile)
-
-    class Config:
-        allow_population_by_field_name = True
 
 
 _RUNTIME_ONLY_KEYS = ("prompts", "runtime_provider", "execution", "topology", "memory", "tooling", "control")
@@ -254,19 +249,8 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
-def _normalize_legacy_profile_keys(payload: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(payload)
-    legacy_provider = normalized.pop("provider", None)
-    if isinstance(legacy_provider, dict):
-        runtime_provider = normalized.get("runtime_provider", {})
-        if not isinstance(runtime_provider, dict):
-            runtime_provider = {}
-        normalized["runtime_provider"] = _deep_merge(runtime_provider, legacy_provider)
-    return normalized
-
-
 def default_runtime_profile() -> RuntimeProfile:
-    return model_validate(RuntimeProfile, _default_profile_dict())
+    return (RuntimeProfile).model_validate(_default_profile_dict())
 
 
 def load_runtime_profile(
@@ -280,8 +264,7 @@ def load_runtime_profile(
         merged = _deep_merge(merged, json.loads(runtime_profile.read_text(encoding="utf-8")))
     if profile_path is not None:
         merged = _deep_merge(merged, json.loads(Path(profile_path).read_text(encoding="utf-8")))
-    merged = _normalize_legacy_profile_keys(merged)
-    return model_validate(RuntimeProfile, merged)
+    return (RuntimeProfile).model_validate(merged)
 
 
 def resolve_runtime_profile(
@@ -298,7 +281,7 @@ def resolve_runtime_profile(
 
 
 def runtime_profile_payload(profile: RuntimeProfile) -> dict[str, Any]:
-    payload = model_dump(profile)
+    payload = (profile).model_dump()
     prompts = payload.get("prompts", {})
     runtime_prompts = {
         key: prompts[key]
@@ -314,16 +297,6 @@ def runtime_profile_payload(profile: RuntimeProfile) -> dict[str, Any]:
     return runtime_payload
 
 
-def factory_profile_payload(profile: RuntimeProfile) -> dict[str, Any]:
-    payload = model_dump(profile)
-    prompts = payload.get("prompts", {})
-    return {
-        "prompts": {"mutation_patch": prompts.get("mutation_patch", PromptProfile().mutation_patch)},
-        "evaluation": payload.get("evaluation", {}),
-        "evolution": payload.get("evolution", {}),
-    }
-
-
 def profile_to_json(profile: RuntimeProfile, *, runtime_only: bool = False) -> str:
-    payload = runtime_profile_payload(profile) if runtime_only else model_dump(profile)
+    payload = runtime_profile_payload(profile) if runtime_only else (profile).model_dump()
     return json.dumps(payload, indent=2, sort_keys=True)

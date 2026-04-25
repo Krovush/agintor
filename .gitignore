@@ -1,4 +1,5 @@
 /agintor.egg-info/
+/.venv/
 /tests/_artifacts/
 /tests/_artifacts/**
 /tests/_artifacts/run_*/

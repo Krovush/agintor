@@ -22,7 +22,6 @@ from ..runtime_api import (
     normalize_benchmark_request_id,
 )
 from ..runtime_loader import LoadedRuntime
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -182,8 +181,8 @@ class TaskRuntime(ExecutionLoopMixin, CheckpointingMixin, SideEffectsMixin, Bran
         *,
         reconciliation_policy: str = "strict",
     ) -> RunResult:
-        task = model_validate(BenchmarkTask, envelope.task_payload)
-        plan = model_validate(ExecutionPlan, envelope.plan_snapshot)
+        task = (BenchmarkTask).model_validate(envelope.task_payload)
+        plan = (ExecutionPlan).model_validate(envelope.plan_snapshot)
         return self._run_execution_plan(
             task,
             plan,

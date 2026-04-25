@@ -1,5 +1,5 @@
 {
-  "prompt_id": "control.subtree_check.v1",
+  "prompt_id": "control.subtree_check",
   "description": "Check whether child outputs support a merge decision.",
   "instructions": "Inspect the child outputs and report whether the merge has enough support, which gaps remain, and what should be verified next. Return only structured data.",
   "model_class": "small",
@@ -14,3 +14,4 @@
     "next_checks": ["string"]
   }
 }
+

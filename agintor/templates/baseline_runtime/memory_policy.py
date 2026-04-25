@@ -200,7 +200,7 @@ class MemoryPolicy:
         graph = ctx.shell.long_term
         if action == "merge" and target_id is not None:
             existing = graph.nodes[target_id]
-            merged = existing.copy(
+            merged = existing.model_copy(
                 update={
                     "content": existing.content if len(existing.content) >= len(unit.content) else unit.content,
                     "symbol_set": sorted(set(existing.symbol_set) | set(unit.symbol_set)),
@@ -212,7 +212,7 @@ class MemoryPolicy:
             return
         if action == "refine" and target_id is not None:
             existing = graph.nodes[target_id]
-            refined = existing.copy(
+            refined = existing.model_copy(
                 update={
                     "content": unit.content,
                     "embedding": unit.embedding,

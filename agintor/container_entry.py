@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 from .providers import build_provider_from_payload
-from .pydantic_compat import model_dump, model_validate
 from .runner import TaskRuntime
 from .runtime_profile import load_runtime_profile
 from .runtime_loader import load_runtime
@@ -36,7 +35,7 @@ def _run_runtime_batch(args: argparse.Namespace) -> int:
         if not isinstance(item, dict):
             raise ValueError("task runs entries must be JSON objects")
         seed = int(item["seed"])
-        task = model_validate(BenchmarkTask, item["task"])
+        task = (BenchmarkTask).model_validate(item["task"])
         runner = runners_by_seed.get(seed)
         if runner is None:
             shell = FixedShell(
@@ -53,7 +52,7 @@ def _run_runtime_batch(args: argparse.Namespace) -> int:
         results.append(runner.run_task(task, seed))
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps([model_dump(result) for result in results], indent=2, sort_keys=True), encoding="utf-8")
+    output_path.write_text(json.dumps([(result).model_dump() for result in results], indent=2, sort_keys=True), encoding="utf-8")
     return 0
 
 

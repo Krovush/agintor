@@ -206,6 +206,35 @@ def _deterministic_tool_spec_payload(prompt: str, payload: Mapping[str, Any]) ->
     }
 
 
+def _deterministic_repo_patch_payload(prompt: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    target_paths = [str(path).strip() for path in payload.get("target_file_paths", []) if str(path).strip()]
+    snapshots: list[dict[str, Any]] = []
+    marker = "Target files:"
+    if marker in prompt:
+        snapshot_text = prompt.rsplit(marker, 1)[1].strip()
+        try:
+            loaded = json.loads(snapshot_text)
+            if isinstance(loaded, list):
+                snapshots = [dict(item) for item in loaded if isinstance(item, Mapping)]
+        except Exception:
+            snapshots = []
+    snapshot_by_path = {str(item.get("path", "")).strip(): item for item in snapshots if str(item.get("path", "")).strip()}
+    files: list[dict[str, str]] = []
+    for path in target_paths or sorted(snapshot_by_path):
+        current = str(snapshot_by_path.get(path, {}).get("content", ""))
+        suffix = "\n" if current and not current.endswith("\n") else ""
+        files.append(
+            {
+                "path": path,
+                "updated_content": f"{current}{suffix}Local deterministic repo_patch update.\n",
+            }
+        )
+    return {
+        "summary": "Applied deterministic local repo patch.",
+        "files": files,
+    }
+
+
 def _prompt_excerpt(prompt: str, *, words: int) -> str:
     tokens = [token for token in str(prompt or "").split() if token]
     return " ".join(tokens[:words]).strip()
@@ -273,6 +302,9 @@ class LocalDeterministicProvider(ModelProvider):
         elif mode == "tool_spec":
             payload = request.metadata.get("payload", {})
             text = json.dumps(_deterministic_tool_spec_payload(request.prompt, payload), sort_keys=True)
+        elif mode == "repo_patch":
+            payload = request.metadata.get("payload", {})
+            text = json.dumps(_deterministic_repo_patch_payload(request.prompt, payload), sort_keys=True)
         elif mode == "user_request":
             payload = request.metadata.get("payload", {})
             output_schema = payload.get("output_schema", {})

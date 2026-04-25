@@ -12,7 +12,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -93,8 +92,8 @@ class ExecutionLoopMixin:
                     provider_usage=provider_usage,
                 )
 
-            task = model_copy(task, deep=True)
-            plan = model_copy(plan, deep=True)
+            task = (task).model_copy(deep=True)
+            plan = (plan).model_copy(deep=True)
             episode_scope = None
             if task.transfer_scored:
                 episode_scope = f"{getattr(task, 'episode_id', None) or task.task_id}::seed::{seed}"
@@ -175,7 +174,7 @@ class ExecutionLoopMixin:
                 context.record("plan_validation_failed", error=str(exc), failure_class="plan_validation")
                 context.record("run_failed", error=str(exc), failure_class="plan_validation", failure_kind="plan_validation_failed")
                 return build_result({"error": "plan_validation_failed"}, 0.0, faults, True, str(exc), "plan_validation_failed")
-            plan = model_copy(plan, update={"lifecycle_state": "validated"})
+            plan = (plan).model_copy(update={"lifecycle_state": "validated"})
             context.plan = plan
             context.record("plan_loaded", root_node_ids=list(plan.root_node_ids), terminal_output_keys=list(plan.terminal_output_keys))
             self._ingest_context(context)
@@ -450,7 +449,7 @@ class ExecutionLoopMixin:
                         role=child.role,
                         tool_scope=tool_scope,
                         model_class=child.model_class,
-                        metadata={"child_spec": model_dump(child), "parent_run_node_id": frame.metadata.get("run_node_id")},
+                        metadata={"child_spec": (child).model_dump(), "parent_run_node_id": frame.metadata.get("run_node_id")},
                     )
                 )
             self._schedule_root_continuation(context, frame, append=True)

@@ -18,7 +18,6 @@ from .providers import ModelProvider
 from .prompt_builder import METHOD_CONTRACTS
 from .runtime_loader import load_runtime
 from .runtime_profile import RuntimeProfile, load_runtime_profile, resolve_runtime_profile
-from .pydantic_compat import model_dump
 from .schemas import EvolutionHistoryRow, ObjectiveSpec
 from .trace_labeler import extract_predictor_observations
 from .utils import ensure_directory, mean, stable_hash
@@ -427,14 +426,14 @@ class EvolutionEngine:
             self.scheduler.note_iteration([row.scope] if row.accepted else [])
             self._validation_tick(step)
         history_path = self.workspace / "evolution_history.json"
-        history_path.write_text(json.dumps([model_dump(row) for row in self.history], indent=2), encoding="utf-8")
+        history_path.write_text(json.dumps([(row).model_dump() for row in self.history], indent=2), encoding="utf-8")
         archive_index_path = self.workspace / "archive_index.json"
         archive_records = sorted(
             self.archive.cells.values(),
             key=lambda record: (record.objective, record.key),
         )
         archive_index_path.write_text(
-            json.dumps([model_dump(record) for record in archive_records], indent=2),
+            json.dumps([(record).model_dump() for record in archive_records], indent=2),
             encoding="utf-8",
         )
         validation_history_path = self.workspace / "validation_history.json"
@@ -442,7 +441,7 @@ class EvolutionEngine:
         stage_failures_path = self.workspace / "stage_failures.json"
         stage_failures = []
         for row in self.history:
-            failures = [model_dump(stage) for stage in row.stage_results if not stage.passed]
+            failures = [(stage).model_dump() for stage in row.stage_results if not stage.passed]
             if not failures:
                 continue
             stage_failures.append(

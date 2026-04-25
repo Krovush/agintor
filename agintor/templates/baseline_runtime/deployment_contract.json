@@ -1,9 +1,7 @@
 {
   "entry_command": "agintor solve <runtime_dir> --prompt \"<request>\"",
-  "runtime_abi": "agintor-runtime-abi-v5",
-  "kernel_version": "agintor-kernel-v1",
-  "storage_schema_version": "agintor-storage-v3",
-  "python_version": ">=3.11",
+  "runtime_contract_version": "0.1.0",
+  "python_version": ">=3.12",
   "supported_backends": [
     "local",
     "docker"

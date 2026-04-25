@@ -11,7 +11,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -144,7 +143,7 @@ class ToolingMixin:
         unresolved_launch = False
         terminal_receipt: SideEffectReceipt | None = None
         for receipt_payload in context.state.side_effect_receipts:
-            receipt = model_validate(SideEffectReceipt, receipt_payload)
+            receipt = (SideEffectReceipt).model_validate(receipt_payload)
             if receipt.idempotency_key != side_effect_key:
                 continue
             if is_terminal_receipt(receipt):
@@ -207,7 +206,7 @@ class ToolingMixin:
                 )
             )
             context.publish_checkpoint_boundary("after_tool_launch")
-            handle_node_id = self.shell.short_term.add_node("OpenHandle", handle.tool_name, model_dump(handle))
+            handle_node_id = self.shell.short_term.add_node("OpenHandle", handle.tool_name, (handle).model_dump())
             if run_node_id and run_node_id in self.shell.short_term.nodes:
                 self.shell.short_term.add_edge(run_node_id, handle_node_id, "WAITS_ON")
             context.raise_if_cancelled()

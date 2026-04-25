@@ -6,43 +6,80 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from .artifacts import ArtifactMode
-from .exceptions import AgintorError, PromptAdaptationError
-from .providers import build_provider_from_payload
-from .pydantic_compat import model_dump, model_validate
-from .run_store import RunStore
-from .runner import TaskRuntime
-from .runtime_api import (
-    batch_evaluation_unit_key,
-    benchmark_task_to_solve_request,
-    compile_execution_plan_from_solve_request,
-    compile_execution_plan_from_task,
-    reduce_grouped_run_results,
-    resume_task_and_plan_from_checkpoint,
-    runtime_solve_failure_response,
-    solve_request_from_resume_checkpoint,
-    solve_result_from_run_result_with_context,
-    synthesize_blocked_episode_run,
-)
-from .runtime_loader import load_runtime
-from .runtime_profile import load_runtime_profile
-from .schemas import (
-    BenchmarkTask,
-    CapabilityExchange,
-    ExecutionPlan,
-    InspectRequest,
-    ResumeRequest,
-    RunResult,
-    RuntimeBatchRequest,
-    RuntimeBatchResponse,
-    RuntimeResumeRequest,
-    RuntimeSolveRequest,
-    RuntimeSolveResponse,
-    RuntimeTaskInvocation,
-    SolveRequest,
-)
-from .shell import FixedShell
-from .utils import merge_provider_usage
+if __package__ == "agintor.runtime_sdk":
+    from ..artifacts import ArtifactMode
+    from ..exceptions import AgintorError, PromptAdaptationError
+    from ..providers import build_provider_from_payload
+    from ..run_store import RunStore
+    from ..runner import TaskRuntime
+    from ..runtime_api import (
+        batch_evaluation_unit_key,
+        benchmark_task_to_solve_request,
+        compile_execution_plan_from_solve_request,
+        compile_execution_plan_from_task,
+        reduce_grouped_run_results,
+        resume_task_and_plan_from_checkpoint,
+        runtime_solve_failure_response,
+        solve_request_from_resume_checkpoint,
+        solve_result_from_run_result_with_context,
+        synthesize_blocked_episode_run,
+    )
+    from ..runtime_loader import load_runtime
+    from ..runtime_profile import load_runtime_profile
+    from ..schemas import (
+        BenchmarkTask,
+        CapabilityExchange,
+        ExecutionPlan,
+        InspectRequest,
+        ResumeRequest,
+        RunResult,
+        RuntimeBatchRequest,
+        RuntimeBatchResponse,
+        RuntimeResumeRequest,
+        RuntimeSolveRequest,
+        RuntimeSolveResponse,
+        RuntimeTaskInvocation,
+        SolveRequest,
+    )
+    from ..shell import FixedShell
+    from ..utils import merge_provider_usage
+else:
+    from .artifacts import ArtifactMode
+    from .exceptions import AgintorError, PromptAdaptationError
+    from .providers import build_provider_from_payload
+    from .run_store import RunStore
+    from .runner import TaskRuntime
+    from .runtime_api import (
+        batch_evaluation_unit_key,
+        benchmark_task_to_solve_request,
+        compile_execution_plan_from_solve_request,
+        compile_execution_plan_from_task,
+        reduce_grouped_run_results,
+        resume_task_and_plan_from_checkpoint,
+        runtime_solve_failure_response,
+        solve_request_from_resume_checkpoint,
+        solve_result_from_run_result_with_context,
+        synthesize_blocked_episode_run,
+    )
+    from .runtime_loader import load_runtime
+    from .runtime_profile import load_runtime_profile
+    from .schemas import (
+        BenchmarkTask,
+        CapabilityExchange,
+        ExecutionPlan,
+        InspectRequest,
+        ResumeRequest,
+        RunResult,
+        RuntimeBatchRequest,
+        RuntimeBatchResponse,
+        RuntimeResumeRequest,
+        RuntimeSolveRequest,
+        RuntimeSolveResponse,
+        RuntimeTaskInvocation,
+        SolveRequest,
+    )
+    from .shell import FixedShell
+    from .utils import merge_provider_usage
 
 
 def _solve_failure_code(exc: Exception) -> str:
@@ -133,30 +170,17 @@ def _request_envelope(bundle: Mapping[str, Any] | None) -> Mapping[str, Any]:
 
 
 def _inspect_runtime(args: argparse.Namespace) -> int:
-    request = model_validate(
-        InspectRequest,
-        json.loads(Path(args.input_json).read_text(encoding="utf-8")),
-    )
+    request = (InspectRequest).model_validate(json.loads(Path(args.input_json).read_text(encoding="utf-8")))
     runtime = load_runtime(args.runtime_dir, runtime_backend=request.requested_backend)
-    if runtime.manifest.metadata.get("runtime_abi") != request.expected_runtime_abi:
-        raise ValueError("runtime ABI mismatch during inspect")
-    if request.expected_kernel_version and runtime.kernel_manifest.kernel_version != request.expected_kernel_version:
-        raise ValueError("kernel version mismatch during inspect")
-    if (
-        request.expected_storage_schema_version
-        and runtime.kernel_manifest.storage_schema_version != request.expected_storage_schema_version
-    ):
-        raise ValueError("storage schema mismatch during inspect")
-    payload = model_dump(runtime.capability_exchange)
+    if runtime.kernel_manifest.runtime_contract_version != request.expected_runtime_contract_version:
+        raise ValueError("runtime contract mismatch during inspect")
+    payload = (runtime.capability_exchange).model_dump()
     Path(args.output_json).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return 0
 
 
 def _run_batch(args: argparse.Namespace) -> int:
-    request = model_validate(
-        RuntimeBatchRequest,
-        json.loads(Path(args.input_json).read_text(encoding="utf-8")),
-    )
+    request = (RuntimeBatchRequest).model_validate(json.loads(Path(args.input_json).read_text(encoding="utf-8")))
     runtime_profile = load_runtime_profile(args.runtime_dir, profile_path=args.profile_json)
     provider_payload_data = json.loads(Path(args.provider_json).read_text(encoding="utf-8"))
     provider = build_provider_from_payload(provider_payload_data, provider_profile=runtime_profile.runtime_provider)
@@ -168,7 +192,7 @@ def _run_batch(args: argparse.Namespace) -> int:
     results_by_index: dict[int, RunResult] = {}
     runners_by_group: dict[str, TaskRuntime] = {}
     indexed_invocations = [
-        (index, model_validate(RuntimeTaskInvocation, model_dump(invocation_payload)))
+        (index, (RuntimeTaskInvocation).model_validate(invocation_payload))
         for index, invocation_payload in enumerate(request.invocations)
     ]
     grouped: dict[str, list[tuple[int, RuntimeTaskInvocation]]] = {}
@@ -224,7 +248,7 @@ def _run_batch(args: argparse.Namespace) -> int:
                 continue
             try:
                 run_result = runner.run_task(
-                    model_validate(BenchmarkTask, model_dump(invocation.task)),
+                    (BenchmarkTask).model_validate((invocation.task).model_dump()),
                     invocation.seed,
                     request_id=invocation.request_id,
                     trace_context=invocation.trace_context,
@@ -241,26 +265,23 @@ def _run_batch(args: argparse.Namespace) -> int:
     results = [results_by_index[index] for index in sorted(results_by_index)]
     response = RuntimeBatchResponse(
         request_id=request.request_id,
-        capability_exchange=CapabilityExchange(**model_dump(runtime.capability_exchange)),
+        capability_exchange=CapabilityExchange(**(runtime.capability_exchange).model_dump()),
         run_results=results,
         provider_usage=merge_provider_usage(*(run.provider_usage for run in results)),
     )
-    Path(args.output_json).write_text(json.dumps(model_dump(response), indent=2, sort_keys=True), encoding="utf-8")
+    Path(args.output_json).write_text(json.dumps((response).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
     return 0
 
 
 def _solve(args: argparse.Namespace) -> int:
-    request = model_validate(
-        RuntimeSolveRequest,
-        json.loads(Path(args.input_json).read_text(encoding="utf-8")),
-    )
+    request = (RuntimeSolveRequest).model_validate(json.loads(Path(args.input_json).read_text(encoding="utf-8")))
     runtime_profile = load_runtime_profile(args.runtime_dir, profile_path=args.profile_json)
     runtime = load_runtime(
         args.runtime_dir,
         runtime_profile=runtime_profile,
         runtime_backend=request.runtime_backend,
     )
-    capability_exchange = CapabilityExchange(**model_dump(runtime.capability_exchange))
+    capability_exchange = CapabilityExchange(**(runtime.capability_exchange).model_dump())
     provider_payload_data = json.loads(Path(args.provider_json).read_text(encoding="utf-8"))
     provider = None
     solve_request: SolveRequest | None = None
@@ -268,7 +289,7 @@ def _solve(args: argparse.Namespace) -> int:
         if request.mode == "benchmark":
             if request.task is None:
                 raise ValueError("benchmark solve requires a task payload")
-            task = model_validate(BenchmarkTask, model_dump(request.task))
+            task = (BenchmarkTask).model_validate((request.task).model_dump())
             solve_request = benchmark_task_to_solve_request(task, request_id=request.request_id)
             execution_plan = compile_execution_plan_from_task(
                 task,
@@ -282,7 +303,7 @@ def _solve(args: argparse.Namespace) -> int:
         else:
             if request.solve_request is None:
                 raise ValueError("user_request solve requires a solve_request payload")
-            solve_request = model_validate(SolveRequest, model_dump(request.solve_request))
+            solve_request = (SolveRequest).model_validate((request.solve_request).model_dump())
             task, execution_plan = compile_execution_plan_from_solve_request(
                 solve_request,
                 seed=request.seed,
@@ -333,9 +354,9 @@ def _solve(args: argparse.Namespace) -> int:
             raise
         if solve_request is None:
             solve_request = (
-                benchmark_task_to_solve_request(model_validate(BenchmarkTask, model_dump(request.task)), request_id=request.request_id)
+                benchmark_task_to_solve_request((BenchmarkTask).model_validate((request.task).model_dump()), request_id=request.request_id)
                 if request.mode == "benchmark" and request.task is not None
-                else model_validate(SolveRequest, model_dump(request.solve_request))
+                else (SolveRequest).model_validate((request.solve_request).model_dump())
                 if request.solve_request is not None
                 else SolveRequest(request_id=request.request_id, prompt="Runtime solve request")
             )
@@ -357,22 +378,19 @@ def _solve(args: argparse.Namespace) -> int:
             attempt_id=request.attempt_id,
             latest_checkpoint_ref=_latest_usable_checkpoint_ref(request.run_root),
         )
-    Path(args.output_json).write_text(json.dumps(model_dump(response), indent=2, sort_keys=True), encoding="utf-8")
+    Path(args.output_json).write_text(json.dumps((response).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
     return 0
 
 
 def _resume(args: argparse.Namespace) -> int:
-    request = model_validate(
-        RuntimeResumeRequest,
-        json.loads(Path(args.input_json).read_text(encoding="utf-8")),
-    )
+    request = (RuntimeResumeRequest).model_validate(json.loads(Path(args.input_json).read_text(encoding="utf-8")))
     runtime_profile = load_runtime_profile(args.runtime_dir, profile_path=args.profile_json)
     runtime = load_runtime(
         args.runtime_dir,
         runtime_profile=runtime_profile,
         runtime_backend=request.runtime_backend,
     )
-    capability_exchange = CapabilityExchange(**model_dump(runtime.capability_exchange))
+    capability_exchange = CapabilityExchange(**(runtime.capability_exchange).model_dump())
     provider_payload_data = json.loads(Path(args.provider_json).read_text(encoding="utf-8"))
     provider = None
     solve_request: SolveRequest | None = None
@@ -460,7 +478,7 @@ def _resume(args: argparse.Namespace) -> int:
             attempt_id=request.attempt_id,
             latest_checkpoint_ref=_latest_usable_checkpoint_ref(request.run_root),
         )
-    Path(args.output_json).write_text(json.dumps(model_dump(response), indent=2, sort_keys=True), encoding="utf-8")
+    Path(args.output_json).write_text(json.dumps((response).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
     return 0
 
 

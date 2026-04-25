@@ -20,7 +20,6 @@ from .providers import ModelProvider
 from .runtime_loader import load_runtime
 from .runtime_host import RuntimeHost
 from .runtime_profile import RuntimeProfile, resolve_runtime_profile
-from .pydantic_compat import model_dump
 from .runner import TaskRuntime as TaskRuntime
 from .scoring import ScoreCalculator, estimate_reference_scales, mean_improvement
 from .schemas import EvaluationStageResult, ObjectiveKind, ObjectiveSpec, SuiteEvaluation
@@ -259,7 +258,7 @@ class RuntimeEvaluator:
         runtime = self._load_runtime(runtime_dir, runtime_profile=runtime_profile)
         task_key = ()
         if tasks_override is not None:
-            task_key = tuple(stable_hash(model_dump(task)) for task in tasks_override)
+            task_key = tuple(stable_hash((task).model_dump()) for task in tasks_override)
         cache_key = (runtime.runtime_hash, partition, tuple(seeds), task_key)
         if use_cache and cache_key in self.cache:
             return self.cache[cache_key]

@@ -7,11 +7,11 @@ name = "agintor"
 version = "0.1.0"
 description = "Agintor CLI MVP: bounded evolutionary runtime search for agent topology, memory, tooling, and control"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [{name = "OpenAI"}]
 dependencies = [
-  "pydantic>=1.10,<2",
+  "pydantic>=2,<3",
   "typer>=0.7,<1",
   "PyYAML>=6,<7",
   "numpy>=1.24,<3"

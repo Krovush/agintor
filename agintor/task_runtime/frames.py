@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from typing import Any, Mapping, Sequence
 from ..memory_graph import ShortTermGraph
 from ..runtime_api import (
@@ -12,7 +11,6 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
-from ..pydantic_compat import model_copy, model_dump, model_validate
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -62,7 +60,7 @@ class FramesMixin:
             },
         )
         if checkpoint is not None:
-            summary_id = graph.add_node("Summary", checkpoint.summary.objective, model_dump(checkpoint.summary), source="checkpoint")
+            summary_id = graph.add_node("Summary", checkpoint.summary.objective, (checkpoint.summary).model_dump(), source="checkpoint")
             graph.add_edge(run_node_id, summary_id, "CONTINUES_FROM")
         return run_node_id
 
@@ -77,23 +75,11 @@ class FramesMixin:
         parent_state = context.state
         isolated_short_term = ShortTermGraph()
         isolated_state: RuntimeState | None = None
-        tool_registry_snapshot: dict[str, Any] | None = None
-        category_snapshot: dict[str, str] | None = None
-        open_handle_snapshot: dict[str, Any] | None = None
-        long_term_snapshot: dict[str, Any] | None = None
-        predictor_observation_snapshot: dict[str, Any] | None = None
-        predictor_model_snapshot: dict[str, Any] | None = None
-        predictor_ranking_snapshot: dict[str, Any] | None = None
+        shell_snapshot: Any | None = None
         if isolate_runtime_state:
             isolated_state = self._make_isolated_state(parent_state)
             context.state = isolated_state
-            tool_registry_snapshot = copy.deepcopy(self.shell.tool_registry.tools)
-            category_snapshot = dict(self.shell.tool_registry._category_summaries)
-            open_handle_snapshot = copy.deepcopy(self.shell.open_handles.handles)
-            long_term_snapshot = copy.deepcopy(self.shell.long_term.nodes)
-            predictor_observation_snapshot = copy.deepcopy(self.shell.predictors._observations)
-            predictor_model_snapshot = copy.deepcopy(self.shell.predictors._models)
-            predictor_ranking_snapshot = copy.deepcopy(self.shell.predictors._ranking_weights)
+            shell_snapshot = self.shell.snapshot_checkpoint_shell_state(boundary="isolated_frame")
         self.shell.short_term = isolated_short_term
         try:
             frame.metadata["run_node_id"] = self._start_agent_run(isolated_short_term, frame, 0, frame.checkpoint)
@@ -106,28 +92,17 @@ class FramesMixin:
                 list(context.state.open_handle_ids),
             )
         finally:
-            self.shell.short_term = parent_short_term
             if isolate_runtime_state:
                 local_state = context.state
                 context.state = parent_state
+                if shell_snapshot is not None:
+                    self.shell.restore_checkpoint_shell_state(shell_snapshot)
                 if isolated_state is not None:
                     parent_state.created_tools += isolated_state.created_tools
                     parent_state.promoted_nodes += isolated_state.promoted_nodes
                     parent_state.checks_used += isolated_state.checks_used
-                if tool_registry_snapshot is not None:
-                    self.shell.tool_registry._tools = tool_registry_snapshot
-                if category_snapshot is not None:
-                    self.shell.tool_registry._category_summaries = category_snapshot
-                if open_handle_snapshot is not None:
-                    self.shell.open_handles.handles = open_handle_snapshot
-                if long_term_snapshot is not None:
-                    self.shell.long_term.nodes = long_term_snapshot
-                if predictor_observation_snapshot is not None:
-                    self.shell.predictors._observations = predictor_observation_snapshot
-                if predictor_model_snapshot is not None:
-                    self.shell.predictors._models = predictor_model_snapshot
-                if predictor_ranking_snapshot is not None:
-                    self.shell.predictors._ranking_weights = predictor_ranking_snapshot
+            else:
+                self.shell.short_term = parent_short_term
         self._publish_checkpoint_summary(frame, checkpoint)
         return output, local_faults, checkpoint
 
@@ -146,7 +121,7 @@ class FramesMixin:
         summary_id = self.shell.short_term.add_node(
             "Summary",
             checkpoint.summary.objective,
-            model_dump(checkpoint.summary),
+            (checkpoint.summary).model_dump(),
             agent_id=frame.agent.agent_id,
             role=frame.role,
         )
@@ -159,7 +134,7 @@ class FramesMixin:
         for handle_id in checkpoint.open_handles:
             if handle_id in self.shell.open_handles.handles:
                 handle = self.shell.open_handles.get(handle_id)
-                handle_node_id = self.shell.short_term.add_node("OpenHandle", handle.tool_name, model_dump(handle))
+                handle_node_id = self.shell.short_term.add_node("OpenHandle", handle.tool_name, (handle).model_dump())
                 self.shell.short_term.add_edge(summary_id, handle_node_id, "WAITS_ON")
 
     def _record_artifact_node(

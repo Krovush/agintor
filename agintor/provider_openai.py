@@ -194,7 +194,7 @@ class OpenAIProvider(HostedProviderBase):
             reasoning_effort=reasoning_effort,
         )
         recorded.latency_s = time.perf_counter() - start
-        persist_openai_trace(
+        trace_call_id = persist_openai_trace(
             provider=self.provider_name,
             method_name=method_name,
             model_class=model_class,
@@ -212,6 +212,9 @@ class OpenAIProvider(HostedProviderBase):
             latency_s=recorded.latency_s,
             error=None,
         )
+        recorded.trace_call_id = trace_call_id
+        if trace_call_id:
+            recorded.raw["trace_call_id"] = trace_call_id
         if record_usage:
             self._record_usage(recorded)
         return response, recorded

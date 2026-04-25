@@ -1,5 +1,5 @@
 {
-  "prompt_id": "memory.span_summarize.v1",
+  "prompt_id": "memory.span_summarize",
   "description": "Summarize short-term memory spans without losing resume-critical data.",
   "instructions": "Summarize evidence while preserving unresolved handles, artifacts, verifier-relevant facts, and next actions. Be concise and loss-averse.",
   "model_class": "small",
@@ -12,3 +12,4 @@
     "summary": "string"
   }
 }
+

@@ -1,24 +1,20 @@
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from agintor import state_store
 from agintor.container_runtime import DockerRuntimeExecutor
 from agintor.exceptions import RuntimeLoadError
 from agintor.providers import LocalDeterministicProvider
-from agintor.pydantic_compat import model_dump
 from agintor.project import init_runtime
+from agintor.run_store import RunStore
 from agintor.runtime_api import load_solve_request, runtime_solve_request_for_user_request
-from agintor.runtime_loader import (
-    KERNEL_VERSION,
-    RUNTIME_ABI_VERSION,
-    STORAGE_SCHEMA_VERSION,
-    load_runtime,
-    resolve_docker_launch_policy,
-)
+from agintor.runtime_loader import load_runtime, resolve_docker_launch_policy
 from agintor.schemas import (
     AsyncHandle,
     AttemptManifest,
@@ -27,6 +23,7 @@ from agintor.schemas import (
     CheckpointEnvelope,
     CheckpointReference,
     InspectRequest,
+    ModelRequest,
     RequestFileRef,
     RunManifest,
     RuntimeBatchRequest,
@@ -37,13 +34,13 @@ from agintor.schemas import (
     SideEffectReceipt,
     SolveResult,
 )
+from agintor.task_runtime.bounded_io import BoundedIOMixin
+from agintor.versioning import RUNTIME_CONTRACT_VERSION
 
 
 def _capability_exchange() -> CapabilityExchange:
     return CapabilityExchange(
-        runtime_abi="agintor-runtime-abi-v5",
-        kernel_version="agintor-kernel-v1",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         supported_backends=["local", "docker"],
         tool_runtimes=["python"],
         checkpoint_support=True,
@@ -77,10 +74,8 @@ def _deployment_contract_payload(
 ) -> dict[str, object]:
     return {
         "entry_command": "agintor solve <runtime_dir> --prompt \"<request>\"",
-        "runtime_abi": RUNTIME_ABI_VERSION,
-        "kernel_version": KERNEL_VERSION,
-        "storage_schema_version": STORAGE_SCHEMA_VERSION,
-        "python_version": ">=3.11",
+        "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+        "python_version": ">=3.12",
         "supported_backends": ["local", "docker"],
         "required_env_names": [],
         "environment_allowlist": [],
@@ -178,9 +173,7 @@ def test_inspect_fails_closed_before_any_subprocess_launch_on_contract_error(
     request = InspectRequest(
         request_id="inspect.1",
         requested_backend="docker",
-        expected_runtime_abi=RUNTIME_ABI_VERSION,
-        expected_kernel_version=KERNEL_VERSION,
-        expected_storage_schema_version=STORAGE_SCHEMA_VERSION,
+        expected_runtime_contract_version=RUNTIME_CONTRACT_VERSION,
     )
 
     with pytest.raises(RuntimeLoadError, match="invalid JSON"):
@@ -196,7 +189,7 @@ def test_containerize_solve_request_rewrites_durable_run_root(tmp_path: Path):
         runtime_backend="docker",
         seed=0,
         solve_request=load_solve_request(prompt="Say hello."),
-    ).copy(
+    ).model_copy(
         update={
             "run_id": "run.123",
             "run_root": str(run_root),
@@ -284,7 +277,7 @@ def test_containerize_solve_request_file_refs_rewrites_absolute_host_paths_with_
         runtime_backend="docker",
         seed=0,
         solve_request=solve_request,
-    ).copy(
+    ).model_copy(
         update={
             "run_id": "run.123",
             "run_root": str(run_root),
@@ -306,6 +299,17 @@ def test_containerize_solve_request_file_refs_rewrites_absolute_host_paths_with_
     assert request_file_ref.runtime_path.startswith("/mnt/request-files/")
     assert container_request.solve_request.file_paths == [request_file_ref.runtime_path]
     assert reverse_map[request_file_ref.runtime_path] == str(host_file.resolve())
+
+
+def test_load_solve_request_trims_space_path_before_instruction_clause(tmp_path: Path):
+    request_file = tmp_path / "request files" / "input data.txt"
+    request_file.parent.mkdir()
+    request_file.write_text("content", encoding="utf-8")
+
+    request = load_solve_request(f"Update the file at {request_file} by appending a line.")
+
+    assert request.file_paths == [str(request_file.resolve())]
+    assert request.request_file_refs[0].host_path == str(request_file.resolve())
 
 
 def test_rewrite_solve_response_paths_rewrites_request_file_artifact_paths(tmp_path: Path):
@@ -366,6 +370,17 @@ def test_container_resume_request_prefers_run_mount_for_checkpoint_paths(tmp_pat
     assert container_request.checkpoint_store_dir == "/mnt/runs"
 
 
+def test_run_store_from_mounted_run_root_accepts_host_serialized_run_root(tmp_path: Path):
+    run_root = (tmp_path / "mounted" / "runs" / "run.123").resolve()
+    run_root.mkdir(parents=True)
+    (run_root / "run_manifest.json").write_text("{}", encoding="utf-8")
+    store = RunStore.from_run_root(run_root)
+
+    resolved = store.resolve_run_root("C:\\host\\runs\\run.123")
+
+    assert resolved == run_root
+
+
 def test_resume_protocol_mounts_request_file_refs_from_checkpoint(tmp_path: Path, monkeypatch):
     runtime_dir = init_runtime(tmp_path / "runtime")
     executor = DockerRuntimeExecutor(tmp_path / "executor")
@@ -382,11 +397,9 @@ def test_resume_protocol_mounts_request_file_refs_from_checkpoint(tmp_path: Path
     checkpoint_path = checkpoint_dir / "checkpoint.resume.request-files.json"
     checkpoint_path.write_text(
         json.dumps(
-            model_dump(
-                CheckpointEnvelope(
+            (CheckpointEnvelope(
                     checkpoint_id="checkpoint.resume.request-files",
-                    runtime_abi="agintor-runtime-abi-v5",
-                    storage_schema_version="agintor-storage-v3",
+                    runtime_contract_version=RUNTIME_CONTRACT_VERSION,
                     runtime_hash="runtime-hash",
                     run_id="run.123",
                     run_root=str(run_root.resolve()),
@@ -396,20 +409,17 @@ def test_resume_protocol_mounts_request_file_refs_from_checkpoint(tmp_path: Path
                     seed=0,
                     plan_snapshot={
                         "file_ref_specs": [
-                            model_dump(
-                                RequestFileRef(
+                            (RequestFileRef(
                                     file_ref_id="file.resume.request-files",
                                     source_path=str(request_file),
                                     runtime_path=container_request_file_path,
                                     path_root="host_absolute",
                                     host_path=str(request_file.resolve()),
-                                )
-                            )
+                                )).model_dump()
                         ]
                     },
                     task_payload={},
-                )
-            ),
+                )).model_dump(),
             indent=2,
             sort_keys=True,
         ),
@@ -436,8 +446,7 @@ def test_resume_protocol_mounts_request_file_refs_from_checkpoint(tmp_path: Path
         output_path = output_dir / "resume_result.json"
         output_path.write_text(
             json.dumps(
-                model_dump(
-                    RuntimeSolveResponse(
+                (RuntimeSolveResponse(
                         request_id=request.request_id,
                         capability_exchange=_capability_exchange(),
                         solve_result=SolveResult(
@@ -449,8 +458,7 @@ def test_resume_protocol_mounts_request_file_refs_from_checkpoint(tmp_path: Path
                             verification_status="best_effort",
                             summary="ok",
                         ),
-                    )
-                ),
+                    )).model_dump(),
                 indent=2,
                 sort_keys=True,
             ),
@@ -505,6 +513,44 @@ def test_docker_run_argv_places_all_runtime_flags_before_the_image(tmp_path: Pat
     ]
 
 
+def test_bounded_write_falls_back_when_bind_mounted_file_cannot_be_replaced(tmp_path: Path, monkeypatch):
+    target = tmp_path / "mounted-file.txt"
+    target.write_text("old", encoding="utf-8")
+    original_replace = Path.replace
+
+    def busy_replace(self, target_path):
+        if Path(target_path) == target:
+            raise OSError(errno.EBUSY, "device or resource busy")
+        return original_replace(self, target_path)
+
+    monkeypatch.setattr(Path, "replace", busy_replace)
+
+    BoundedIOMixin._write_text_atomic(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_local_provider_returns_json_for_repo_patch() -> None:
+    provider = LocalDeterministicProvider()
+    response = provider.generate(
+        ModelRequest(
+            instructions="Return JSON only with keys summary and files.",
+            prompt='Update the file.\nTarget files:\n[{"path": "request file.txt", "content": "old"}]',
+            model_class="small",
+            seed=0,
+            metadata={
+                "mode": "repo_patch",
+                "payload": {"target_file_paths": ["request file.txt"]},
+            },
+        )
+    )
+
+    payload = json.loads(response.text)
+
+    assert payload["files"][0]["path"] == "request file.txt"
+    assert payload["files"][0]["updated_content"] == "old\nLocal deterministic repo_patch update.\n"
+
+
 def test_rewrite_solve_response_paths_restores_run_root_and_latest_checkpoint_ref(tmp_path: Path):
     runs_root = tmp_path / "host" / "runs"
     workspace_dir = tmp_path / "docker-workspace"
@@ -525,7 +571,6 @@ def test_rewrite_solve_response_paths_restores_run_root_and_latest_checkpoint_re
             status="best_effort",
             verification_status="best_effort",
             summary="ok",
-            recoverability="checkpoint_available",
             faults={"hard_invalid": False},
             budget={},
             provider_usage={},
@@ -552,17 +597,52 @@ def test_rewrite_solve_response_paths_restores_run_root_and_latest_checkpoint_re
     )
 
 
-def test_rewrite_durable_run_paths_rewrites_only_typed_path_fields(tmp_path: Path):
+def test_rewrite_durable_run_paths_rewrites_all_mounted_paths(tmp_path: Path):
     runs_root = tmp_path / "host" / "runs"
     checkpoint_store_dir = tmp_path / "host" / "checkpoints"
+    runtime_path = tmp_path / "host" / "runtime"
     run_root = runs_root / "run.123"
     attempt_dir = run_root / "attempts" / "attempt_0001"
     checkpoint_dir = run_root / "checkpoints"
+    request_dir = run_root / "request"
     side_effect_dir = run_root / "side_effects"
+    event_dir = run_root / "events"
+    trace_dir = run_root / "traces"
+    state_root = run_root / "state"
     checkpoint_store_dir.mkdir(parents=True)
+    runtime_path.mkdir(parents=True)
     attempt_dir.mkdir(parents=True)
     checkpoint_dir.mkdir(parents=True)
+    request_dir.mkdir(parents=True)
     side_effect_dir.mkdir(parents=True)
+    event_dir.mkdir(parents=True)
+    trace_dir.mkdir(parents=True)
+    (state_root / "working_memory").mkdir(parents=True)
+    (state_root / "recovery" / "fingerprints").mkdir(parents=True)
+    (state_root / "long_term" / "writes").mkdir(parents=True)
+    host_request_file = (tmp_path / "host files" / "input file.txt").resolve()
+    host_request_file.parent.mkdir(parents=True)
+    host_request_file.write_text("input", encoding="utf-8")
+    container_request_file = "/mnt/request-files/abc123/input file.txt"
+    request_file_reverse_map = {container_request_file: str(host_request_file)}
+    filesystem_write_ref = {
+        "output": {
+            "updated_files": [{"path": container_request_file, "diff": f"--- {container_request_file}"}],
+            "applied": True,
+        },
+        "writes": [
+            {
+                "path": container_request_file,
+                "before_exists": True,
+                "before_digest": "before",
+                "after_exists": True,
+                "after_digest": "after",
+            }
+        ],
+        "path": container_request_file,
+        "failed_path": container_request_file,
+        "runtime_dir": "/mnt/runtime",
+    }
 
     run_manifest = RunManifest(
         run_id="run.123",
@@ -594,8 +674,7 @@ def test_rewrite_durable_run_paths_rewrites_only_typed_path_fields(tmp_path: Pat
     )
     checkpoint_envelope = CheckpointEnvelope(
         checkpoint_id="checkpoint.run.123.0001",
-        runtime_abi="agintor-runtime-abi-v5",
-        storage_schema_version="agintor-storage-v3",
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         runtime_hash="hash",
         run_id="run.123",
         run_root="/mnt/runs/run.123",
@@ -606,6 +685,12 @@ def test_rewrite_durable_run_paths_rewrites_only_typed_path_fields(tmp_path: Pat
         seed=0,
         runtime_state_snapshot={
             "latest_checkpoint_ref": "/mnt/runs/run.123/checkpoints/LATEST.json",
+            "artifacts": {
+                "patch_result": {
+                    "updated_files": [{"path": container_request_file, "diff": "stub"}],
+                    "target": container_request_file,
+                }
+            },
         },
         shell_state_snapshot={
             "open_handles": [
@@ -635,53 +720,149 @@ def test_rewrite_durable_run_paths_rewrites_only_typed_path_fields(tmp_path: Pat
         side_effect_ledger={
             "receipts": [
                 SideEffectReceipt(
-                    side_effect_id="provider-request.1",
-                    action_fingerprint="provider-request.1",
-                    idempotency_key="provider-request.1",
-                    action_kind="provider_request",
-                    request_digest="provider-request.1",
+                    side_effect_id="filesystem-write.1",
+                    action_fingerprint="filesystem-write.1",
+                    idempotency_key="filesystem-write.1",
+                    action_kind="filesystem_write",
+                    request_digest="filesystem-write.1",
                     backend="docker",
-                    result_ref={"opaque_path": "/mnt/checkpoints/shared/receipt-payload-should-stay.json"},
+                    result_ref={
+                        **filesystem_write_ref,
+                        "opaque_path": "/mnt/checkpoints/shared/receipt-payload-should-stay.json",
+                    },
                 )
             ]
         },
-        working_state_summary={"opaque_path": "/mnt/checkpoints/shared/working-summary-should-stay.json"},
-        trace_cursor={"opaque_path": "/mnt/runs/run.123/trace-cursor-should-stay.json"},
+        working_state={
+            "current_objective": "/mnt/checkpoints/shared/working-summary-should-stay.json",
+            "accepted_constraints": [container_request_file],
+            "selected_checkpoint_refs": [
+                "/mnt/runs/run.123/checkpoints/LATEST.json",
+                "/mnt/checkpoints/shared/resume-source.json",
+            ],
+        },
+        trace_cursor={"materialization_state_ref": "/mnt/runs/run.123/trace-cursor-should-stay.json"},
     )
 
     (run_root / "run_manifest.json").write_text(
-        json.dumps(model_dump(run_manifest), indent=2, sort_keys=True),
+        json.dumps((run_manifest).model_dump(), indent=2, sort_keys=True),
         encoding="utf-8",
     )
     (attempt_dir / "attempt_manifest.json").write_text(
-        json.dumps(model_dump(attempt_manifest), indent=2, sort_keys=True),
+        json.dumps((attempt_manifest).model_dump(), indent=2, sort_keys=True),
         encoding="utf-8",
     )
     (checkpoint_dir / "checkpoint.run.123.0001.json").write_text(
-        json.dumps(model_dump(checkpoint_envelope), indent=2, sort_keys=True),
+        json.dumps((checkpoint_envelope).model_dump(), indent=2, sort_keys=True),
         encoding="utf-8",
     )
     (checkpoint_dir / "LATEST.json").write_text(
-        json.dumps(model_dump(checkpoint_ref), indent=2, sort_keys=True),
+        json.dumps((checkpoint_ref).model_dump(), indent=2, sort_keys=True),
         encoding="utf-8",
     )
     (checkpoint_dir / "index.json").write_text(
-        json.dumps([model_dump(checkpoint_ref)], indent=2, sort_keys=True),
+        json.dumps([(checkpoint_ref).model_dump()], indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    (request_dir / "request.json").write_text(
+        json.dumps({"request_kind": "runtime_solve_request", "payload": {"path": container_request_file}}, indent=2),
+        encoding="utf-8",
+    )
+    (request_dir / "plan.json").write_text(
+        json.dumps({"file_refs": [container_request_file]}, indent=2),
+        encoding="utf-8",
+    )
+    (request_dir / "task.json").write_text(
+        json.dumps({"file_paths": [container_request_file]}, indent=2),
+        encoding="utf-8",
+    )
+    standalone_receipt = SideEffectReceipt(
+        side_effect_id="filesystem-write.standalone",
+        action_fingerprint="filesystem-write.standalone",
+        idempotency_key="filesystem-write.standalone",
+        action_kind="filesystem_write",
+        request_digest="filesystem-write.standalone",
+        backend="docker",
+        status="completed",
+        result_ref=filesystem_write_ref,
+    )
     (side_effect_dir / "receipt.1.json").write_text(
+        json.dumps((standalone_receipt).model_dump(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    (event_dir / "000001.tool_operation.json").write_text(
         json.dumps(
-            {"result_ref": "/mnt/checkpoints/shared/side-effect-file-should-stay.json"},
+            {
+                "event_id": "event.1",
+                "request_id": "solve.1",
+                "plan_id": "plan.1",
+                "sequence_no": 1,
+                "event": "tool_operation",
+                "payload": {
+                    "path": container_request_file,
+                    "checkpoint_ref": "/mnt/runs/run.123/checkpoints/LATEST.json",
+                    "runtime_dir": "/mnt/runtime",
+                },
+            },
             indent=2,
             sort_keys=True,
         ),
         encoding="utf-8",
     )
+    (trace_dir / "trace.json").write_text(
+        json.dumps(
+            {
+                "input_path": container_request_file,
+                "message": f"read {container_request_file}",
+                "checkpoint_ref": "/mnt/runs/run.123/checkpoints/LATEST.json",
+                "runtime_dir": "/mnt/runtime",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (state_root / "working_memory" / "checkpoint.run.123.0001.json").write_text(
+        json.dumps(
+            {
+                "accepted_constraints": [container_request_file],
+                "selected_checkpoint_refs": ["/mnt/runs/run.123/checkpoints/LATEST.json"],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (state_root / "recovery" / "recovery.1.json").write_text(
+        json.dumps(
+            {
+                "recovery_attempt_id": "recovery.1",
+                "selected_checkpoint_ref": "/mnt/runs/run.123/checkpoints/LATEST.json",
+                "source_checkpoint_ref": "/mnt/checkpoints/shared/resume-source.json",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (state_root / "recovery" / "fingerprints" / "fingerprint.1.json").write_text(
+        json.dumps(
+            {"fingerprint_id": "fingerprint.1", "source_checkpoint_ref": "/mnt/runs/run.123/checkpoints/LATEST.json"},
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (state_root / "long_term" / "writes" / "checkpoint.run.123.0001.jsonl").write_text(
+        json.dumps({"write_id": "write.1", "payload_ref": container_request_file}) + "\n",
+        encoding="utf-8",
+    )
 
     DockerRuntimeExecutor._rewrite_durable_run_paths(
         run_root,
+        runtime_path=runtime_path,
         run_mount_root=runs_root,
         checkpoint_store_dir=checkpoint_store_dir,
+        request_file_reverse_map=request_file_reverse_map,
     )
 
     rewritten_run_manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
@@ -689,7 +870,22 @@ def test_rewrite_durable_run_paths_rewrites_only_typed_path_fields(tmp_path: Pat
     rewritten_checkpoint = json.loads((checkpoint_dir / "checkpoint.run.123.0001.json").read_text(encoding="utf-8"))
     rewritten_latest = json.loads((checkpoint_dir / "LATEST.json").read_text(encoding="utf-8"))
     rewritten_index = json.loads((checkpoint_dir / "index.json").read_text(encoding="utf-8"))
-    untouched_side_effect = json.loads((side_effect_dir / "receipt.1.json").read_text(encoding="utf-8"))
+    rewritten_request = json.loads((request_dir / "request.json").read_text(encoding="utf-8"))
+    rewritten_plan = json.loads((request_dir / "plan.json").read_text(encoding="utf-8"))
+    rewritten_task = json.loads((request_dir / "task.json").read_text(encoding="utf-8"))
+    rewritten_side_effect = json.loads((side_effect_dir / "receipt.1.json").read_text(encoding="utf-8"))
+    rewritten_event = json.loads((event_dir / "000001.tool_operation.json").read_text(encoding="utf-8"))
+    rewritten_trace = json.loads((trace_dir / "trace.json").read_text(encoding="utf-8"))
+    rewritten_working_memory = json.loads(
+        (state_root / "working_memory" / "checkpoint.run.123.0001.json").read_text(encoding="utf-8")
+    )
+    rewritten_recovery = json.loads((state_root / "recovery" / "recovery.1.json").read_text(encoding="utf-8"))
+    rewritten_fingerprint = json.loads(
+        (state_root / "recovery" / "fingerprints" / "fingerprint.1.json").read_text(encoding="utf-8")
+    )
+    rewritten_write_log = json.loads(
+        (state_root / "long_term" / "writes" / "checkpoint.run.123.0001.jsonl").read_text(encoding="utf-8")
+    )
 
     assert rewritten_run_manifest["run_root"] == str(run_root.resolve())
     assert rewritten_run_manifest["latest_checkpoint_ref"] == str((checkpoint_dir / "LATEST.json").resolve())
@@ -704,16 +900,17 @@ def test_rewrite_durable_run_paths_rewrites_only_typed_path_fields(tmp_path: Pat
     assert rewritten_checkpoint["attempt_snapshot"]["resumed_from_checkpoint_ref"] == str(
         (checkpoint_store_dir / "shared" / "resume-source.json").resolve()
     )
-    assert rewritten_checkpoint["shell_state_snapshot"]["open_handles"][0]["working_directory"] == str(
+    rewritten_handles = rewritten_checkpoint["shell_state_snapshot"]["open_handles"]["handles"]
+    assert rewritten_handles[0]["working_directory"] == str(
         (attempt_dir / "workspace").resolve()
     )
-    assert rewritten_checkpoint["shell_state_snapshot"]["open_handles"][0]["stdout_path"] == str(
+    assert rewritten_handles[0]["stdout_path"] == str(
         (attempt_dir / "workspace" / "stdout.txt").resolve()
     )
-    assert rewritten_checkpoint["shell_state_snapshot"]["open_handles"][0]["stderr_path"] == str(
+    assert rewritten_handles[0]["stderr_path"] == str(
         (attempt_dir / "workspace" / "stderr.txt").resolve()
     )
-    assert rewritten_checkpoint["shell_state_snapshot"]["open_handles"][0]["artifact_refs"] == [
+    assert rewritten_handles[0]["artifact_refs"] == [
         str((run_root / "artifacts" / "result.json").resolve()),
         str((checkpoint_store_dir / "shared" / "handle-output.json").resolve()),
     ]
@@ -721,12 +918,90 @@ def test_rewrite_durable_run_paths_rewrites_only_typed_path_fields(tmp_path: Pat
     assert rewritten_latest["run_root"] == str(run_root.resolve())
     assert rewritten_index[0]["ref"] == str((checkpoint_dir / "checkpoint.run.123.0001.json").resolve())
     assert rewritten_index[0]["run_root"] == str(run_root.resolve())
+    assert rewritten_checkpoint["runtime_state_snapshot"]["artifacts"]["patch_result"]["target"] == str(
+        host_request_file
+    )
+    assert rewritten_checkpoint["runtime_state_snapshot"]["artifacts"]["patch_result"]["updated_files"][0]["path"] == str(
+        host_request_file
+    )
+    checkpoint_receipt_ref = rewritten_checkpoint["side_effect_ledger"]["receipts"][0]["result_ref"]
+    assert checkpoint_receipt_ref["path"] == str(host_request_file)
+    assert checkpoint_receipt_ref["failed_path"] == str(host_request_file)
+    assert checkpoint_receipt_ref["runtime_dir"] == str(runtime_path.resolve())
+    assert checkpoint_receipt_ref["writes"][0]["path"] == str(host_request_file)
+    assert checkpoint_receipt_ref["output"]["updated_files"][0]["path"] == str(host_request_file)
+    assert checkpoint_receipt_ref["output"]["updated_files"][0]["diff"] == f"--- {host_request_file}"
     assert (
-        rewritten_checkpoint["side_effect_ledger"]["receipts"][0]["result_ref"]["opaque_path"]
-        == "/mnt/checkpoints/shared/receipt-payload-should-stay.json"
+        checkpoint_receipt_ref["opaque_path"]
+        == str((checkpoint_store_dir / "shared" / "receipt-payload-should-stay.json").resolve())
     )
-    assert rewritten_checkpoint["working_state_summary"]["opaque_path"] == (
-        "/mnt/checkpoints/shared/working-summary-should-stay.json"
+    assert rewritten_checkpoint["working_state"]["accepted_constraints"] == [str(host_request_file)]
+    assert rewritten_checkpoint["working_state"]["selected_checkpoint_refs"] == [
+        str((checkpoint_dir / "LATEST.json").resolve()),
+        str((checkpoint_store_dir / "shared" / "resume-source.json").resolve()),
+    ]
+    assert rewritten_checkpoint["working_state"]["current_objective"] == (
+        str((checkpoint_store_dir / "shared" / "working-summary-should-stay.json").resolve())
     )
-    assert rewritten_checkpoint["trace_cursor"]["opaque_path"] == "/mnt/runs/run.123/trace-cursor-should-stay.json"
-    assert untouched_side_effect["result_ref"] == "/mnt/checkpoints/shared/side-effect-file-should-stay.json"
+    assert rewritten_checkpoint["trace_cursor"]["materialization_state_ref"] == str(
+        (run_root / "trace-cursor-should-stay.json").resolve()
+    )
+    assert rewritten_request["payload"]["path"] == str(host_request_file)
+    assert rewritten_plan["file_refs"] == [str(host_request_file)]
+    assert rewritten_task["file_paths"] == [str(host_request_file)]
+    assert rewritten_side_effect["result_ref"]["path"] == str(host_request_file)
+    assert rewritten_side_effect["result_ref"]["runtime_dir"] == str(runtime_path.resolve())
+    assert rewritten_side_effect["result_ref"]["writes"][0]["path"] == str(host_request_file)
+    assert rewritten_event["payload"]["path"] == str(host_request_file)
+    assert rewritten_event["payload"]["checkpoint_ref"] == str((checkpoint_dir / "LATEST.json").resolve())
+    assert rewritten_event["payload"]["runtime_dir"] == str(runtime_path.resolve())
+    assert rewritten_trace["input_path"] == str(host_request_file)
+    assert rewritten_trace["message"] == f"read {host_request_file}"
+    assert rewritten_trace["checkpoint_ref"] == str((checkpoint_dir / "LATEST.json").resolve())
+    assert rewritten_trace["runtime_dir"] == str(runtime_path.resolve())
+    assert rewritten_working_memory["accepted_constraints"] == [str(host_request_file)]
+    assert rewritten_working_memory["selected_checkpoint_refs"] == [str((checkpoint_dir / "LATEST.json").resolve())]
+    assert rewritten_recovery["selected_checkpoint_ref"] == str((checkpoint_dir / "LATEST.json").resolve())
+    assert rewritten_recovery["source_checkpoint_ref"] == str(
+        (checkpoint_store_dir / "shared" / "resume-source.json").resolve()
+    )
+    assert rewritten_fingerprint["source_checkpoint_ref"] == str((checkpoint_dir / "LATEST.json").resolve())
+    assert rewritten_write_log["payload_ref"] == str(host_request_file)
+    store = state_store.open_state_store(run_root)
+    with store._connection() as conn:
+        receipt_row = conn.execute(
+            "SELECT result_ref_json FROM receipts WHERE side_effect_id = ?",
+            ("filesystem-write.standalone",),
+        ).fetchone()
+        artifact_row = conn.execute(
+            "SELECT artifact_ref FROM artifacts WHERE receipt_id = ? AND artifact_kind = ?",
+            ("filesystem-write.standalone", "path"),
+        ).fetchone()
+        event_row = conn.execute(
+            "SELECT payload_json FROM runtime_events WHERE event_id = ?",
+            ("event.1",),
+        ).fetchone()
+    assert receipt_row is not None
+    assert json.loads(receipt_row["result_ref_json"])["path"] == str(host_request_file)
+    assert artifact_row is not None
+    assert artifact_row["artifact_ref"] == str(host_request_file)
+    assert event_row is not None
+    assert json.loads(event_row["payload_json"])["payload"]["path"] == str(host_request_file)
+    for path in run_root.rglob("*"):
+        if path.is_file() and path.suffix in {".json", ".jsonl"}:
+            text = path.read_text(encoding="utf-8")
+            assert "/mnt/request-files" not in text
+            assert "/mnt/runs" not in text
+            assert "/mnt/checkpoints" not in text
+            assert "/mnt/runtime" not in text
+    with store._connection() as conn:
+        for table_row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+            table_name = table_row["name"]
+            columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            for column in columns:
+                column_name = column["name"]
+                rows = conn.execute(
+                    f"SELECT 1 FROM {table_name} WHERE CAST({column_name} AS TEXT) LIKE ? LIMIT 1",
+                    ("%/mnt/%",),
+                ).fetchall()
+                assert rows == []

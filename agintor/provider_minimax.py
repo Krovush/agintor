@@ -5,10 +5,12 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 from .exceptions import AgintorError
+from .openai_trace import persist_openai_trace
 from .provider_common import (
     HostedProviderBase,
     count_tokens_rough,
     request_max_output_tokens,
+    stringify_response_input,
 )
 from .schemas import ModelRequest, ModelResponse
 
@@ -150,20 +152,88 @@ class MiniMaxProvider(HostedProviderBase):
         payload.update(kwargs)
         return client.messages.create(**payload)  # pragma: no cover - live path only
 
+    def _trace_request_payload(
+        self,
+        *,
+        model_name: str,
+        instructions: str,
+        input: str,
+        metadata: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": model_name,
+            "messages": self._messages(input),
+        }
+        if instructions.strip():
+            payload["system"] = instructions
+        max_output_tokens = request_max_output_tokens(metadata or {})
+        payload["max_tokens"] = max_output_tokens if max_output_tokens is not None else DEFAULT_MAX_OUTPUT_TOKENS
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        return payload
+
     def generate(self, request: ModelRequest) -> ModelResponse:
         model_name = self.resolve_model(request.model_class)
         start = time.perf_counter()
-        response = self.create_response(
-            model_class=request.model_class,
+        trace_payload = self._trace_request_payload(
+            model_name=model_name,
             instructions=request.instructions,
             input=request.prompt,
             metadata=request.metadata,
         )
+        try:
+            response = self.create_response(
+                model_class=request.model_class,
+                instructions=request.instructions,
+                input=request.prompt,
+                metadata=request.metadata,
+            )
+        except Exception as exc:
+            persist_openai_trace(
+                provider=self.provider_name,
+                method_name="messages.create",
+                model_class=request.model_class,
+                model_name=model_name,
+                reasoning_effort=None,
+                instructions=request.instructions,
+                input_value=request.prompt,
+                request_payload=trace_payload,
+                request_metadata=request.metadata,
+                response=None,
+                response_text="",
+                input_tokens=count_tokens_rough(f"{request.instructions}\n{stringify_response_input(request.prompt)}"),
+                output_tokens=0,
+                total_tokens=0,
+                latency_s=time.perf_counter() - start,
+                error=str(exc),
+            )
+            raise
         recorded = self._completion_to_model_response(
             response=response,
             model_name=model_name,
             prompt_text=f"{request.instructions}\n{request.prompt}",
         )
         recorded.latency_s = time.perf_counter() - start
+        trace_call_id = persist_openai_trace(
+            provider=self.provider_name,
+            method_name="messages.create",
+            model_class=request.model_class,
+            model_name=model_name,
+            reasoning_effort=None,
+            instructions=request.instructions,
+            input_value=request.prompt,
+            request_payload=trace_payload,
+            request_metadata=request.metadata,
+            response=response,
+            response_text=recorded.text,
+            input_tokens=recorded.input_tokens,
+            output_tokens=recorded.output_tokens,
+            total_tokens=recorded.token_estimate,
+            latency_s=recorded.latency_s,
+            error=None,
+        )
+        recorded.trace_call_id = trace_call_id
+        if trace_call_id:
+            recorded.raw["trace_call_id"] = trace_call_id
         self._record_usage(recorded)
         return recorded

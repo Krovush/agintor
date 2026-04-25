@@ -1,5 +1,5 @@
 {
-  "prompt_id": "runtime.child_checkpoint.v1",
+  "prompt_id": "runtime.child_checkpoint",
   "description": "Compact a child worker's output into a resumable checkpoint.",
   "instructions": "Summarize the child run while preserving evidence, unresolved items, artifacts, open handles, and next actions. Return only structured data.",
   "model_class": "small",
@@ -24,3 +24,4 @@
     "provenance": {}
   }
 }
+
