@@ -218,6 +218,22 @@ class RuntimeProfile(BaseModel):
 
 _RUNTIME_ONLY_KEYS = ("prompts", "runtime_provider", "execution", "topology", "memory", "tooling", "control")
 _RUNTIME_PROMPT_KEYS = ("memory_summary", "tool_spec")
+_MINIMAX_RUNTIME_PROVIDER_DEFAULTS: dict[str, Any] = {
+    "name": "minimax",
+    "base_url": None,
+    "base_url_env": "AGINTOR_MAS_MINIMAX_BASE_URL",
+    "api_key_env": "AGINTOR_MAS_MINIMAX_API_KEY",
+    "api_key_file_env": "AGINTOR_MAS_MINIMAX_KEY_FILE",
+    "model_map": {
+        "small": "MiniMax-M2.7-Flash",
+        "medium": "MiniMax-M2.7-Flash",
+        "large": "MiniMax-M2.7-Flash",
+    },
+    "reasoning_effort_map": {},
+    "temperature": None,
+    "pricing_map": {},
+    "pricing_env": "AGINTOR_MAS_MINIMAX_PRICING",
+}
 
 
 def _resource_package() -> str:
@@ -249,8 +265,60 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
+def _runtime_provider_name(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("name") or "").strip().lower()
+
+
+def _runtime_provider_defaults(name: str) -> dict[str, Any]:
+    provider_name = str(name or "").strip().lower()
+    if provider_name == "openai":
+        provider = _default_profile_dict().get("runtime_provider", {})
+        if isinstance(provider, dict):
+            return dict(provider)
+    if provider_name == "minimax":
+        return dict(_MINIMAX_RUNTIME_PROVIDER_DEFAULTS)
+    return (HostedProviderProfile)(name=provider_name or str(name or "")).model_dump()
+
+
+def _merge_runtime_provider(base: Any, override: Any) -> Any:
+    if not isinstance(base, dict) or not isinstance(override, dict):
+        return override
+    base_name = _runtime_provider_name(base)
+    override_name = _runtime_provider_name(override)
+    provider_name = override_name or base_name
+    provider_base = _runtime_provider_defaults(provider_name) if override_name and override_name != base_name else base
+    merged = _deep_merge(provider_base, override)
+    if _runtime_provider_name(merged) == "local":
+        return _runtime_provider_defaults("local")
+    return merged
+
+
+def _merge_profile_layer(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_profile_keys(override)
+    provider_override = normalized.get("runtime_provider")
+    if "runtime_provider" not in normalized or not isinstance(provider_override, dict):
+        return _deep_merge(base, normalized)
+    rest = dict(normalized)
+    rest.pop("runtime_provider")
+    merged = _deep_merge(base, rest)
+    merged["runtime_provider"] = _merge_runtime_provider(base.get("runtime_provider"), provider_override)
+    return merged
+
+
+def _normalize_profile_keys(payload: dict[str, Any]) -> dict[str, Any]:
+    if "provider" not in payload:
+        return payload
+    normalized = dict(payload)
+    legacy_provider = normalized.pop("provider")
+    if "runtime_provider" not in normalized and legacy_provider is not None:
+        normalized["runtime_provider"] = legacy_provider
+    return normalized
+
+
 def default_runtime_profile() -> RuntimeProfile:
-    return (RuntimeProfile).model_validate(_default_profile_dict())
+    return (RuntimeProfile).model_validate(_normalize_profile_keys(_default_profile_dict()))
 
 
 def load_runtime_profile(
@@ -258,12 +326,12 @@ def load_runtime_profile(
     *,
     profile_path: str | Path | None = None,
 ) -> RuntimeProfile:
-    merged = _default_profile_dict()
+    merged = _normalize_profile_keys(_default_profile_dict())
     runtime_profile = runtime_profile_path(runtime_dir) if runtime_dir is not None else None
     if runtime_profile is not None and runtime_profile.exists():
-        merged = _deep_merge(merged, json.loads(runtime_profile.read_text(encoding="utf-8")))
+        merged = _merge_profile_layer(merged, json.loads(runtime_profile.read_text(encoding="utf-8")))
     if profile_path is not None:
-        merged = _deep_merge(merged, json.loads(Path(profile_path).read_text(encoding="utf-8")))
+        merged = _merge_profile_layer(merged, json.loads(Path(profile_path).read_text(encoding="utf-8")))
     return (RuntimeProfile).model_validate(merged)
 
 

@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+import agintor.project as project
 from agintor.exceptions import RuntimeLoadError
 from agintor.providers import build_provider
 from agintor.runtime_sdk import bundle_runtime_kernel
@@ -19,7 +20,7 @@ from agintor.runtime_api import (
     runtime_solve_request_for_user_request,
 )
 from agintor.runtime_host import RuntimeHost
-from agintor.runtime_profile import load_runtime_profile
+from agintor.runtime_profile import RUNTIME_PROFILE_FILE, load_runtime_profile
 from agintor.versioning import RUNTIME_CONTRACT_VERSION
 from agintor.schemas import (
     AttemptManifest,
@@ -79,6 +80,130 @@ def _capability_exchange() -> CapabilityExchange:
 
 def _runtime_profile():
     return load_runtime_profile()
+
+
+def test_load_runtime_profile_accepts_legacy_provider_key_from_runtime_dir(tmp_path: Path):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / RUNTIME_PROFILE_FILE).write_text(
+        json.dumps({"provider": {"name": "local"}}, indent=2),
+        encoding="utf-8",
+    )
+
+    profile = load_runtime_profile(runtime_dir)
+
+    assert profile.runtime_provider.name == "local"
+    assert profile.runtime_provider.api_key_env is None
+    assert profile.runtime_provider.api_key_file_env is None
+    assert profile.runtime_provider.base_url_env is None
+    assert profile.runtime_provider.pricing_env is None
+    assert profile.runtime_provider.model_map == {}
+    assert profile.runtime_provider.reasoning_effort_map == {}
+    assert profile.runtime_provider.pricing_map == {}
+
+
+def test_load_runtime_profile_uses_minimax_defaults_for_legacy_provider_key(tmp_path: Path):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / RUNTIME_PROFILE_FILE).write_text(
+        json.dumps({"provider": {"name": "minimax"}}, indent=2),
+        encoding="utf-8",
+    )
+
+    profile = load_runtime_profile(runtime_dir)
+
+    assert profile.runtime_provider.name == "minimax"
+    assert profile.runtime_provider.api_key_env == "AGINTOR_MAS_MINIMAX_API_KEY"
+    assert profile.runtime_provider.api_key_file_env == "AGINTOR_MAS_MINIMAX_KEY_FILE"
+    assert profile.runtime_provider.base_url is None
+    assert profile.runtime_provider.base_url_env == "AGINTOR_MAS_MINIMAX_BASE_URL"
+    assert profile.runtime_provider.pricing_env == "AGINTOR_MAS_MINIMAX_PRICING"
+    assert profile.runtime_provider.model_map == {
+        "small": "MiniMax-M2.7-Flash",
+        "medium": "MiniMax-M2.7-Flash",
+        "large": "MiniMax-M2.7-Flash",
+    }
+    assert not any(
+        "OPENAI" in str(value)
+        for value in [
+            profile.runtime_provider.api_key_env,
+            profile.runtime_provider.api_key_file_env,
+            profile.runtime_provider.base_url_env,
+            profile.runtime_provider.pricing_env,
+            *profile.runtime_provider.model_map.values(),
+        ]
+    )
+
+
+def test_load_runtime_profile_prefers_runtime_provider_over_legacy_provider(tmp_path: Path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "provider": {"name": "local"},
+                "runtime_provider": {
+                    "name": "minimax",
+                    "api_key_env": "EXPLICIT_MINIMAX_KEY",
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    profile = load_runtime_profile(profile_path=profile_path)
+
+    assert profile.runtime_provider.name == "minimax"
+    assert profile.runtime_provider.api_key_env == "EXPLICIT_MINIMAX_KEY"
+    assert profile.runtime_provider.api_key_file_env == "AGINTOR_MAS_MINIMAX_KEY_FILE"
+    assert profile.runtime_provider.base_url is None
+    assert profile.runtime_provider.base_url_env == "AGINTOR_MAS_MINIMAX_BASE_URL"
+    assert profile.runtime_provider.pricing_env == "AGINTOR_MAS_MINIMAX_PRICING"
+    assert "OPENAI" not in str(profile.runtime_provider.model_map)
+
+
+def test_legacy_minimax_profile_allows_base_url_env_override(tmp_path: Path, monkeypatch):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / RUNTIME_PROFILE_FILE).write_text(
+        json.dumps({"provider": {"name": "minimax"}}, indent=2),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGINTOR_MAS_MINIMAX_BASE_URL", "https://minimax.example.test/anthropic")
+
+    profile = load_runtime_profile(runtime_dir)
+    provider = build_provider(profile.runtime_provider.name, provider_profile=profile.runtime_provider)
+
+    assert profile.runtime_provider.base_url is None
+    assert provider.base_url == "https://minimax.example.test/anthropic"
+
+
+def test_init_runtime_refreshes_runtime_manifest_contract_version(monkeypatch, tmp_path: Path):
+    current_contract_version = f"{RUNTIME_CONTRACT_VERSION}.test"
+    monkeypatch.setattr(project, "RUNTIME_CONTRACT_VERSION", current_contract_version)
+
+    runtime_dir = project.init_runtime(tmp_path / "runtime")
+
+    manifest = json.loads((runtime_dir / "runtime_manifest.json").read_text(encoding="utf-8"))
+    contract = json.loads((runtime_dir / "deployment_contract.json").read_text(encoding="utf-8"))
+
+    assert manifest["metadata"]["runtime_contract_version"] == current_contract_version
+    assert contract["runtime_contract_version"] == current_contract_version
+
+
+def test_refresh_deployment_contract_does_not_require_openai_credentials_for_legacy_local_profile(tmp_path: Path):
+    runtime_dir = project.init_runtime(tmp_path / "runtime")
+    (runtime_dir / RUNTIME_PROFILE_FILE).write_text(
+        json.dumps({"provider": {"name": "local"}}, indent=2),
+        encoding="utf-8",
+    )
+
+    project._refresh_deployment_contract(runtime_dir)
+
+    contract = json.loads((runtime_dir / "deployment_contract.json").read_text(encoding="utf-8"))
+    assert contract["required_env_any_of"] == []
+    assert "OPENAI_API_KEY" not in contract["environment_allowlist"]
+    assert "AGINTOR_OPENAI_KEY_FILE" not in contract["environment_allowlist"]
 
 
 def _clear_runtime_provider_env(monkeypatch) -> None:

@@ -597,7 +597,7 @@ def test_rewrite_solve_response_paths_restores_run_root_and_latest_checkpoint_re
     )
 
 
-def test_rewrite_durable_run_paths_rewrites_all_mounted_paths(tmp_path: Path):
+def test_rewrite_durable_run_paths_rewrites_only_explicit_checkpoint_path_fields(tmp_path: Path):
     runs_root = tmp_path / "host" / "runs"
     checkpoint_store_dir = tmp_path / "host" / "checkpoints"
     runtime_path = tmp_path / "host" / "runtime"
@@ -918,34 +918,25 @@ def test_rewrite_durable_run_paths_rewrites_all_mounted_paths(tmp_path: Path):
     assert rewritten_latest["run_root"] == str(run_root.resolve())
     assert rewritten_index[0]["ref"] == str((checkpoint_dir / "checkpoint.run.123.0001.json").resolve())
     assert rewritten_index[0]["run_root"] == str(run_root.resolve())
-    assert rewritten_checkpoint["runtime_state_snapshot"]["artifacts"]["patch_result"]["target"] == str(
-        host_request_file
-    )
-    assert rewritten_checkpoint["runtime_state_snapshot"]["artifacts"]["patch_result"]["updated_files"][0]["path"] == str(
-        host_request_file
+    assert rewritten_checkpoint["runtime_state_snapshot"]["artifacts"]["patch_result"]["target"] == container_request_file
+    assert rewritten_checkpoint["runtime_state_snapshot"]["artifacts"]["patch_result"]["updated_files"][0]["path"] == (
+        container_request_file
     )
     checkpoint_receipt_ref = rewritten_checkpoint["side_effect_ledger"]["receipts"][0]["result_ref"]
-    assert checkpoint_receipt_ref["path"] == str(host_request_file)
-    assert checkpoint_receipt_ref["failed_path"] == str(host_request_file)
-    assert checkpoint_receipt_ref["runtime_dir"] == str(runtime_path.resolve())
-    assert checkpoint_receipt_ref["writes"][0]["path"] == str(host_request_file)
-    assert checkpoint_receipt_ref["output"]["updated_files"][0]["path"] == str(host_request_file)
-    assert checkpoint_receipt_ref["output"]["updated_files"][0]["diff"] == f"--- {host_request_file}"
-    assert (
-        checkpoint_receipt_ref["opaque_path"]
-        == str((checkpoint_store_dir / "shared" / "receipt-payload-should-stay.json").resolve())
-    )
-    assert rewritten_checkpoint["working_state"]["accepted_constraints"] == [str(host_request_file)]
+    assert checkpoint_receipt_ref["path"] == container_request_file
+    assert checkpoint_receipt_ref["failed_path"] == container_request_file
+    assert checkpoint_receipt_ref["runtime_dir"] == "/mnt/runtime"
+    assert checkpoint_receipt_ref["writes"][0]["path"] == container_request_file
+    assert checkpoint_receipt_ref["output"]["updated_files"][0]["path"] == container_request_file
+    assert checkpoint_receipt_ref["output"]["updated_files"][0]["diff"] == f"--- {container_request_file}"
+    assert checkpoint_receipt_ref["opaque_path"] == "/mnt/checkpoints/shared/receipt-payload-should-stay.json"
+    assert rewritten_checkpoint["working_state"]["accepted_constraints"] == [container_request_file]
     assert rewritten_checkpoint["working_state"]["selected_checkpoint_refs"] == [
         str((checkpoint_dir / "LATEST.json").resolve()),
         str((checkpoint_store_dir / "shared" / "resume-source.json").resolve()),
     ]
-    assert rewritten_checkpoint["working_state"]["current_objective"] == (
-        str((checkpoint_store_dir / "shared" / "working-summary-should-stay.json").resolve())
-    )
-    assert rewritten_checkpoint["trace_cursor"]["materialization_state_ref"] == str(
-        (run_root / "trace-cursor-should-stay.json").resolve()
-    )
+    assert rewritten_checkpoint["working_state"]["current_objective"] == "/mnt/checkpoints/shared/working-summary-should-stay.json"
+    assert rewritten_checkpoint["trace_cursor"]["materialization_state_ref"] == "/mnt/runs/run.123/trace-cursor-should-stay.json"
     assert rewritten_request["payload"]["path"] == str(host_request_file)
     assert rewritten_plan["file_refs"] == [str(host_request_file)]
     assert rewritten_task["file_paths"] == [str(host_request_file)]
@@ -959,7 +950,7 @@ def test_rewrite_durable_run_paths_rewrites_all_mounted_paths(tmp_path: Path):
     assert rewritten_trace["message"] == f"read {host_request_file}"
     assert rewritten_trace["checkpoint_ref"] == str((checkpoint_dir / "LATEST.json").resolve())
     assert rewritten_trace["runtime_dir"] == str(runtime_path.resolve())
-    assert rewritten_working_memory["accepted_constraints"] == [str(host_request_file)]
+    assert rewritten_working_memory["accepted_constraints"] == [container_request_file]
     assert rewritten_working_memory["selected_checkpoint_refs"] == [str((checkpoint_dir / "LATEST.json").resolve())]
     assert rewritten_recovery["selected_checkpoint_ref"] == str((checkpoint_dir / "LATEST.json").resolve())
     assert rewritten_recovery["source_checkpoint_ref"] == str(
@@ -987,21 +978,24 @@ def test_rewrite_durable_run_paths_rewrites_all_mounted_paths(tmp_path: Path):
     assert artifact_row["artifact_ref"] == str(host_request_file)
     assert event_row is not None
     assert json.loads(event_row["payload_json"])["payload"]["path"] == str(host_request_file)
-    for path in run_root.rglob("*"):
-        if path.is_file() and path.suffix in {".json", ".jsonl"}:
-            text = path.read_text(encoding="utf-8")
-            assert "/mnt/request-files" not in text
-            assert "/mnt/runs" not in text
-            assert "/mnt/checkpoints" not in text
-            assert "/mnt/runtime" not in text
-    with store._connection() as conn:
-        for table_row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
-            table_name = table_row["name"]
-            columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-            for column in columns:
-                column_name = column["name"]
-                rows = conn.execute(
-                    f"SELECT 1 FROM {table_name} WHERE CAST({column_name} AS TEXT) LIKE ? LIMIT 1",
-                    ("%/mnt/%",),
-                ).fetchall()
-                assert rows == []
+    fully_rewritten_payloads = [
+        run_root / "run_manifest.json",
+        attempt_dir / "attempt_manifest.json",
+        checkpoint_dir / "LATEST.json",
+        checkpoint_dir / "index.json",
+        request_dir / "request.json",
+        request_dir / "plan.json",
+        request_dir / "task.json",
+        side_effect_dir / "receipt.1.json",
+        event_dir / "000001.tool_operation.json",
+        trace_dir / "trace.json",
+        state_root / "recovery" / "recovery.1.json",
+        state_root / "recovery" / "fingerprints" / "fingerprint.1.json",
+        state_root / "long_term" / "writes" / "checkpoint.run.123.0001.jsonl",
+    ]
+    for path in fully_rewritten_payloads:
+        text = path.read_text(encoding="utf-8")
+        assert "/mnt/request-files" not in text
+        assert "/mnt/runs" not in text
+        assert "/mnt/checkpoints" not in text
+        assert "/mnt/runtime" not in text

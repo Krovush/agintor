@@ -22,7 +22,9 @@ from .utils import ensure_directory, stable_hash
 
 
 _CALL_COUNTER = count(1)
-_LOCK = threading.Lock()
+_WRITE_COUNTER = count(1)
+_LOCK = threading.RLock()
+TRACE_MATERIALIZATION_SCHEMA_VERSION = "agintor.trace-materialization.v1"
 _PATCH_MARKER_RE = re.compile(r"^(?:<{3,7}\s*(?:SEARCH|REPLACE)?|={7}|>{7}\s*REPLACE)\s*$")
 _BULLET_RE = re.compile(r"^(\s*(?:[-*+]|\d+\.)\s+)(.*)$")
 _HOST_SESSION_ID = (
@@ -36,6 +38,17 @@ _HOST_SESSION_ID = (
 class TraceMaterializationState(BaseModel):
     session_id: str
     session_dir: str
+    schema_version: str = TRACE_MATERIALIZATION_SCHEMA_VERSION
+    last_finalized_call_id: str | None = None
+    known_call_ids: list[str] = Field(default_factory=list)
+    materialized_build_ids: list[str] = Field(default_factory=list)
+    materialized_solve_request_ids: list[str] = Field(default_factory=list)
+    materialized_runtime_task_keys: list[str] = Field(default_factory=list)
+    pending_build_ids: list[str] = Field(default_factory=list)
+    pending_solve_request_ids: list[str] = Field(default_factory=list)
+    pending_runtime_task_keys: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    updated_at: float = 0.0
     call_count: int = 0
     grouped_call_count: int = 0
     runtime_task_keys: list[str] = Field(default_factory=list)
@@ -57,8 +70,17 @@ def _derived_host_session_id() -> str:
     return str(os.environ.get("AGINTOR_OPENAI_TRACE_SESSION_ID", "")).strip() or _HOST_SESSION_ID
 
 
+def resolve_trace_session_id(session_id: str | None = None) -> str:
+    explicit = str(session_id or "").strip()
+    return explicit or _derived_host_session_id()
+
+
+def trace_session_dir_name(session_id: str | None = None) -> str:
+    return _slug(resolve_trace_session_id(session_id), fallback="session")
+
+
 def _session_dir(session_id: str | None = None) -> Path:
-    return ensure_directory(_trace_root() / "sessions" / _slug(session_id or _derived_host_session_id(), fallback="session"))
+    return ensure_directory(_trace_root() / "sessions" / trace_session_dir_name(session_id))
 
 
 def _calls_dir(session_id: str | None = None) -> Path:
@@ -68,32 +90,66 @@ def _calls_dir(session_id: str | None = None) -> Path:
 def resolve_trace_context(request_metadata: Mapping[str, Any] | None) -> OpenAITraceContext:
     metadata = request_metadata or {}
     raw_context = metadata.get("trace_context") if isinstance(metadata, Mapping) else None
+    context: OpenAITraceContext | None = None
     if isinstance(raw_context, OpenAITraceContext):
-        return raw_context
-    if isinstance(raw_context, Mapping):
+        context = raw_context
+    elif isinstance(raw_context, Mapping):
         try:
-            return (OpenAITraceContext).model_validate(raw_context)
+            context = (OpenAITraceContext).model_validate(raw_context)
         except Exception:
-            pass
-    return OpenAITraceContext(session_id=_derived_host_session_id())
+            context = None
+    context = context or OpenAITraceContext()
+    session_id = resolve_trace_session_id(context.session_id)
+    return (OpenAITraceContext).model_validate({**(context).model_dump(), "session_id": session_id})
+
+
+def runtime_task_trace_key(
+    *,
+    request_id: str | None,
+    task_id: str | None = None,
+    seed: int | None = None,
+    runtime_hash: str | None = None,
+    evaluation_unit_id: str | None = None,
+    episode_kind: str | None = None,
+    episode_step_index: int | None = None,
+) -> str | None:
+    del episode_kind, episode_step_index
+    request_or_unit = str(evaluation_unit_id or request_id or "").strip()
+    task = str(task_id or "").strip()
+    runtime = str(runtime_hash or "").strip()
+    if not request_or_unit or not task or seed is None or not runtime:
+        return None
+    return "|".join([task, f"seed_{int(seed)}", runtime, request_or_unit])
 
 
 def _runtime_task_key(trace_context: OpenAITraceContext) -> str | None:
-    request_id = str(trace_context.request_id or "").strip()
-    evaluation_unit_id = str(trace_context.evaluation_unit_id or "").strip()
-    if not request_id or not evaluation_unit_id:
+    return runtime_task_trace_key(
+        request_id=trace_context.request_id,
+        task_id=trace_context.task_id,
+        seed=trace_context.seed,
+        runtime_hash=trace_context.runtime_hash,
+        evaluation_unit_id=trace_context.evaluation_unit_id,
+        episode_kind=trace_context.episode_kind,
+        episode_step_index=trace_context.episode_step_index,
+    )
+
+
+def _runtime_task_view_dir(session_dir: Path, trace_context: OpenAITraceContext) -> Path | None:
+    request_or_unit = str(trace_context.evaluation_unit_id or trace_context.request_id or "").strip()
+    task = str(trace_context.task_id or "").strip()
+    runtime = str(trace_context.runtime_hash or "").strip()
+    if not request_or_unit or not task or trace_context.seed is None or not runtime:
         return None
-    unit = evaluation_unit_id
-    parts = [unit]
-    if trace_context.task_id:
-        parts.append(str(trace_context.task_id))
-    if trace_context.seed is not None:
-        parts.append(f"seed_{int(trace_context.seed)}")
-    if trace_context.episode_kind:
-        parts.append(str(trace_context.episode_kind))
-    if trace_context.episode_step_index is not None:
-        parts.append(f"step_{int(trace_context.episode_step_index)}")
-    return ".".join(_slug(part, fallback="part") for part in parts)
+    return (
+        session_dir
+        / "runtime_tasks"
+        / _slug(task, fallback="task")
+        / f"seed_{int(trace_context.seed)}"
+        / "runtimes"
+        / _slug(runtime, fallback="runtime")
+        / "requests"
+        / _slug(request_or_unit, fallback="request")
+    )
 
 
 def _slug(value: str, *, fallback: str) -> str:
@@ -135,7 +191,16 @@ def _render_block(value: Any, *, preferred: str = "text") -> tuple[str, str]:
 
 def _write_text(path: Path, text: str) -> None:
     ensure_directory(path.parent)
-    path.write_text(text, encoding="utf-8")
+    temp_path = path.with_name(f".tmp-{os.getpid()}-{next(_WRITE_COUNTER)}-{stable_hash(path.name)[:8]}")
+    try:
+        temp_path.write_text(text, encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
 
 
 def _pretty_json(value: Any) -> str:
@@ -657,58 +722,121 @@ def _write_index(root: Path) -> None:
     _write_text(root / "INDEX.md", "\n".join(lines) + "\n")
 
 
+def _trace_record_sort_key(record: Mapping[str, Any]) -> tuple[int, str, str]:
+    return (
+        int(record.get("call_ordinal", 0) or 0),
+        str(record.get("timestamp_utc", "")),
+        str(record.get("call_id", "")),
+    )
+
+
+def _record_trace_context(record: Mapping[str, Any], errors: list[str]) -> OpenAITraceContext | None:
+    trace_context = _mapping(record.get("trace_context"))
+    if not trace_context:
+        return None
+    try:
+        return (OpenAITraceContext).model_validate(trace_context)
+    except Exception:
+        call_id = str(record.get("call_id") or "").strip() or "unknown_call"
+        errors.append(f"failed_to_parse_trace_context:{call_id}")
+        return None
+
+
+def _write_trace_view(output_dir: Path, title: str, records: Sequence[Mapping[str, Any]]) -> None:
+    destination = ensure_directory(output_dir)
+    ordered = sorted(records, key=_trace_record_sort_key)
+    transcript_lines = [f"# {title}", "", f"Calls: {len(ordered)}", ""]
+    index_lines = [
+        f"# {title} Index",
+        "",
+        "| # | Call ID | Purpose | Model | Status | Raw JSON |",
+        "| ---: | --- | --- | --- | --- | --- |",
+    ]
+    for ordinal, record in enumerate(ordered, start=1):
+        transcript_lines.append(_build_api_flow_call(record, header_level="##", ordinal=ordinal).rstrip())
+        transcript_lines.append("")
+        json_path = Path(str(record.get("_json_path") or ""))
+        json_ref = os.path.relpath(json_path, start=destination).replace("\\", "/") if str(json_path) else ""
+        index_lines.append(
+            "| "
+            + f"{ordinal} | {record.get('call_id', '')} | {record.get('purpose', '')} | "
+            + f"{record.get('model_name', '')} | {record.get('status', '')} | "
+            + (f"[json]({json_ref})" if json_ref else "")
+            + " |"
+        )
+    _write_text(destination / "TRANSCRIPT.md", "\n".join(transcript_lines).rstrip() + "\n")
+    _write_text(destination / "INDEX.md", "\n".join(index_lines).rstrip() + "\n")
+
+
+def _reset_derived_group_dirs(session_dir: Path) -> None:
+    for name in ("groups", "builds", "solves", "runtime_tasks"):
+        path = session_dir / name
+        if path.exists():
+            shutil.rmtree(path)
+
+
 def _write_grouped_views(session_dir: Path, records: Sequence[Mapping[str, Any]]) -> TraceMaterializationState:
-    groups_root = session_dir / "groups"
-    if groups_root.exists():
-        shutil.rmtree(groups_root)
-    groups_root = ensure_directory(groups_root)
-    grouped: dict[str, list[Mapping[str, Any]]] = {}
-    for record in records:
-        trace_context = _mapping(record.get("trace_context"))
-        runtime_task_key = str(record.get("runtime_task_key") or trace_context.get("runtime_task_key") or "").strip()
-        if not runtime_task_key and trace_context:
-            try:
-                runtime_task_key = _runtime_task_key((OpenAITraceContext).model_validate(trace_context)) or ""
-            except Exception:
-                runtime_task_key = ""
-        if not runtime_task_key:
+    _reset_derived_group_dirs(session_dir)
+    ordered_records = sorted(records, key=_trace_record_sort_key)
+    _write_trace_view(session_dir, f"OpenAI Trace Session {session_dir.name}", ordered_records)
+
+    build_groups: dict[str, list[Mapping[str, Any]]] = {}
+    solve_groups: dict[str, list[Mapping[str, Any]]] = {}
+    runtime_groups: dict[str, tuple[OpenAITraceContext, list[Mapping[str, Any]]]] = {}
+    errors: list[str] = []
+    for record in ordered_records:
+        trace_context = _record_trace_context(record, errors)
+        if trace_context is None:
             continue
-        grouped.setdefault(runtime_task_key, []).append(record)
+        build_id = str(trace_context.build_id or "").strip()
+        request_id = str(trace_context.request_id or "").strip()
+        if build_id:
+            build_groups.setdefault(build_id, []).append(record)
+        if request_id:
+            solve_groups.setdefault(request_id, []).append(record)
+        runtime_task_key = _runtime_task_key(trace_context)
+        if runtime_task_key:
+            runtime_groups.setdefault(runtime_task_key, (trace_context, []))[1].append(record)
+
+    for build_id, rows in sorted(build_groups.items()):
+        _write_trace_view(session_dir / "builds" / _slug(build_id, fallback="build"), f"Build {build_id}", rows)
+    for request_id, rows in sorted(solve_groups.items()):
+        _write_trace_view(session_dir / "solves" / _slug(request_id, fallback="request"), f"Solve {request_id}", rows)
+
     runtime_task_keys: list[str] = []
     grouped_call_count = 0
-    for runtime_task_key, rows in sorted(grouped.items()):
+    for runtime_task_key, (trace_context, rows) in sorted(runtime_groups.items()):
+        group_dir = _runtime_task_view_dir(session_dir, trace_context)
+        if group_dir is None:
+            continue
         runtime_task_keys.append(runtime_task_key)
         grouped_call_count += len(rows)
-        first = _mapping(rows[0].get("trace_context")) if rows else {}
-        evaluation_unit = _slug(str(first.get("evaluation_unit_id") or first.get("request_id") or "unit"), fallback="unit")
-        group_dir = ensure_directory(groups_root / evaluation_unit / _slug(runtime_task_key, fallback="task"))
-        index_payload = {
-            "runtime_task_key": runtime_task_key,
-            "evaluation_unit_id": first.get("evaluation_unit_id"),
-            "request_id": first.get("request_id"),
-            "episode_kind": first.get("episode_kind"),
-            "episode_step_index": first.get("episode_step_index"),
-            "call_ids": [row.get("call_id") for row in rows],
-            "calls": [
-                {
-                    "call_id": row.get("call_id"),
-                    "timestamp_utc": row.get("timestamp_utc"),
-                    "purpose": row.get("purpose"),
-                    "model_name": row.get("model_name"),
-                    "status": row.get("status"),
-                    "json_file": str(Path(str(row.get("_json_path", ""))).name),
-                }
-                for row in rows
-            ],
-        }
-        _write_text(group_dir / "calls_index.json", json.dumps(_jsonable(index_payload), indent=2, sort_keys=True))
+        _write_trace_view(group_dir, f"Runtime Task {runtime_task_key}", rows)
+
+    known_call_ids = [
+        str(record.get("call_id") or "").strip()
+        for record in ordered_records
+        if str(record.get("call_id") or "").strip()
+    ]
+    updated_at = datetime.now(timezone.utc).timestamp()
     state = TraceMaterializationState(
         session_id=session_dir.name,
         session_dir=str(session_dir),
-        call_count=len(records),
+        schema_version=TRACE_MATERIALIZATION_SCHEMA_VERSION,
+        last_finalized_call_id=known_call_ids[-1] if known_call_ids else None,
+        known_call_ids=known_call_ids,
+        materialized_build_ids=sorted(build_groups),
+        materialized_solve_request_ids=sorted(solve_groups),
+        materialized_runtime_task_keys=runtime_task_keys,
+        pending_build_ids=[],
+        pending_solve_request_ids=[],
+        pending_runtime_task_keys=[],
+        errors=errors,
+        updated_at=updated_at,
+        call_count=len(ordered_records),
         grouped_call_count=grouped_call_count,
         runtime_task_keys=runtime_task_keys,
-        rebuilt_at=datetime.now(timezone.utc).isoformat(),
+        rebuilt_at=datetime.fromtimestamp(updated_at, timezone.utc).isoformat(),
     )
     _write_text(session_dir / "materialization_state.json", json.dumps((state).model_dump(), indent=2, sort_keys=True))
     return state
@@ -716,9 +844,10 @@ def _write_grouped_views(session_dir: Path, records: Sequence[Mapping[str, Any]]
 
 def rebuild_trace_materialization(session_dir: Path | str | None = None) -> TraceMaterializationState:
     session_path = Path(session_dir) if session_dir is not None else _session_dir()
-    records = _load_trace_records(session_path)
-    _write_index(session_path)
-    return _write_grouped_views(session_path, records)
+    with _LOCK:
+        records = _load_trace_records(session_path)
+        _write_index(session_path)
+        return _write_grouped_views(session_path, records)
 
 
 def load_materialization_state(session_dir: Path | str) -> TraceMaterializationState | None:
@@ -754,59 +883,62 @@ def persist_openai_trace(
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         purpose = str((request_metadata or {}).get("mode", "unspecified")).strip() or "unspecified"
         trace_context = resolve_trace_context(request_metadata)
-        session_id = trace_context.session_id or _derived_host_session_id()
-        trace_context = (OpenAITraceContext).model_validate({**(trace_context).model_dump(), "session_id": session_id})
+        session_id = resolve_trace_session_id(trace_context.session_id)
         runtime_task_key = _runtime_task_key(trace_context)
+        request_metadata_payload = _jsonable(request_metadata or {})
+        if isinstance(request_metadata_payload, dict):
+            request_metadata_payload["trace_context"] = (trace_context).model_dump()
+        raw_response = _jsonable(response)
         with _LOCK:
             ordinal = next(_CALL_COUNTER)
-        stem = "__".join(
-            [
-                timestamp,
-                f"pid{os.getpid()}",
-                f"call{ordinal:04d}",
-                _slug(purpose, fallback="purpose"),
-                _slug(method_name, fallback="method"),
-                _slug(model_name, fallback="model"),
-            ]
-        )
-        raw_response = _jsonable(response)
-        record = {
-            "call_id": stem,
-            "call_ordinal": ordinal,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "provider": provider,
-            "method_name": method_name,
-            "purpose": purpose,
-            "session_id": session_id,
-            "trace_context": (trace_context).model_dump(),
-            "model_class": model_class,
-            "model_name": model_name,
-            "reasoning_effort": reasoning_effort,
-            "instructions": instructions,
-            "input": stringify_response_input(input_value),
-            "request_payload": _jsonable(request_payload),
-            "request_metadata": _jsonable(request_metadata or {}),
-            "response_id": getattr(response, "id", None),
-            "status": getattr(response, "status", None),
-            "input_tokens": int(input_tokens or 0),
-            "output_tokens": int(output_tokens or 0),
-            "total_tokens": int(total_tokens or 0),
-            "latency_s": float(latency_s or 0.0),
-            "response_text": response_text,
-            "response_raw": raw_response,
-            "error": str(error or ""),
-        }
-        if runtime_task_key:
-            record["runtime_task_key"] = runtime_task_key
-        calls_dir = _calls_dir(session_id)
-        json_path = calls_dir / f"{stem}.json"
-        md_path = calls_dir / f"{stem}.md"
-        _write_text(json_path, json.dumps(record, indent=2, sort_keys=True))
-        _write_text(md_path, _build_markdown(record))
-        session_dir = _session_dir(session_id)
-        _write_index(session_dir)
-        _write_grouped_views(session_dir, _load_trace_records(session_dir))
-        return stem
+            stem = "__".join(
+                [
+                    timestamp,
+                    f"pid{os.getpid()}",
+                    f"call{ordinal:04d}",
+                    _slug(purpose, fallback="purpose"),
+                    _slug(method_name, fallback="method"),
+                    _slug(model_name, fallback="model"),
+                ]
+            )
+            record = {
+                "call_id": stem,
+                "call_ordinal": ordinal,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "provider": provider,
+                "provider_role": trace_context.provider_role or "",
+                "method_name": method_name,
+                "purpose": purpose,
+                "session_id": session_id,
+                "trace_context": (trace_context).model_dump(),
+                "model_class": model_class,
+                "model_name": model_name,
+                "reasoning_effort": reasoning_effort,
+                "instructions": instructions,
+                "input": stringify_response_input(input_value),
+                "request_payload": _jsonable(request_payload),
+                "request_metadata": request_metadata_payload,
+                "response_id": getattr(response, "id", None),
+                "status": getattr(response, "status", None),
+                "input_tokens": int(input_tokens or 0),
+                "output_tokens": int(output_tokens or 0),
+                "total_tokens": int(total_tokens or 0),
+                "latency_s": float(latency_s or 0.0),
+                "response_text": response_text,
+                "response_raw": raw_response,
+                "error": str(error or ""),
+            }
+            if runtime_task_key:
+                record["runtime_task_key"] = runtime_task_key
+            calls_dir = _calls_dir(session_id)
+            json_path = calls_dir / f"{stem}.json"
+            md_path = calls_dir / f"{stem}.md"
+            _write_text(json_path, json.dumps(record, indent=2, sort_keys=True))
+            _write_text(md_path, _build_markdown(record))
+            session_dir = _session_dir(session_id)
+            _write_index(session_dir)
+            _write_grouped_views(session_dir, _load_trace_records(session_dir))
+            return stem
     except Exception:
         return None
 

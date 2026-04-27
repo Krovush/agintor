@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .exceptions import BranchCancelled, HardInvalidation, PromptAdaptationError
+from .openai_trace import resolve_trace_session_id, runtime_task_trace_key
 from .providers import ModelProvider
 from .runtime_profile import RuntimeProfile, default_runtime_profile
 from .schemas import (
@@ -810,6 +811,7 @@ def runtime_trace_context(
 ) -> OpenAITraceContext:
     return derive_trace_context(
         parent,
+        session_id=resolve_trace_session_id(trace_context_field(parent, "session_id")),
         provider_role="runtime",
         request_id=request_id,
         runtime_hash=runtime_hash,
@@ -828,21 +830,20 @@ def runtime_task_materialization_key(
     request_id: str,
     task_id: str | None = None,
     seed: int | None = None,
+    runtime_hash: str | None = None,
     evaluation_unit_id: str | None = None,
     episode_kind: str | None = None,
     episode_step_index: int | None = None,
 ) -> str:
-    unit = str(evaluation_unit_id or request_id).strip() or request_id
-    parts = [unit]
-    if task_id:
-        parts.append(str(task_id))
-    if seed is not None:
-        parts.append(f"seed_{int(seed)}")
-    if episode_kind:
-        parts.append(str(episode_kind))
-    if episode_step_index is not None:
-        parts.append(f"step_{int(episode_step_index)}")
-    return ".".join(part.replace("/", "_") for part in parts if str(part).strip())
+    return runtime_task_trace_key(
+        request_id=request_id,
+        task_id=task_id,
+        seed=seed,
+        runtime_hash=runtime_hash,
+        evaluation_unit_id=evaluation_unit_id,
+        episode_kind=episode_kind,
+        episode_step_index=episode_step_index,
+    ) or ""
 
 
 def execution_plan_requires_default_provider(plan: ExecutionPlan) -> bool:
@@ -2226,9 +2227,11 @@ def rebind_checkpoint_envelope_for_resume(
     )
     payload["request_id"] = active_request_id
     payload["origin_request_id"] = original_request_id
-    payload["source_checkpoint_ref"] = (
+    selected_source_checkpoint_ref = (
         str(source_checkpoint_ref or payload.get("source_checkpoint_ref") or "").strip() or None
     )
+    payload["selected_checkpoint_ref"] = selected_source_checkpoint_ref
+    payload["source_checkpoint_ref"] = selected_source_checkpoint_ref
     plan_snapshot = dict(payload.get("plan_snapshot") or {})
     plan_snapshot["request_id"] = active_request_id
     plan_snapshot["trace_context"] = _rebound_trace_context_payload(
@@ -2238,6 +2241,8 @@ def rebind_checkpoint_envelope_for_resume(
     payload["plan_snapshot"] = plan_snapshot
     runtime_state_snapshot = dict(payload.get("runtime_state_snapshot") or {})
     runtime_state_snapshot["request_id"] = active_request_id
+    if selected_source_checkpoint_ref is not None:
+        runtime_state_snapshot["latest_checkpoint_ref"] = selected_source_checkpoint_ref
     runtime_state_snapshot["active_frame"] = _rebind_frame_snapshot_request_id(
         runtime_state_snapshot.get("active_frame"),
         active_request_id,

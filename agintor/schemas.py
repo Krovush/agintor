@@ -451,6 +451,9 @@ class LongTermNodeType(str, Enum):
     ARTIFACT_SIGNATURE = "ArtifactSignature"
 
 
+CHECKPOINT_ENVELOPE_SCHEMA_VERSION = "agintor.checkpoint-envelope.v4"
+
+
 class StrictPersistenceModel(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
@@ -562,7 +565,7 @@ class RecoveryAttempt(StrictPersistenceModel):
     origin_request_id: Optional[str] = None
     rebound_request_id: Optional[str] = None
     reconciliation_policy: Literal["strict", "best_effort"]
-    restore_state: Literal["restored", "restored_with_changes", "blocked"]
+    compatibility_result: Literal["exact_compatible", "degraded_compatible", "fail_closed"]
     source_fingerprint_id: Optional[str] = None
     current_fingerprint_id: str
     fingerprint_deltas: List[FingerprintDelta] = Field(default_factory=list)
@@ -571,7 +574,7 @@ class RecoveryAttempt(StrictPersistenceModel):
     receipts_blocked: List[str] = Field(default_factory=list)
     receipts_invalidated: List[str] = Field(default_factory=list)
     blocked_node_ids: List[str] = Field(default_factory=list)
-    changed_plan_node_ids: List[str] = Field(default_factory=list)
+    degraded_plan_node_ids: List[str] = Field(default_factory=list)
     resume_explanation: str
     attempted_at: float = Field(default_factory=now_ts)
     completed_at: Optional[float] = None
@@ -1469,6 +1472,7 @@ class ExecutionPlan(BaseModel):
             if isinstance(trace_context, dict):
                 normalized_trace_context = {str(key): to_jsonable(item) for key, item in trace_context.items()}
                 normalized_trace_context["request_id"] = None
+                normalized_trace_context["session_id"] = None
                 digest_payload["trace_context"] = normalized_trace_context
             self.plan_digest = stable_hash(to_jsonable(digest_payload))
         return self
@@ -2082,6 +2086,7 @@ def terminalize_receipt(
 
 
 class CheckpointEnvelope(StrictPersistenceModel):
+    checkpoint_schema_version: Literal["agintor.checkpoint-envelope.v4"] = CHECKPOINT_ENVELOPE_SCHEMA_VERSION
     checkpoint_id: str
     runtime_contract_version: str
     runtime_hash: str
@@ -2091,6 +2096,7 @@ class CheckpointEnvelope(StrictPersistenceModel):
     runtime_backend: str = ""
     request_id: str
     origin_request_id: Optional[str] = None
+    selected_checkpoint_ref: Optional[str] = None
     source_checkpoint_ref: Optional[str] = None
     environment_fingerprint_id: Optional[str] = None
     plan_id: str
@@ -2109,6 +2115,32 @@ class CheckpointEnvelope(StrictPersistenceModel):
     attempt_snapshot: AttemptSnapshot = Field(default_factory=AttemptSnapshot)
     working_state: WorkingMemorySnapshot = Field(default_factory=WorkingMemorySnapshot)
     trace_cursor: TraceCursorSnapshot = Field(default_factory=TraceCursorSnapshot)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_checkpoint_schema_version(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        if "working_state_summary" in values:
+            raise ValueError("legacy checkpoint working_state_summary is not accepted by v4 checkpoint envelopes")
+        schema_version = str(values.get("checkpoint_schema_version") or CHECKPOINT_ENVELOPE_SCHEMA_VERSION).strip()
+        if schema_version != CHECKPOINT_ENVELOPE_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported checkpoint envelope schema {schema_version!r}; "
+                f"expected {CHECKPOINT_ENVELOPE_SCHEMA_VERSION!r}"
+            )
+        values = dict(values)
+        values["checkpoint_schema_version"] = CHECKPOINT_ENVELOPE_SCHEMA_VERSION
+        return values
+
+    @classmethod
+    def model_validate_persisted(cls, values: Any) -> "CheckpointEnvelope":
+        if isinstance(values, dict) and "checkpoint_schema_version" not in values:
+            raise ValueError(
+                "persisted checkpoint envelopes must include "
+                f"checkpoint_schema_version={CHECKPOINT_ENVELOPE_SCHEMA_VERSION!r}"
+            )
+        return cls.model_validate(values)
 
 
 class InspectRequest(BaseModel):

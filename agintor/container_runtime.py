@@ -880,7 +880,7 @@ class DockerRuntimeExecutor:
         if not checkpoint_path.exists():
             return []
         payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        envelope = (CheckpointEnvelope).model_validate(payload)
+        envelope = (CheckpointEnvelope).model_validate_persisted(payload)
         request_file_refs_payload = envelope.plan_snapshot.get("file_ref_specs", [])
         if isinstance(request_file_refs_payload, list) and request_file_refs_payload:
             return [
@@ -1008,12 +1008,10 @@ class DockerRuntimeExecutor:
         *,
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
-        path_replacements: Mapping[str, str] | None = None,
     ) -> Any:
-        rewritten = cls._rewrite_exact_string_payload(payload, dict(path_replacements or {}))
-        if not isinstance(rewritten, Mapping):
-            return rewritten
-        result = dict(rewritten)
+        if not isinstance(payload, Mapping):
+            return payload
+        result = dict(payload)
         for key in ("selected_checkpoint_ref", "source_checkpoint_ref"):
             if key not in result:
                 continue
@@ -1124,10 +1122,8 @@ class DockerRuntimeExecutor:
         cls,
         envelope: CheckpointEnvelope,
         *,
-        runtime_path: Path | None = None,
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
-        request_file_reverse_map: Mapping[str, str] | None = None,
     ) -> CheckpointEnvelope:
         payload = (envelope).model_dump()
         payload["run_root"] = cls._rewrite_known_path(
@@ -1137,6 +1133,11 @@ class DockerRuntimeExecutor:
         ) or ""
         payload["source_checkpoint_ref"] = cls._rewrite_known_path(
             envelope.source_checkpoint_ref,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        payload["selected_checkpoint_ref"] = cls._rewrite_known_path(
+            envelope.selected_checkpoint_ref,
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
         )
@@ -1178,14 +1179,8 @@ class DockerRuntimeExecutor:
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
         )
-        path_replacements = cls._mounted_path_replacements(
-            runtime_path=runtime_path,
-            run_mount_root=run_mount_root,
-            checkpoint_store_dir=checkpoint_store_dir,
-            request_file_reverse_map=request_file_reverse_map,
-        )
-        if path_replacements:
-            payload = cls._rewrite_exact_string_payload(payload, path_replacements)
+        # Checkpoint envelopes contain opaque runtime payloads. Only fields
+        # explicitly modeled above as durable path refs are rewritten here.
         return (CheckpointEnvelope).model_validate(payload)
 
     @classmethod
@@ -1214,13 +1209,11 @@ class DockerRuntimeExecutor:
                 run_mount_root=run_mount_root,
                 checkpoint_store_dir=checkpoint_store_dir,
             )
-            rewritten = cls._rewrite_exact_string_payload(rewritten, path_replacements)
         elif path.parent.name == "recovery" or path.parent.name == "fingerprints":
             rewritten = cls._rewrite_recovery_payload_paths(
                 payload,
                 run_mount_root=run_mount_root,
                 checkpoint_store_dir=checkpoint_store_dir,
-                path_replacements=path_replacements,
             )
         else:
             rewritten = cls._rewrite_exact_string_payload(payload, path_replacements)
@@ -1324,14 +1317,10 @@ class DockerRuntimeExecutor:
                     ]
                 else:
                     rewritten = (cls._rewrite_checkpoint_envelope_paths(
-                            (CheckpointEnvelope).model_validate(payload),
-                            runtime_path=runtime_path,
+                            (CheckpointEnvelope).model_validate_persisted(payload),
                             run_mount_root=run_mount_root,
                             checkpoint_store_dir=checkpoint_store_dir,
-                            request_file_reverse_map=request_file_reverse_map,
                         )).model_dump()
-                if path_replacements:
-                    rewritten = cls._rewrite_exact_string_payload(rewritten, path_replacements)
             except Exception:
                 continue
             if rewritten == payload:

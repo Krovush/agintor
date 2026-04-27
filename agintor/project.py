@@ -75,6 +75,19 @@ def _refresh_deployment_contract(runtime_dir: Path) -> None:
     contract_path.write_text(json.dumps((contract).model_dump(), indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _refresh_runtime_manifest(runtime_dir: Path) -> None:
+    manifest_path = runtime_dir / "runtime_manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    payload["metadata"] = {
+        **metadata,
+        "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 
 def init_runtime(destination: str | Path, force: bool = False) -> Path:
     dest = Path(destination)
@@ -87,6 +100,7 @@ def init_runtime(destination: str | Path, force: bool = False) -> Path:
     with resources.as_file(template_root) as template_dir:
         shutil.copytree(template_dir, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
     bundle_runtime_kernel(dest, force=True)
+    _refresh_runtime_manifest(dest)
     _refresh_deployment_contract(dest)
     return dest
 

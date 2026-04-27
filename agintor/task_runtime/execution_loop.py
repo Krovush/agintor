@@ -125,7 +125,7 @@ class ExecutionLoopMixin:
                 else ""
             )
             resume_source_checkpoint_ref = (
-                str(getattr(checkpoint_envelope, "source_checkpoint_ref", "") or "").strip()
+                self._selected_resume_checkpoint_ref(checkpoint_envelope)
                 if checkpoint_envelope is not None
                 else ""
             )
@@ -183,6 +183,13 @@ class ExecutionLoopMixin:
                     self._restore_from_checkpoint(context, checkpoint_envelope, reconciliation_policy=reconciliation_policy)
                 except ResumeRecoveryError as exc:
                     state.execution_state = "failed"
+                    self._record_failed_recovery_attempt(
+                        context,
+                        checkpoint_envelope,
+                        selected_checkpoint_ref=resume_source_checkpoint_ref,
+                        reconciliation_policy=reconciliation_policy,
+                        failure_explanation=str(exc),
+                    )
                     context.record("run_failed", error=str(exc), failure_class="resume_recovery", failure_kind=exc.failure_kind)
                     return build_result({"error": str(exc)}, 0.0, faults, True, str(exc), exc.failure_kind)
                 self.shell.restore_runtime_event_cursor(context.state.event_sequence_no)
@@ -372,6 +379,14 @@ class ExecutionLoopMixin:
                 return build_result({"error": "cancelled"}, 0.0, faults, False, "runtime execution cancelled", "external_interrupt")
             except ResumeRecoveryError as exc:
                 state.execution_state = "failed"
+                if checkpoint_envelope is not None:
+                    self._record_failed_recovery_attempt(
+                        context,
+                        checkpoint_envelope,
+                        selected_checkpoint_ref=resume_source_checkpoint_ref,
+                        reconciliation_policy=reconciliation_policy,
+                        failure_explanation=str(exc),
+                    )
                 context.record("run_failed", error=str(exc), failure_class="resume_recovery", failure_kind=exc.failure_kind)
                 return build_result({"error": str(exc)}, 0.0, faults, True, str(exc), exc.failure_kind)
             except HardInvalidation as exc:

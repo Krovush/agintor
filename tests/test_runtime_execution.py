@@ -1223,6 +1223,30 @@ def test_compile_execution_plan_from_solve_request_enriches_runtime_identity(tmp
     assert plan.trace_context.runtime_dir == str(tmp_path / "runtime")
 
 
+def test_execution_plan_digest_ignores_trace_session_id(monkeypatch, tmp_path):
+    solve_request = load_solve_request(prompt="Return a greeting as JSON.")
+
+    monkeypatch.setenv("AGINTOR_OPENAI_TRACE_SESSION_ID", "session.digest-one")
+    _, first_plan = compile_execution_plan_from_solve_request(
+        solve_request,
+        seed=7,
+        runtime_hash="runtime-hash",
+        runtime_dir=str(tmp_path / "runtime"),
+    )
+
+    monkeypatch.setenv("AGINTOR_OPENAI_TRACE_SESSION_ID", "session.digest-two")
+    _, second_plan = compile_execution_plan_from_solve_request(
+        solve_request,
+        seed=7,
+        runtime_hash="runtime-hash",
+        runtime_dir=str(tmp_path / "runtime"),
+    )
+
+    assert first_plan.trace_context.session_id == "session.digest-one"
+    assert second_plan.trace_context.session_id == "session.digest-two"
+    assert first_plan.plan_digest == second_plan.plan_digest
+
+
 def test_compile_execution_plan_from_solve_request_builds_file_inspection_template(tmp_path):
     inspected_file = tmp_path / "Folder With Spaces" / "notes file.txt"
     inspected_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2364,6 +2388,50 @@ def test_trace_cursor_links_persisted_model_call_ids(tmp_path):
     assert cursor.linked_call_ids == ["20260424T000000Z__pid1__call0001__user_request__create__model"]
 
 
+def test_default_trace_session_is_persisted_to_checkpoint_cursor(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGINTOR_OPENAI_TRACE_SESSION_ID", "session.default-checkpoint")
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    runtime = load_runtime(runtime_dir, runtime_backend="local")
+    shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
+    task = _make_direct_response_task("trace.default-session.cursor")
+
+    result = TaskRuntime(
+        runtime,
+        shell,
+        ReplayProvider([{"text": "hello with default trace session", "model_name": "replay/small"}]),
+    ).run_task(task, 0)
+    envelope = shell.load_checkpoint_envelope(checkpoint_ref=result.checkpoint_ref)
+
+    assert result.trace_context.session_id == "session.default-checkpoint"
+    assert envelope.plan_snapshot["trace_context"]["session_id"] == "session.default-checkpoint"
+    assert envelope.trace_cursor.last_session_id == "session.default-checkpoint"
+    assert envelope.trace_cursor.last_runtime_task_key == f"{task.task_id}|seed_0|{runtime.runtime_hash}|{result.request_id}"
+    assert envelope.trace_cursor.materialization_state_ref == (
+        "openai_api_traces/sessions/session.default-checkpoint/materialization_state.json"
+    )
+
+
+def test_trace_cursor_materialization_ref_uses_sanitized_session_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGINTOR_OPENAI_TRACE_SESSION_ID", "session default/checkpoint")
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    runtime = load_runtime(runtime_dir, runtime_backend="local")
+    shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
+    task = _make_direct_response_task("trace.sanitized-session.cursor")
+
+    result = TaskRuntime(
+        runtime,
+        shell,
+        ReplayProvider([{"text": "hello with unsafe trace session", "model_name": "replay/small"}]),
+    ).run_task(task, 0)
+    envelope = shell.load_checkpoint_envelope(checkpoint_ref=result.checkpoint_ref)
+
+    assert result.trace_context.session_id == "session default/checkpoint"
+    assert envelope.trace_cursor.last_session_id == "session default/checkpoint"
+    assert envelope.trace_cursor.materialization_state_ref == (
+        "openai_api_traces/sessions/session_default_checkpoint/materialization_state.json"
+    )
+
+
 def test_resume_from_checkpoint_restores_budget_state_and_reuses_completed_receipts(tmp_path):
     runtime_dir = init_runtime(tmp_path / "runtime")
     runtime = load_runtime(runtime_dir, runtime_backend="local")
@@ -2397,6 +2465,86 @@ def test_resume_from_checkpoint_restores_budget_state_and_reuses_completed_recei
     assert resumed_run.hard_invalid is False
     assert resumed_run.model_calls == 1
     assert resumed_run.artifact == first_run.artifact
+
+
+def test_direct_resume_uses_loaded_checkpoint_ref_as_source_for_followup_checkpoints(tmp_path):
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    runtime = load_runtime(runtime_dir, runtime_backend="local")
+    shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
+    envelope = _pending_provider_launch_envelope(
+        runtime,
+        shell,
+        task_id="resume.direct-loaded-source",
+    ).model_copy(
+        update={
+            "checkpoint_id": "checkpoint.resume.direct-loaded-source.0001",
+            "boundary": "before_provider_launch",
+            "side_effect_ledger": {"receipts": []},
+        },
+        deep=True,
+    )
+    checkpoint_ref = shell.save_checkpoint_envelope(envelope).ref
+    loaded_envelope = shell.load_checkpoint_envelope(checkpoint_ref=checkpoint_ref)
+
+    resumed_run = TaskRuntime(
+        runtime,
+        shell,
+        ReplayProvider([{"text": "hello after direct resume", "model_name": "replay/small"}]),
+    ).resume_from_checkpoint(loaded_envelope)
+    resumed_launch_checkpoint = _checkpoint_for_boundary(
+        shell,
+        loaded_envelope.request_id,
+        "after_provider_launch",
+    )
+    resumed_checkpoint = _checkpoint_for_boundary(
+        shell,
+        loaded_envelope.request_id,
+        "after_provider_completion",
+    )
+
+    assert Path(loaded_envelope.source_checkpoint_ref).resolve() == Path(checkpoint_ref).resolve()
+    assert Path(resumed_launch_checkpoint.source_checkpoint_ref).resolve() == Path(checkpoint_ref).resolve()
+    assert Path(resumed_launch_checkpoint.working_state.selected_checkpoint_refs[0]).resolve() == Path(checkpoint_ref).resolve()
+    assert Path(resumed_checkpoint.source_checkpoint_ref).resolve() == Path(checkpoint_ref).resolve()
+    assert resumed_run.hard_invalid is False
+
+
+def test_repeated_resume_uses_selected_checkpoint_ref_instead_of_prior_lineage(tmp_path):
+    runtime_dir = init_runtime(tmp_path / "runtime")
+    runtime = load_runtime(runtime_dir, runtime_backend="local")
+    shell = FixedShell(tmp_path / "workspace", artifact_mode=ArtifactMode.ALWAYS)
+    prior_lineage_ref = "checkpoint://older-resume-source"
+    envelope = _pending_provider_launch_envelope(
+        runtime,
+        shell,
+        task_id="resume.direct-selected-source",
+    ).model_copy(
+        update={
+            "checkpoint_id": "checkpoint.resume.direct-selected-source.0001",
+            "boundary": "before_provider_launch",
+            "source_checkpoint_ref": prior_lineage_ref,
+            "side_effect_ledger": {"receipts": []},
+        },
+        deep=True,
+    )
+    checkpoint_ref = shell.save_checkpoint_envelope(envelope).ref
+    loaded_envelope = shell.load_checkpoint_envelope(checkpoint_ref=checkpoint_ref)
+
+    resumed_run = TaskRuntime(
+        runtime,
+        shell,
+        ReplayProvider([{"text": "hello after repeated resume", "model_name": "replay/small"}]),
+    ).resume_from_checkpoint(loaded_envelope)
+    resumed_checkpoint = _checkpoint_for_boundary(
+        shell,
+        loaded_envelope.request_id,
+        "after_provider_completion",
+    )
+
+    assert loaded_envelope.source_checkpoint_ref == prior_lineage_ref
+    assert Path(loaded_envelope.selected_checkpoint_ref).resolve() == Path(checkpoint_ref).resolve()
+    assert Path(resumed_checkpoint.source_checkpoint_ref).resolve() == Path(checkpoint_ref).resolve()
+    assert resumed_run.hard_invalid is False
 
 
 def test_reduce_grouped_run_results_treats_paused_run_as_non_terminal():
@@ -2795,6 +2943,7 @@ def test_resume_rebinds_request_identity_and_carries_forward_resume_provenance(t
             "plan_node_status": {},
             "branch_states": {},
             "branch_publications": [],
+            "latest_checkpoint_ref": "checkpoint://run-latest",
         },
         working_state={"current_objective": task.prompt, "selected_checkpoint_refs": [plan.request_id]},
         trace_cursor={"last_solve_request_id": plan.request_id, "latest_runtime_event_sequence_no": 0},
@@ -2812,6 +2961,8 @@ def test_resume_rebinds_request_identity_and_carries_forward_resume_provenance(t
     assert rebound_envelope.plan_snapshot["request_id"] == effective_request_id
     assert rebound_envelope.plan_snapshot["trace_context"]["request_id"] == effective_request_id
     assert rebound_envelope.runtime_state_snapshot.request_id == effective_request_id
+    assert rebound_envelope.runtime_state_snapshot.latest_checkpoint_ref == "checkpoint://resume-source"
+    assert rebound_envelope.selected_checkpoint_ref == "checkpoint://resume-source"
     assert rebound_envelope.runtime_state_snapshot.queued_frames[0].request_id == effective_request_id
     assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.request_id == effective_request_id
     assert rebound_envelope.working_state.selected_checkpoint_refs == [plan.request_id]

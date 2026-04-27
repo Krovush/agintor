@@ -10,7 +10,10 @@ from .utils import ensure_directory, now_ts, stable_hash
 
 STATE_STORE_DIR_NAME = "state"
 STATE_STORE_DB_NAME = "runtime_state.sqlite"
+STATE_STORE_SCHEMA_VERSION = 1
+SQLITE_BUSY_TIMEOUT_MS = 5000
 INDEX_DIRTY_FILE = "index_dirty.json"
+_SCHEMA_METADATA_TABLE = "state_store_metadata"
 STATE_STORE_DIRS = (
     "short_term",
     "long_term",
@@ -195,11 +198,9 @@ def rebuild_from_canonical(run_root: str | Path) -> "StateStore":
     for path in (db_path, db_path.with_name(db_path.name + "-wal"), db_path.with_name(db_path.name + "-shm")):
         if path.exists():
             path.unlink()
-    store = initialize(resolved)
+    store = open_state_store(resolved)
+    store.ensure_current_schema()
     store.rebuild_from_canonical()
-    dirty_path = resolved / STATE_STORE_DIR_NAME / INDEX_DIRTY_FILE
-    if dirty_path.exists():
-        dirty_path.unlink()
     return store
 
 
@@ -208,13 +209,34 @@ class StateStore:
         self.run_root = Path(run_root).resolve()
         self.state_root = self.run_root / STATE_STORE_DIR_NAME
         self.db_path = self.state_root / STATE_STORE_DB_NAME
+        self._rebuilding_from_canonical = False
 
     def ensure_current_schema(self) -> None:
         ensure_state_layout(self.run_root)
         with self._connection() as conn:
             self._ensure_schema(conn)
+            conn.commit()
+
+    def _dirty_path(self) -> Path:
+        return self.state_root / INDEX_DIRTY_FILE
+
+    def _rebuild_if_dirty(self) -> None:
+        if self._rebuilding_from_canonical or not self._dirty_path().exists():
+            return
+        self.rebuild_from_canonical()
 
     def rebuild_from_canonical(self) -> None:
+        self._rebuilding_from_canonical = True
+        try:
+            self._rebuild_from_canonical()
+        finally:
+            self._rebuilding_from_canonical = False
+        dirty_path = self._dirty_path()
+        if dirty_path.exists():
+            dirty_path.unlink()
+
+    def _rebuild_from_canonical(self) -> None:
+        self._clear_index_tables()
         manifest_path = self.run_root / "run_manifest.json"
         manifest = _load_optional_json(manifest_path) or {}
         if manifest:
@@ -735,7 +757,7 @@ class StateStore:
                     "origin_request_id": _none_or_text(recovery_attempt.get("origin_request_id")),
                     "rebound_request_id": _none_or_text(recovery_attempt.get("rebound_request_id")),
                     "reconciliation_policy": _text(recovery_attempt.get("reconciliation_policy")),
-                    "restore_state": _text(recovery_attempt.get("restore_state")),
+                    "compatibility_result": _text(recovery_attempt.get("compatibility_result")),
                     "source_fingerprint_id": _none_or_text(recovery_attempt.get("source_fingerprint_id")),
                     "current_fingerprint_id": _text(recovery_attempt.get("current_fingerprint_id")),
                     "attempted_at": _float(recovery_attempt.get("attempted_at")),
@@ -841,12 +863,12 @@ class StateStore:
                 rows = conn.execute("SELECT * FROM branch_publications ORDER BY branch_id, publication_id").fetchall()
         return [dict(row) for row in rows]
 
-    def recovery_outcomes(self, *, restore_state: str | None = None) -> list[dict[str, Any]]:
+    def recovery_outcomes(self, *, compatibility_result: str | None = None) -> list[dict[str, Any]]:
         with self._connection() as conn:
-            if restore_state:
+            if compatibility_result:
                 rows = conn.execute(
-                    "SELECT * FROM recovery_attempts WHERE restore_state = ? ORDER BY attempted_at",
-                    (restore_state,),
+                    "SELECT * FROM recovery_attempts WHERE compatibility_result = ? ORDER BY attempted_at",
+                    (compatibility_result,),
                 ).fetchall()
             else:
                 rows = conn.execute("SELECT * FROM recovery_attempts ORDER BY attempted_at").fetchall()
@@ -911,13 +933,14 @@ class StateStore:
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         ensure_state_layout(self.run_root)
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        self._rebuild_if_dirty()
+        conn = sqlite3.connect(str(self.db_path), timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             yield conn
         finally:
             conn.close()
@@ -934,7 +957,42 @@ class StateStore:
                 raise
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {_SCHEMA_METADATA_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        stored_version = self._stored_schema_version(conn)
+        if stored_version > STATE_STORE_SCHEMA_VERSION:
+            raise StateStoreError(
+                f"state store schema {stored_version} is newer than supported schema {STATE_STORE_SCHEMA_VERSION}"
+            )
         self._create_tables(conn)
+        self._ensure_added_columns(conn)
+        if stored_version < STATE_STORE_SCHEMA_VERSION:
+            self._set_schema_version(conn, STATE_STORE_SCHEMA_VERSION)
+
+    def _stored_schema_version(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            f"SELECT value FROM {_SCHEMA_METADATA_TABLE} WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            return int(row["value"])
+        except Exception as exc:
+            raise StateStoreError("invalid state store schema version metadata") from exc
+
+    def _set_schema_version(self, conn: sqlite3.Connection, version: int) -> None:
+        conn.execute(
+            f"INSERT OR REPLACE INTO {_SCHEMA_METADATA_TABLE} (key, value) VALUES ('schema_version', ?)",
+            (str(version),),
+        )
+
+    def _ensure_added_columns(self, conn: sqlite3.Connection) -> None:
+        for table, columns in _COLUMN_MIGRATIONS.items():
+            existing = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for column_name, column_type in columns.items():
+                if column_name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_type}")
 
     def _create_tables(self, conn: sqlite3.Connection) -> None:
         for ddl in _DDL:
@@ -943,6 +1001,11 @@ class StateStore:
     def _delete_canonical(self, conn: sqlite3.Connection, canonical_ref: str) -> None:
         for table_name in _CANONICAL_TABLES:
             conn.execute(f"DELETE FROM {table_name} WHERE canonical_ref = ?", (canonical_ref,))
+
+    def _clear_index_tables(self) -> None:
+        with self._transaction() as conn:
+            for table_name in reversed(_CANONICAL_TABLES):
+                conn.execute(f"DELETE FROM {table_name}")
 
     def _insert(self, conn: sqlite3.Connection, table: str, values: Mapping[str, Any]) -> None:
         keys = list(values.keys())
@@ -1046,6 +1109,10 @@ class StateStore:
                     "exact_file_path_hit": _bool(signal_payload.get("exact_file_path_hit")),
                     "exact_symbol_hit": _bool(signal_payload.get("exact_symbol_hit")),
                     "node_id_match": _bool(signal_payload.get("node_id_match")),
+                    "verifier_support_score": _float(signal_payload.get("verifier_support_score")),
+                    "lexical_overlap_score": _float(signal_payload.get("lexical_overlap_score")),
+                    "embedding_similarity_score": _float(signal_payload.get("embedding_similarity_score")),
+                    "same_task_affinity_score": _float(signal_payload.get("same_task_affinity_score")),
                     "synthesized_neighbor_expansion": _bool(signal_payload.get("synthesized_neighbor_expansion")),
                     **_canonical("retrieval_diagnostic", canonical_ref, signal_id),
                     "payload_json": _json_dumps(signal_payload),
@@ -1305,6 +1372,10 @@ _DDL = [
         exact_file_path_hit INTEGER,
         exact_symbol_hit INTEGER,
         node_id_match INTEGER,
+        verifier_support_score REAL,
+        lexical_overlap_score REAL,
+        embedding_similarity_score REAL,
+        same_task_affinity_score REAL,
         synthesized_neighbor_expansion INTEGER,
         {_CANONICAL_COLUMNS}
     )""",
@@ -1317,7 +1388,7 @@ _DDL = [
         origin_request_id TEXT,
         rebound_request_id TEXT,
         reconciliation_policy TEXT,
-        restore_state TEXT,
+        compatibility_result TEXT,
         source_fingerprint_id TEXT,
         current_fingerprint_id TEXT,
         attempted_at REAL,
@@ -1368,6 +1439,19 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS idx_retrieval_query ON retrieval_diagnostics(query_hash, retrieved_at)",
     "CREATE INDEX IF NOT EXISTS idx_events_request ON runtime_events(request_id, sequence_no)",
 ]
+
+
+_COLUMN_MIGRATIONS = {
+    "recovery_attempts": {
+        "compatibility_result": "TEXT",
+    },
+    "retrieval_signal_rows": {
+        "verifier_support_score": "REAL",
+        "lexical_overlap_score": "REAL",
+        "embedding_similarity_score": "REAL",
+        "same_task_affinity_score": "REAL",
+    },
+}
 
 
 _CANONICAL_TABLES = (

@@ -264,7 +264,12 @@ class RunStore:
     def load_checkpoint_envelope(self, checkpoint_ref: str | Path) -> CheckpointEnvelope:
         checkpoint_path = Path(str(checkpoint_ref)).expanduser().resolve()
         payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        return (CheckpointEnvelope).model_validate(payload)
+        envelope = (CheckpointEnvelope).model_validate_persisted(payload)
+        update = {"selected_checkpoint_ref": str(checkpoint_path)}
+        if not str(envelope.source_checkpoint_ref or "").strip():
+            update["source_checkpoint_ref"] = str(checkpoint_path)
+        envelope = envelope.model_copy(update=update, deep=True)
+        return envelope
 
     def write_checkpoint(self, envelope: CheckpointEnvelope) -> CheckpointReference:
         run_root = self.resolve_run_root(envelope.run_root)

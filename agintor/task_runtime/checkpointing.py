@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Mapping, Sequence
 from ..exceptions import BranchCancelled, HardInvalidation, ProviderExhaustedError, ResumeRecoveryError
+from ..openai_trace import resolve_trace_session_id, trace_session_dir_name
 from ..runtime_api import (
     AgentFrame,
     PolicyContext,
@@ -14,6 +15,7 @@ from ..runtime_api import (
     runtime_task_materialization_key,
 )
 from ..schemas import (
+    CHECKPOINT_ENVELOPE_SCHEMA_VERSION,
     AgentTemplate,
     AsyncHandle,
     BenchmarkTask,
@@ -54,6 +56,19 @@ from ..utils import count_tokens_rough, ensure_directory, merge_provider_usage, 
 
 
 class CheckpointingMixin:
+    def _selected_resume_checkpoint_ref(self, checkpoint_envelope: CheckpointEnvelope) -> str:
+        snapshot = getattr(checkpoint_envelope, "runtime_state_snapshot", None)
+        candidates = [
+            getattr(checkpoint_envelope, "selected_checkpoint_ref", None),
+            getattr(checkpoint_envelope, "source_checkpoint_ref", None),
+            getattr(snapshot, "latest_checkpoint_ref", None),
+        ]
+        for candidate in candidates:
+            selected = str(candidate or "").strip()
+            if selected:
+                return selected
+        return ""
+
     def _restore_from_checkpoint(
         self,
         context: PolicyContext,
@@ -61,11 +76,7 @@ class CheckpointingMixin:
         *,
         reconciliation_policy: str,
     ) -> None:
-        selected_checkpoint_ref = (
-            str(checkpoint_envelope.source_checkpoint_ref or "").strip()
-            or str(getattr(checkpoint_envelope.runtime_state_snapshot, "latest_checkpoint_ref", "") or "").strip()
-            or str(context.state.latest_checkpoint_ref or "").strip()
-        )
+        selected_checkpoint_ref = self._selected_resume_checkpoint_ref(checkpoint_envelope)
         current_fingerprint = self._capture_environment_fingerprint(
             context,
             source_checkpoint_ref=selected_checkpoint_ref or None,
@@ -85,6 +96,11 @@ class CheckpointingMixin:
             raise ResumeRecoveryError(
                 RecoveryFailureKind.REQUEST_MISMATCH.value,
                 f"checkpoint plan mismatch: expected {context.plan.plan_id}, found {checkpoint_envelope.plan_id}",
+            )
+        if checkpoint_envelope.checkpoint_schema_version != CHECKPOINT_ENVELOPE_SCHEMA_VERSION:
+            raise ResumeRecoveryError(
+                RecoveryFailureKind.RUNTIME_CONTRACT_MISMATCH.value,
+                "checkpoint envelope schema does not match the loaded runtime",
             )
         if checkpoint_envelope.runtime_contract_version != self.runtime.kernel_manifest.runtime_contract_version:
             raise ResumeRecoveryError(
@@ -136,9 +152,7 @@ class CheckpointingMixin:
             for output_key in context.plan.terminal_output_keys
             if output_key not in context.state.artifacts
         ]
-        context.state.latest_checkpoint_ref = selected_checkpoint_ref or self.shell.latest_checkpoint_ref(
-            checkpoint_envelope.run_id or checkpoint_envelope.request_id
-        )
+        context.state.latest_checkpoint_ref = selected_checkpoint_ref or None
         self._record_recovery_attempt(
             context,
             checkpoint_envelope,
@@ -608,23 +622,23 @@ class CheckpointingMixin:
             request_id=context.request_id,
             task_id=task.task_id,
             seed=seed,
+            runtime_hash=self.runtime.runtime_hash,
             evaluation_unit_id=trace_context.evaluation_unit_id,
             episode_kind=trace_context.episode_kind,
             episode_step_index=trace_context.episode_step_index,
         )
+        resolved_session_id = resolve_trace_session_id(trace_context.session_id)
         return TraceCursorSnapshot(
             runtime_trace_length=len(context.trace),
             latest_runtime_event=str(latest_event.get("event") or "") or None,
             latest_runtime_event_sequence_no=int(context.state.event_sequence_no or 0),
-            last_session_id=trace_context.session_id,
+            last_session_id=resolved_session_id,
             last_build_id=trace_context.build_id,
             last_solve_request_id=context.request_id,
             last_runtime_task_key=runtime_task_key,
             linked_call_ids=linked_call_ids,
             materialization_state_ref=(
-                f"openai_api_traces/sessions/{trace_context.session_id}/materialization_state.json"
-                if trace_context.session_id
-                else None
+                f"openai_api_traces/sessions/{trace_session_dir_name(resolved_session_id)}/materialization_state.json"
             ),
             captured_at=now_ts(),
         )
@@ -701,18 +715,22 @@ class CheckpointingMixin:
         if getattr(self.shell, "run_store", None) is None:
             return
         deltas = self._fingerprint_deltas(source_fingerprint, current_fingerprint)
-        restore_state = "restored" if source_fingerprint is not None and not deltas else "restored_with_changes"
         blocked_nodes = sorted(str(node_id) for node_id in blocked_node_ids if str(node_id).strip())
+        compatibility_result = (
+            "exact_compatible"
+            if source_fingerprint is not None and not deltas and not blocked_nodes
+            else "degraded_compatible"
+        )
         recovery = RecoveryAttempt(
             recovery_attempt_id=f"recovery.{stable_hash(selected_checkpoint_ref, context.request_id, now_ts())[:16]}",
             run_id=str(getattr(self.shell, "run_id", "") or checkpoint_envelope.run_id),
             attempt_id=str(getattr(self.shell, "attempt_id", "") or ""),
             selected_checkpoint_ref=selected_checkpoint_ref,
-            source_checkpoint_ref=checkpoint_envelope.source_checkpoint_ref,
+            source_checkpoint_ref=selected_checkpoint_ref or None,
             origin_request_id=checkpoint_envelope.origin_request_id,
             rebound_request_id=context.request_id,
             reconciliation_policy=reconciliation_policy if reconciliation_policy in {"strict", "best_effort"} else "strict",
-            restore_state=restore_state,
+            compatibility_result=compatibility_result,
             source_fingerprint_id=getattr(source_fingerprint, "fingerprint_id", None),
             current_fingerprint_id=current_fingerprint.fingerprint_id,
             fingerprint_deltas=deltas,
@@ -727,16 +745,51 @@ class CheckpointingMixin:
                 if receipt.node_id in blocked_nodes and str(receipt.side_effect_id).strip()
             ],
             blocked_node_ids=blocked_nodes,
-            changed_plan_node_ids=blocked_nodes if restore_state == "restored_with_changes" else [],
+            degraded_plan_node_ids=blocked_nodes if compatibility_result == "degraded_compatible" else [],
             resume_explanation=(
                 "resume restored with matching environment fingerprint"
-                if restore_state == "restored"
-                else "resume restored with environment fingerprint differences or missing source fingerprint"
+                if compatibility_result == "exact_compatible"
+                else "resume restored with environment fingerprint differences, blocked receipts, or missing source fingerprint"
             ),
             attempted_at=now_ts(),
             completed_at=now_ts(),
         )
         self.shell.run_store.write_recovery_attempt(self.shell.run_root, recovery)
+
+    def _record_failed_recovery_attempt(
+        self,
+        context: PolicyContext,
+        checkpoint_envelope: CheckpointEnvelope,
+        *,
+        selected_checkpoint_ref: str,
+        reconciliation_policy: str,
+        failure_explanation: str,
+    ) -> None:
+        if getattr(self.shell, "run_store", None) is None:
+            return
+        try:
+            current_fingerprint = self._capture_environment_fingerprint(
+                context,
+                source_checkpoint_ref=selected_checkpoint_ref or None,
+            )
+            recovery = RecoveryAttempt(
+                recovery_attempt_id=f"recovery.{stable_hash(selected_checkpoint_ref, context.request_id, failure_explanation, now_ts())[:16]}",
+                run_id=str(getattr(self.shell, "run_id", "") or checkpoint_envelope.run_id),
+                attempt_id=str(getattr(self.shell, "attempt_id", "") or ""),
+                selected_checkpoint_ref=selected_checkpoint_ref,
+                source_checkpoint_ref=selected_checkpoint_ref or None,
+                origin_request_id=checkpoint_envelope.origin_request_id,
+                rebound_request_id=context.request_id,
+                reconciliation_policy=reconciliation_policy if reconciliation_policy in {"strict", "best_effort"} else "strict",
+                compatibility_result="fail_closed",
+                current_fingerprint_id=current_fingerprint.fingerprint_id,
+                resume_explanation=failure_explanation,
+                attempted_at=now_ts(),
+                completed_at=now_ts(),
+            )
+            self.shell.run_store.write_recovery_attempt(self.shell.run_root, recovery)
+        except Exception:
+            return
 
     def _build_run_result(
         self,

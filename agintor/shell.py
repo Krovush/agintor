@@ -445,7 +445,13 @@ class FixedShell:
             target_ref = latest
         path = Path(target_ref)
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return (CheckpointEnvelope).model_validate(payload)
+        loaded_ref = str(path.resolve())
+        envelope = (CheckpointEnvelope).model_validate_persisted(payload)
+        update = {"selected_checkpoint_ref": loaded_ref}
+        if not str(envelope.source_checkpoint_ref or "").strip():
+            update["source_checkpoint_ref"] = loaded_ref
+        envelope = envelope.model_copy(update=update, deep=True)
+        return envelope
 
     def save_side_effect_receipt(self, receipt: SideEffectReceipt) -> Path:
         if self.run_store is not None:

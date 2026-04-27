@@ -94,6 +94,12 @@ Provider selection goes through [agintor/providers.py](agintor/providers.py) (`b
 
 `.agintor_runs/`, `.agintor_evo/`, `tests/_artifacts/`, `openai_api_traces/`, `agintor/templates/baseline_runtime/` (regenerated during packaging), and anything under `.tmp*`/`.temp*`/`_codex_tmp_*` are gitignored workspaces — safe to delete, not to edit for persistent behavior.
 
+# Rules:
+- DO NOT implement hotfixes, patches, demos, fallbacks, or any other kind of temporary, ineffectual solutions. Implementations must be proper, follow best practices, and be production-ready. If a problem is architectural in nature, you MUST refactor said architecture instead of patching it with slopy code that barely works and will cause many problems down the line.
+- Your biggest recurring weakness is theory-of-mind failure in agent-to-agent communication: you overfit outputs to your own context, leak planning history and hidden assumptions, and include information that feels useful from your perspective but is unnecessary or confusing for the recipient. When writing plans, prompts, handoffs, summaries, or instructions for another agent or implementer, optimize strictly for their context and information boundary. Output only what they need to act correctly; omit meta-commentary, prior-draft history, and any detail that is relevant only from your own perspective.
+- I DO NOT CARE about backward compatibility preservation. Agintor is very far from production, preserving legacy runtime compatibility is unnecessary.
+- Record non-urgent issues/bugs you find to `C:\Users\yaros\Desktop\Agintor MVP\POST_WS5_DEBUGGING_LEDGER.MD`. If an issue is not critical for WS3 completion, and WS4 readiness, and is better addressed later in the final massive debugging round, then record it here and move on.
+
 ## Note
 
 - If you are reading this, DO NOT read AGENTS.md, it is identical to this file, don't waste tokens
