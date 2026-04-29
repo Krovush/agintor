@@ -1223,7 +1223,7 @@ def test_compile_execution_plan_from_solve_request_enriches_runtime_identity(tmp
     assert plan.trace_context.runtime_dir == str(tmp_path / "runtime")
 
 
-def test_execution_plan_digest_ignores_trace_session_id(monkeypatch, tmp_path):
+def test_execution_plan_digest_ignores_trace_provenance(monkeypatch, tmp_path):
     solve_request = load_solve_request(prompt="Return a greeting as JSON.")
 
     monkeypatch.setenv("AGINTOR_OPENAI_TRACE_SESSION_ID", "session.digest-one")
@@ -1239,11 +1239,12 @@ def test_execution_plan_digest_ignores_trace_session_id(monkeypatch, tmp_path):
         solve_request,
         seed=7,
         runtime_hash="runtime-hash",
-        runtime_dir=str(tmp_path / "runtime"),
+        runtime_dir=str(tmp_path / "other-runtime"),
     )
 
     assert first_plan.trace_context.session_id == "session.digest-one"
     assert second_plan.trace_context.session_id == "session.digest-two"
+    assert first_plan.trace_context.runtime_dir != second_plan.trace_context.runtime_dir
     assert first_plan.plan_digest == second_plan.plan_digest
 
 
@@ -2205,18 +2206,18 @@ def test_batch_evaluation_unit_key_keeps_benchmark_duplicates_separate_even_if_t
     first = RuntimeTaskInvocation(
         request_id="benchmark.duplicate.transport.seed_1",
         evaluation_unit_id="shared.transport.unit",
-        episode_kind="benchmark_duplicate",
         seed=1,
         task=task,
     )
     second = RuntimeTaskInvocation(
         request_id="benchmark.duplicate.transport.seed_1.dup_01",
         evaluation_unit_id="shared.transport.unit",
-        episode_kind="benchmark_duplicate",
         seed=1,
         task=task,
     )
 
+    assert first.episode_kind is None
+    assert second.episode_kind is None
     assert batch_evaluation_unit_key(first) == first.request_id
     assert batch_evaluation_unit_key(second) == second.request_id
     assert batch_evaluation_unit_key(first) != batch_evaluation_unit_key(second)
@@ -2465,6 +2466,81 @@ def test_resume_from_checkpoint_restores_budget_state_and_reuses_completed_recei
     assert resumed_run.hard_invalid is False
     assert resumed_run.model_calls == 1
     assert resumed_run.artifact == first_run.artifact
+
+
+def test_provider_receipt_replay_ignores_resume_trace_provenance(tmp_path):
+    task = _make_direct_response_task("receipt.trace-provenance")
+    plan = compile_execution_plan_from_task(
+        task,
+        request_id="request.original",
+        seed=0,
+        runtime_hash="runtime.hash",
+        runtime_dir="/mnt/runtime",
+    )
+    base_trace_context = plan.trace_context.model_copy(update={"op_id": "respond", "run_node_id": "node.original"})
+
+    def make_context(
+        trace_context: OpenAITraceContext,
+        provider: ReplayProvider,
+        receipts: list[dict[str, object]] | None = None,
+    ) -> PolicyContext:
+        return PolicyContext(
+            runtime_dir=Path(trace_context.runtime_dir or tmp_path),
+            shell=SimpleNamespace(),
+            task=task,
+            request_id=trace_context.request_id or plan.request_id,
+            plan=plan,
+            trace_context=trace_context,
+            provider=provider,
+            seed=0,
+            state=RuntimeState(
+                request_id=trace_context.request_id or plan.request_id,
+                plan_id=plan.plan_id,
+                side_effect_receipts=list(receipts or []),
+            ),
+            budget=RuntimeBudget(),
+            trace=[],
+            objective=plan.objective,
+            runtime_backend="docker",
+        )
+
+    first_provider = ReconcilingReplayProvider([{"text": "cached answer", "model_name": "replay/small"}])
+    first_context = make_context(base_trace_context, first_provider)
+    first_response = first_context.run_model_request(
+        instructions="instructions",
+        prompt="prompt",
+        model_class="medium",
+        purpose="direct_response",
+        payload={"node": "respond"},
+    )
+    resumed_trace_context = base_trace_context.model_copy(
+        update={
+            "request_id": "request.resume",
+            "runtime_dir": str((tmp_path / "host-runtime").resolve()),
+            "session_id": "session.resume",
+            "run_node_id": "node.resume",
+        }
+    )
+    resume_provider = ReconcilingReplayProvider([])
+    resume_context = make_context(
+        resumed_trace_context,
+        resume_provider,
+        receipts=first_context.state.side_effect_receipts,
+    )
+
+    replayed_response = resume_context.run_model_request(
+        instructions="instructions",
+        prompt="prompt",
+        model_class="medium",
+        purpose="direct_response",
+        payload={"node": "respond"},
+    )
+
+    assert first_response.text == "cached answer"
+    assert first_provider.generate_calls == 1
+    assert resume_provider.generate_calls == 0
+    assert replayed_response.text == "cached answer"
+    assert replayed_response.raw["replayed_from_receipt"].startswith("provider-completion.")
 
 
 def test_direct_resume_uses_loaded_checkpoint_ref_as_source_for_followup_checkpoints(tmp_path):
@@ -2913,7 +2989,7 @@ def test_resume_rebinds_request_identity_and_carries_forward_resume_provenance(t
         role="root",
         tool_scope=sorted(shell.tool_registry.tools),
         model_class="medium",
-        trace_context=plan.trace_context,
+        trace_context=plan.trace_context.model_copy(update={"op_id": "checkpoint-op", "run_node_id": "checkpoint-node"}),
         agent_snapshot=_canonical_root_snapshot(),
     )
     checkpoint_envelope = CheckpointEnvelope(
@@ -2953,6 +3029,15 @@ def test_resume_rebinds_request_identity_and_carries_forward_resume_provenance(t
         checkpoint_envelope,
         request_id_override="resume.identity.override",
         source_checkpoint_ref="checkpoint://resume-source",
+        trace_context=OpenAITraceContext(
+            request_id="ignored-by-rebind",
+            runtime_dir=str((tmp_path / "active-runtime").resolve()),
+            runtime_session_id="sess.active",
+            runtime_message_id="msg.active",
+            runtime_message_index=3,
+            op_id="override-op",
+            run_node_id="override-node",
+        ),
     )
 
     assert solve_request.request_id == "resume.identity.override"
@@ -2960,11 +3045,23 @@ def test_resume_rebinds_request_identity_and_carries_forward_resume_provenance(t
     assert rebound_envelope.request_id == effective_request_id
     assert rebound_envelope.plan_snapshot["request_id"] == effective_request_id
     assert rebound_envelope.plan_snapshot["trace_context"]["request_id"] == effective_request_id
+    assert rebound_envelope.plan_snapshot["trace_context"]["runtime_dir"] == str((tmp_path / "active-runtime").resolve())
+    assert rebound_envelope.plan_snapshot["trace_context"]["runtime_session_id"] == "sess.active"
+    assert rebound_envelope.plan_snapshot["trace_context"]["runtime_message_id"] == "msg.active"
+    assert rebound_envelope.plan_snapshot["trace_context"]["runtime_message_index"] == 3
     assert rebound_envelope.runtime_state_snapshot.request_id == effective_request_id
     assert rebound_envelope.runtime_state_snapshot.latest_checkpoint_ref == "checkpoint://resume-source"
     assert rebound_envelope.selected_checkpoint_ref == "checkpoint://resume-source"
     assert rebound_envelope.runtime_state_snapshot.queued_frames[0].request_id == effective_request_id
     assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.request_id == effective_request_id
+    assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.runtime_dir == str(
+        (tmp_path / "active-runtime").resolve()
+    )
+    assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.runtime_session_id == "sess.active"
+    assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.runtime_message_id == "msg.active"
+    assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.runtime_message_index == 3
+    assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.op_id == "checkpoint-op"
+    assert rebound_envelope.runtime_state_snapshot.queued_frames[0].trace_context.run_node_id == "checkpoint-node"
     assert rebound_envelope.working_state.selected_checkpoint_refs == [plan.request_id]
     assert rebound_envelope.trace_cursor.last_solve_request_id == effective_request_id
     assert rebound_envelope.origin_request_id == plan.request_id

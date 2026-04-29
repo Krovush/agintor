@@ -9,6 +9,7 @@ import shutil
 import socket
 import threading
 import textwrap
+import time
 from datetime import datetime, timezone
 from itertools import count
 from pathlib import Path
@@ -43,15 +44,21 @@ class TraceMaterializationState(BaseModel):
     known_call_ids: list[str] = Field(default_factory=list)
     materialized_build_ids: list[str] = Field(default_factory=list)
     materialized_solve_request_ids: list[str] = Field(default_factory=list)
-    materialized_runtime_task_keys: list[str] = Field(default_factory=list)
+    materialized_factory_message_keys: list[str] = Field(default_factory=list)
+    materialized_runtime_session_message_keys: list[str] = Field(default_factory=list)
+    materialized_benchmark_task_keys: list[str] = Field(default_factory=list)
     pending_build_ids: list[str] = Field(default_factory=list)
     pending_solve_request_ids: list[str] = Field(default_factory=list)
-    pending_runtime_task_keys: list[str] = Field(default_factory=list)
+    pending_factory_message_keys: list[str] = Field(default_factory=list)
+    pending_runtime_session_message_keys: list[str] = Field(default_factory=list)
+    pending_benchmark_task_keys: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     updated_at: float = 0.0
     call_count: int = 0
     grouped_call_count: int = 0
-    runtime_task_keys: list[str] = Field(default_factory=list)
+    factory_message_keys: list[str] = Field(default_factory=list)
+    runtime_session_message_keys: list[str] = Field(default_factory=list)
+    benchmark_task_keys: list[str] = Field(default_factory=list)
     rebuilt_at: str = ""
 
 
@@ -103,6 +110,118 @@ def resolve_trace_context(request_metadata: Mapping[str, Any] | None) -> OpenAIT
     return (OpenAITraceContext).model_validate({**(context).model_dump(), "session_id": session_id})
 
 
+TRACE_GROUP_FACTORY_MESSAGE = "factory_message"
+TRACE_GROUP_RUNTIME_SESSION_MESSAGE = "runtime_session_message"
+TRACE_GROUP_BENCHMARK_TASK = "benchmark_task"
+
+
+def factory_message_trace_key(
+    *,
+    factory_chat_id: str | None,
+    factory_message_id: str | None,
+    factory_message_index: int | None = None,
+) -> str:
+    chat = str(factory_chat_id or "").strip()
+    message = str(factory_message_id or "").strip()
+    if not chat or not message:
+        return None
+    parts = ["factory", chat]
+    if factory_message_index is not None:
+        parts.append(f"m{int(factory_message_index)}")
+    parts.append(message)
+    return "|".join(parts)
+
+
+def runtime_message_trace_key(
+    *,
+    runtime_hash: str | None,
+    runtime_session_id: str | None,
+    runtime_message_id: str | None,
+    runtime_message_index: int | None = None,
+) -> str | None:
+    runtime = str(runtime_hash or "").strip()
+    session = str(runtime_session_id or "").strip()
+    message = str(runtime_message_id or "").strip()
+    if not runtime or not session or not message:
+        return None
+    parts = ["runtime", runtime, "session", session]
+    if runtime_message_index is not None:
+        parts.append(f"m{int(runtime_message_index)}")
+    parts.append(message)
+    return "|".join(parts)
+
+
+def benchmark_task_trace_key(
+    *,
+    request_id: str | None,
+    task_id: str | None,
+    seed: int | None,
+    runtime_hash: str | None,
+    evaluation_unit_id: str | None = None,
+    episode_kind: str | None = None,
+    episode_step_index: int | None = None,
+) -> str | None:
+    request_or_unit = str(evaluation_unit_id or request_id or "").strip()
+    task = str(task_id or "").strip()
+    runtime = str(runtime_hash or "").strip()
+    if not request_or_unit or not task or seed is None or not runtime:
+        return None
+    parts = [task, f"seed_{int(seed)}"]
+    parts.extend(_benchmark_episode_key_parts(episode_kind=episode_kind, episode_step_index=episode_step_index))
+    parts.extend([runtime, request_or_unit])
+    return "|".join(parts)
+
+
+def _benchmark_episode_key_parts(
+    *,
+    episode_kind: str | None,
+    episode_step_index: int | None,
+) -> list[str]:
+    if str(episode_kind or "").strip() != "transfer_episode":
+        return []
+    if episode_step_index is None:
+        return []
+    return ["episode_transfer_episode", f"step_{int(episode_step_index)}"]
+
+
+def trace_grouping_key(trace_context: OpenAITraceContext) -> tuple[str, str] | None:
+    """Dispatch a trace context to its group kind and stable key.
+
+    Records belong to exactly one of: factory message, runtime session message,
+    or benchmark task. A record that supplies none of those identity sets cannot
+    be grouped beyond the flat session view.
+    """
+    if trace_context.request_mode == "benchmark":
+        benchmark_key = benchmark_task_trace_key(
+            request_id=trace_context.request_id,
+            task_id=trace_context.task_id,
+            seed=trace_context.seed,
+            runtime_hash=trace_context.runtime_hash,
+            evaluation_unit_id=trace_context.evaluation_unit_id,
+            episode_kind=trace_context.episode_kind,
+            episode_step_index=trace_context.episode_step_index,
+        )
+        if benchmark_key:
+            return TRACE_GROUP_BENCHMARK_TASK, benchmark_key
+        return None
+    factory_key = factory_message_trace_key(
+        factory_chat_id=trace_context.factory_chat_id,
+        factory_message_id=trace_context.factory_message_id,
+        factory_message_index=trace_context.factory_message_index,
+    )
+    if factory_key:
+        return TRACE_GROUP_FACTORY_MESSAGE, factory_key
+    runtime_key = runtime_message_trace_key(
+        runtime_hash=trace_context.runtime_hash,
+        runtime_session_id=trace_context.runtime_session_id,
+        runtime_message_id=trace_context.runtime_message_id,
+        runtime_message_index=trace_context.runtime_message_index,
+    )
+    if runtime_key:
+        return TRACE_GROUP_RUNTIME_SESSION_MESSAGE, runtime_key
+    return None
+
+
 def runtime_task_trace_key(
     *,
     request_id: str | None,
@@ -113,43 +232,103 @@ def runtime_task_trace_key(
     episode_kind: str | None = None,
     episode_step_index: int | None = None,
 ) -> str | None:
-    del episode_kind, episode_step_index
-    request_or_unit = str(evaluation_unit_id or request_id or "").strip()
-    task = str(task_id or "").strip()
-    runtime = str(runtime_hash or "").strip()
-    if not request_or_unit or not task or seed is None or not runtime:
-        return None
-    return "|".join([task, f"seed_{int(seed)}", runtime, request_or_unit])
+    """Stable key for a record whose identity comes from benchmark task fields.
 
-
-def _runtime_task_key(trace_context: OpenAITraceContext) -> str | None:
-    return runtime_task_trace_key(
-        request_id=trace_context.request_id,
-        task_id=trace_context.task_id,
-        seed=trace_context.seed,
-        runtime_hash=trace_context.runtime_hash,
-        evaluation_unit_id=trace_context.evaluation_unit_id,
-        episode_kind=trace_context.episode_kind,
-        episode_step_index=trace_context.episode_step_index,
+    Retained as the trace-grouping key surfaced by checkpoint trace cursors and
+    the state store. Factory/runtime-session traces use their own key helpers.
+    """
+    return benchmark_task_trace_key(
+        request_id=request_id,
+        task_id=task_id,
+        seed=seed,
+        runtime_hash=runtime_hash,
+        evaluation_unit_id=evaluation_unit_id,
+        episode_kind=episode_kind,
+        episode_step_index=episode_step_index,
     )
 
 
-def _runtime_task_view_dir(session_dir: Path, trace_context: OpenAITraceContext) -> Path | None:
+def _factory_message_view_dir(
+    session_dir: Path,
+    trace_context: OpenAITraceContext,
+) -> Path | None:
+    chat = str(trace_context.factory_chat_id or "").strip()
+    message = str(trace_context.factory_message_id or "").strip()
+    if not chat or not message:
+        return None
+    if trace_context.factory_message_index is not None:
+        message_slug = f"m{int(trace_context.factory_message_index)}_{_slug(message, fallback='message')}"
+    else:
+        message_slug = _slug(message, fallback="message")
+    return (
+        session_dir
+        / "factory_projects"
+        / _slug(chat, fallback="chat")
+        / message_slug
+    )
+
+
+def _runtime_session_message_view_dir(
+    session_dir: Path,
+    trace_context: OpenAITraceContext,
+) -> Path | None:
+    runtime = str(trace_context.runtime_hash or "").strip()
+    session = str(trace_context.runtime_session_id or "").strip()
+    message = str(trace_context.runtime_message_id or "").strip()
+    if not runtime or not session or not message:
+        return None
+    if trace_context.runtime_message_index is not None:
+        message_slug = f"m{int(trace_context.runtime_message_index)}_{_slug(message, fallback='message')}"
+    else:
+        message_slug = _slug(message, fallback="message")
+    return (
+        session_dir
+        / "runtime_sessions"
+        / _slug(runtime, fallback="runtime")
+        / _slug(session, fallback="session")
+        / message_slug
+    )
+
+
+def _benchmark_task_view_dir(
+    session_dir: Path,
+    trace_context: OpenAITraceContext,
+) -> Path | None:
     request_or_unit = str(trace_context.evaluation_unit_id or trace_context.request_id or "").strip()
     task = str(trace_context.task_id or "").strip()
     runtime = str(trace_context.runtime_hash or "").strip()
     if not request_or_unit or not task or trace_context.seed is None or not runtime:
         return None
+    request_slug = _slug(request_or_unit, fallback="request")
+    if (
+        str(trace_context.episode_kind or "").strip() == "transfer_episode"
+        and trace_context.episode_step_index is not None
+    ):
+        leaf = f"{request_slug}__step_{int(trace_context.episode_step_index)}"
+    else:
+        leaf = request_slug
     return (
         session_dir
-        / "runtime_tasks"
+        / "benchmark_tasks"
         / _slug(task, fallback="task")
         / f"seed_{int(trace_context.seed)}"
-        / "runtimes"
         / _slug(runtime, fallback="runtime")
-        / "requests"
-        / _slug(request_or_unit, fallback="request")
+        / leaf
     )
+
+
+def _trace_group_view_dir(
+    session_dir: Path,
+    group_kind: str,
+    trace_context: OpenAITraceContext,
+) -> Path | None:
+    if group_kind == TRACE_GROUP_FACTORY_MESSAGE:
+        return _factory_message_view_dir(session_dir, trace_context)
+    if group_kind == TRACE_GROUP_RUNTIME_SESSION_MESSAGE:
+        return _runtime_session_message_view_dir(session_dir, trace_context)
+    if group_kind == TRACE_GROUP_BENCHMARK_TASK:
+        return _benchmark_task_view_dir(session_dir, trace_context)
+    return None
 
 
 def _slug(value: str, *, fallback: str) -> str:
@@ -191,16 +370,26 @@ def _render_block(value: Any, *, preferred: str = "text") -> tuple[str, str]:
 
 def _write_text(path: Path, text: str) -> None:
     ensure_directory(path.parent)
-    temp_path = path.with_name(f".tmp-{os.getpid()}-{next(_WRITE_COUNTER)}-{stable_hash(path.name)[:8]}")
-    try:
-        temp_path.write_text(text, encoding="utf-8")
-        os.replace(temp_path, path)
-    finally:
+    last_error: PermissionError | None = None
+    for attempt in range(6):
+        temp_path = path.with_name(f".tmp-{os.getpid()}-{next(_WRITE_COUNTER)}-{stable_hash(path.name)[:8]}")
         try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
+            temp_path.write_text(text, encoding="utf-8")
+            os.replace(temp_path, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if attempt == 5:
+                raise
+            time.sleep(0.025 * (attempt + 1))
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+    if last_error is not None:
+        raise last_error
 
 
 def _pretty_json(value: Any) -> str:
@@ -769,7 +958,15 @@ def _write_trace_view(output_dir: Path, title: str, records: Sequence[Mapping[st
 
 
 def _reset_derived_group_dirs(session_dir: Path) -> None:
-    for name in ("groups", "builds", "solves", "runtime_tasks"):
+    for name in (
+        "groups",
+        "builds",
+        "solves",
+        "runtime_tasks",
+        "factory_projects",
+        "runtime_sessions",
+        "benchmark_tasks",
+    ):
         path = session_dir / name
         if path.exists():
             shutil.rmtree(path)
@@ -782,7 +979,9 @@ def _write_grouped_views(session_dir: Path, records: Sequence[Mapping[str, Any]]
 
     build_groups: dict[str, list[Mapping[str, Any]]] = {}
     solve_groups: dict[str, list[Mapping[str, Any]]] = {}
-    runtime_groups: dict[str, tuple[OpenAITraceContext, list[Mapping[str, Any]]]] = {}
+    factory_message_groups: dict[str, tuple[OpenAITraceContext, list[Mapping[str, Any]]]] = {}
+    runtime_session_message_groups: dict[str, tuple[OpenAITraceContext, list[Mapping[str, Any]]]] = {}
+    benchmark_task_groups: dict[str, tuple[OpenAITraceContext, list[Mapping[str, Any]]]] = {}
     errors: list[str] = []
     for record in ordered_records:
         trace_context = _record_trace_context(record, errors)
@@ -794,24 +993,45 @@ def _write_grouped_views(session_dir: Path, records: Sequence[Mapping[str, Any]]
             build_groups.setdefault(build_id, []).append(record)
         if request_id:
             solve_groups.setdefault(request_id, []).append(record)
-        runtime_task_key = _runtime_task_key(trace_context)
-        if runtime_task_key:
-            runtime_groups.setdefault(runtime_task_key, (trace_context, []))[1].append(record)
+        grouping = trace_grouping_key(trace_context)
+        if grouping is None:
+            continue
+        group_kind, group_key = grouping
+        if group_kind == TRACE_GROUP_FACTORY_MESSAGE:
+            factory_message_groups.setdefault(group_key, (trace_context, []))[1].append(record)
+        elif group_kind == TRACE_GROUP_RUNTIME_SESSION_MESSAGE:
+            runtime_session_message_groups.setdefault(group_key, (trace_context, []))[1].append(record)
+        elif group_kind == TRACE_GROUP_BENCHMARK_TASK:
+            benchmark_task_groups.setdefault(group_key, (trace_context, []))[1].append(record)
 
     for build_id, rows in sorted(build_groups.items()):
         _write_trace_view(session_dir / "builds" / _slug(build_id, fallback="build"), f"Build {build_id}", rows)
     for request_id, rows in sorted(solve_groups.items()):
         _write_trace_view(session_dir / "solves" / _slug(request_id, fallback="request"), f"Solve {request_id}", rows)
 
-    runtime_task_keys: list[str] = []
-    grouped_call_count = 0
-    for runtime_task_key, (trace_context, rows) in sorted(runtime_groups.items()):
-        group_dir = _runtime_task_view_dir(session_dir, trace_context)
-        if group_dir is None:
-            continue
-        runtime_task_keys.append(runtime_task_key)
-        grouped_call_count += len(rows)
-        _write_trace_view(group_dir, f"Runtime Task {runtime_task_key}", rows)
+    factory_message_keys = _emit_grouped_view(
+        session_dir,
+        factory_message_groups,
+        TRACE_GROUP_FACTORY_MESSAGE,
+        "Factory Message",
+    )
+    runtime_session_message_keys = _emit_grouped_view(
+        session_dir,
+        runtime_session_message_groups,
+        TRACE_GROUP_RUNTIME_SESSION_MESSAGE,
+        "Runtime Session Message",
+    )
+    benchmark_task_keys = _emit_grouped_view(
+        session_dir,
+        benchmark_task_groups,
+        TRACE_GROUP_BENCHMARK_TASK,
+        "Benchmark Task",
+    )
+    grouped_call_count = (
+        sum(len(rows) for _, rows in factory_message_groups.values())
+        + sum(len(rows) for _, rows in runtime_session_message_groups.values())
+        + sum(len(rows) for _, rows in benchmark_task_groups.values())
+    )
 
     known_call_ids = [
         str(record.get("call_id") or "").strip()
@@ -827,19 +1047,41 @@ def _write_grouped_views(session_dir: Path, records: Sequence[Mapping[str, Any]]
         known_call_ids=known_call_ids,
         materialized_build_ids=sorted(build_groups),
         materialized_solve_request_ids=sorted(solve_groups),
-        materialized_runtime_task_keys=runtime_task_keys,
+        materialized_factory_message_keys=factory_message_keys,
+        materialized_runtime_session_message_keys=runtime_session_message_keys,
+        materialized_benchmark_task_keys=benchmark_task_keys,
         pending_build_ids=[],
         pending_solve_request_ids=[],
-        pending_runtime_task_keys=[],
+        pending_factory_message_keys=[],
+        pending_runtime_session_message_keys=[],
+        pending_benchmark_task_keys=[],
         errors=errors,
         updated_at=updated_at,
         call_count=len(ordered_records),
         grouped_call_count=grouped_call_count,
-        runtime_task_keys=runtime_task_keys,
+        factory_message_keys=factory_message_keys,
+        runtime_session_message_keys=runtime_session_message_keys,
+        benchmark_task_keys=benchmark_task_keys,
         rebuilt_at=datetime.fromtimestamp(updated_at, timezone.utc).isoformat(),
     )
     _write_text(session_dir / "materialization_state.json", json.dumps((state).model_dump(), indent=2, sort_keys=True))
     return state
+
+
+def _emit_grouped_view(
+    session_dir: Path,
+    groups: Mapping[str, tuple[OpenAITraceContext, Sequence[Mapping[str, Any]]]],
+    group_kind: str,
+    title_prefix: str,
+) -> list[str]:
+    keys: list[str] = []
+    for key, (trace_context, rows) in sorted(groups.items()):
+        view_dir = _trace_group_view_dir(session_dir, group_kind, trace_context)
+        if view_dir is None:
+            continue
+        keys.append(key)
+        _write_trace_view(view_dir, f"{title_prefix} {key}", rows)
+    return keys
 
 
 def rebuild_trace_materialization(session_dir: Path | str | None = None) -> TraceMaterializationState:
@@ -884,7 +1126,7 @@ def persist_openai_trace(
         purpose = str((request_metadata or {}).get("mode", "unspecified")).strip() or "unspecified"
         trace_context = resolve_trace_context(request_metadata)
         session_id = resolve_trace_session_id(trace_context.session_id)
-        runtime_task_key = _runtime_task_key(trace_context)
+        grouping = trace_grouping_key(trace_context)
         request_metadata_payload = _jsonable(request_metadata or {})
         if isinstance(request_metadata_payload, dict):
             request_metadata_payload["trace_context"] = (trace_context).model_dump()
@@ -893,12 +1135,10 @@ def persist_openai_trace(
             ordinal = next(_CALL_COUNTER)
             stem = "__".join(
                 [
-                    timestamp,
-                    f"pid{os.getpid()}",
-                    f"call{ordinal:04d}",
-                    _slug(purpose, fallback="purpose"),
-                    _slug(method_name, fallback="method"),
-                    _slug(model_name, fallback="model"),
+                    timestamp.split("_", 1)[0] + "Z",
+                    f"c{ordinal:04d}",
+                    _slug(purpose, fallback="purpose")[:16],
+                    stable_hash(os.getpid(), timestamp, method_name, model_name)[:12],
                 ]
             )
             record = {
@@ -928,8 +1168,10 @@ def persist_openai_trace(
                 "response_raw": raw_response,
                 "error": str(error or ""),
             }
-            if runtime_task_key:
-                record["runtime_task_key"] = runtime_task_key
+            if grouping is not None:
+                group_kind, group_key = grouping
+                record["trace_group_kind"] = group_kind
+                record["trace_group_key"] = group_key
             calls_dir = _calls_dir(session_id)
             json_path = calls_dir / f"{stem}.json"
             md_path = calls_dir / f"{stem}.md"
@@ -939,8 +1181,8 @@ def persist_openai_trace(
             _write_index(session_dir)
             _write_grouped_views(session_dir, _load_trace_records(session_dir))
             return stem
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError("failed to persist OpenAI trace") from exc
 
 
 def _main() -> int:

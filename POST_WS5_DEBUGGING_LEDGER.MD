@@ -89,6 +89,26 @@
   - introduce an explicit runtime-level episode execution path before transfer-scored benchmarks become part of active evaluation pressure
   - make budget, checkpointing, and solve-state semantics unambiguous for grouped episode execution
 
+### Docker durable-run indexes need explicit host projection semantics
+
+- Area:
+  - `agintor/container_runtime.py`
+  - `DockerRuntimeExecutor._rewrite_durable_run_paths()`
+  - `agintor/state_store.py`
+  - `StateStore.rebuild_from_canonical()`
+- Current behavior:
+  - Docker finalization preserves canonical replay payloads such as standalone `side_effects/*.json`, `events/*.json`, trace payloads, and long-term memory shards in container coordinates so resume replay can still see the same `/mnt/...` values the runtime recorded
+  - the SQLite state index is then rebuilt directly from those canonical payloads
+  - host-facing index queries such as receipt artifact rows, runtime-event payload rows, and long-term write rows can therefore expose `/mnt/request-files`, `/mnt/runtime`, or `/mnt/runs` values after the container mount no longer exists
+- Why not fixed in this pass:
+  - rewriting the canonical files would reintroduce the resume/replay corruption this pass was fixing
+  - rewriting the current index ad hoc would make `state_store` ambiguously mix canonical replay state with host-view projections
+  - the durable fix needs an explicit dual-coordinate contract for state-store query projections rather than another path mutation pass
+- Follow-up target:
+  - define which state-store tables are canonical replay indexes and which are host-readable projections
+  - add a projection layer or separate projected columns for host path views while keeping canonical JSON payloads unchanged for resume
+  - cover Docker finalized receipts, events, and long-term memory writes with tests that assert both replay fidelity and host usability
+
 ### Transfer-scored episode resume drops the remaining invocation set
 
 - Area:
@@ -398,3 +418,26 @@
 - Follow-up target:
   - charge service-action elapsed wall time into `RuntimeBudget.latency` just like tool and checker latency
   - recheck branch reservation enforcement and stop-policy behavior for `service_action` nodes once that accounting path is wired up
+
+### No explicit preview surface for private evolution candidates
+
+- Area:
+  - `agintor/cli.py`
+  - `agintor/runtime_builder.py`
+  - `agintor/evolution.py`
+  - `agintor/evaluator.py`
+  - `agintor/runtime_host.py`
+- Current behavior:
+  - `build-runtime` treats candidate runtimes as private factory artifacts while Agintor mutates and evaluates them
+  - `solve --prompt` targets the current released runtime snapshot in the project/runtime directory, not an in-progress candidate
+  - there is no public command or API for selecting a candidate runtime from an active evolution workspace and manually prompting it as a preview
+  - manually pointing `solve` at internal candidate directories would blur private factory evaluation state with released-runtime user sessions
+- Why not fixed before the snapshot-continuity pass:
+  - the current continuity work should keep the factory/runtime boundary strict: factory follow-ups evolve from released snapshots, and runtime chats attach to released snapshots
+  - candidate preview is a separate product surface with its own identity, session, cleanup, and feedback semantics
+  - adding it inside the continuity fix would risk making user prompts accidentally affect evolution state or making private candidates look like released runtimes
+- Follow-up target:
+  - design an explicit read-only preview command/API for manually testing a selected candidate runtime
+  - define how candidates are selected, named, retained, and cleaned up after preview
+  - keep preview sessions separate from released-runtime sessions unless a candidate is explicitly promoted
+  - decide whether preview feedback can become factory evidence, and require an explicit user action if it can

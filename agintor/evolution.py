@@ -18,7 +18,7 @@ from .providers import ModelProvider
 from .prompt_builder import METHOD_CONTRACTS
 from .runtime_loader import load_runtime
 from .runtime_profile import RuntimeProfile, load_runtime_profile, resolve_runtime_profile
-from .schemas import EvolutionHistoryRow, ObjectiveSpec
+from .schemas import EvolutionHistoryRow, ObjectiveSpec, OpenAITraceContext
 from .trace_labeler import extract_predictor_observations
 from .utils import ensure_directory, mean, stable_hash
 
@@ -51,6 +51,7 @@ class EvolutionEngine:
         profile_path: Path | None = None,
         artifact_mode: str | ArtifactMode | None = None,
         sandbox_root: Path | None = None,
+        trace_context: OpenAITraceContext | None = None,
     ) -> None:
         self.suite = suite
         self.workspace = Path(workspace)
@@ -63,6 +64,7 @@ class EvolutionEngine:
         self.baseline_runtime_dir = baseline_runtime_dir
         self.profile_path = Path(profile_path) if profile_path is not None else None
         self.runtime_profile = runtime_profile or load_runtime_profile(baseline_runtime_dir, profile_path=self.profile_path)
+        self.trace_context = trace_context
         self.predictors = DecisionFamilyModelBank()
         self.archive = QualityDiversityArchive()
         self.scheduler = ScopeScheduler()
@@ -78,6 +80,7 @@ class EvolutionEngine:
             profile_path=self.profile_path,
             artifact_mode=self.artifact_policy.mode,
             sandbox_root=self.artifact_policy.sandbox_root,
+            trace_context=trace_context,
         )
         self.objectives = objective_specs_from_suite(suite, partition="train")
         self.history: list[EvolutionHistoryRow] = []
@@ -386,6 +389,7 @@ class EvolutionEngine:
                 failing_train_traces=self._failing_train_traces(parent_eval),
                 exemplars=self._exemplars(objective.name),
                 seed=step,
+                trace_context=self.trace_context,
             )
             candidate = self.mutator.mutate(context)
             stage_results, child_dir = self.evaluator.staged_evaluate(parent_dir, candidate, objective)

@@ -46,6 +46,7 @@ from ..schemas import (
     ReceiptReconciliationRecord,
     ReplayAllocation,
     RunResult,
+    RuntimeSessionSeed,
     SideEffectReceipt,
     capability_scope_allows,
     plan_node_requires_default_provider,
@@ -162,6 +163,7 @@ class TaskRuntime(ExecutionLoopMixin, CheckpointingMixin, SideEffectsMixin, Bran
         request_id: str | None = None,
         trace_context: Any | None = None,
         plan: ExecutionPlan | None = None,
+        session_seed: RuntimeSessionSeed | None = None,
     ) -> RunResult:
         normalized_request_id = request_id or normalize_benchmark_request_id(task.task_id, seed)
         compiled_plan = plan or compile_execution_plan_from_task(
@@ -173,7 +175,7 @@ class TaskRuntime(ExecutionLoopMixin, CheckpointingMixin, SideEffectsMixin, Bran
             trace_context=trace_context,
             budget_overrides=self.budget_overrides,
         )
-        return self._run_execution_plan(task, compiled_plan, seed)
+        return self._run_execution_plan(task, compiled_plan, seed, session_seed=session_seed)
 
     def resume_from_checkpoint(
         self,

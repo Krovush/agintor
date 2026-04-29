@@ -31,6 +31,7 @@ from .schemas import (
     BenchmarkTask,
     CapabilityExchange,
     ExecutionUnitRequestEnvelope,
+    OpenAITraceContext,
     ResumeRequest,
     RunManifest,
     RunResult,
@@ -127,6 +128,7 @@ class RuntimeHost:
                 self.workspace / ".runtime_host",
                 artifact_mode=self.artifact_policy.mode,
                 sandbox_root=self.artifact_policy.sandbox_root,
+                run_store_workspace=self.workspace,
             )
         return self.container_executor
 
@@ -149,12 +151,14 @@ class RuntimeHost:
         provider: ModelProvider,
         runtime_profile: object | None = None,
         budget_overrides: Mapping[str, Any] | None = None,
+        trace_context: OpenAITraceContext | None = None,
     ) -> RuntimeBatchResponse:
         request = runtime_batch_request_for_tasks(
             request_id=f"run.{stable_hash(runtime_dir, len(task_runs), self.runtime_backend)[:12]}",
             runtime_backend=self.runtime_backend,
             task_runs=task_runs,
             budget_overrides=dict(budget_overrides or {}),
+            trace_context=trace_context,
         )
         selected_backend, request = self._normalized_batch_request(request)
         capability_exchange = self.inspect(runtime_dir, requested_backend=selected_backend)
@@ -344,7 +348,10 @@ class RuntimeHost:
         provider: ModelProvider,
         runtime_profile: object | None = None,
     ) -> RuntimeSolveResponse:
-        runtime_request, original_request, manifest, attempt = self._resolve_runtime_resume_request(request)
+        runtime_request, original_request, manifest, attempt = self._resolve_runtime_resume_request(
+            request,
+            runtime_dir=runtime_dir,
+        )
         selected_backend = self._selected_resume_backend(runtime_request, manifest)
         runtime_request = runtime_request.model_copy(update={"runtime_backend": selected_backend})
         original_request = original_request.model_copy(update={"runtime_backend": selected_backend})
@@ -547,6 +554,8 @@ class RuntimeHost:
     def _resolve_runtime_resume_request(
         self,
         request: ResumeRequest,
+        *,
+        runtime_dir: str | Path | None = None,
     ) -> tuple[RuntimeResumeRequest, RuntimeSolveRequest, RunManifest, AttemptManifest]:
         try:
             target = self.run_store.resolve_resume_target(run_ref=request.run_ref, checkpoint_ref=request.checkpoint_ref)
@@ -567,11 +576,16 @@ class RuntimeHost:
         task, plan = resume_task_and_plan_from_checkpoint(rebound_envelope)
         mode = "benchmark" if plan.origin.origin_kind == "benchmark" else "user_request"
         evaluation_unit_id = str(target.run_manifest.evaluation_unit_id or rebound_envelope.request_id or solve_request.request_id).strip() or solve_request.request_id
+        resume_runtime_dir = (
+            str(Path(runtime_dir).resolve())
+            if runtime_dir is not None
+            else getattr(plan.trace_context, "runtime_dir", None)
+        )
         effective_trace_context = runtime_trace_context(
             request.trace_context or plan.trace_context,
             request_id=solve_request.request_id,
             runtime_hash=target.run_manifest.runtime_hash or getattr(plan.trace_context, "runtime_hash", None),
-            runtime_dir=getattr(plan.trace_context, "runtime_dir", None),
+            runtime_dir=resume_runtime_dir,
             task_id=task.task_id,
             seed=int(rebound_envelope.seed),
             evaluation_unit_id=evaluation_unit_id,

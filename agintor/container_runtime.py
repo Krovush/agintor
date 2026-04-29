@@ -19,6 +19,7 @@ from .providers import (
 from .runtime_loader import resolve_docker_launch_policy
 from .runtime_profile import RuntimeProfile
 from .runtime_sdk import KERNEL_BUNDLE_DIR
+from .run_store import RunStore
 from .schemas import (
     AsyncHandle,
     AttemptManifest,
@@ -27,6 +28,8 @@ from .schemas import (
     CheckpointEnvelope,
     CheckpointReference,
     InspectRequest,
+    OpenAITraceContext,
+    OpenHandleTableSnapshot,
     RequestFileRef,
     ResumeRequest,
     RunManifest,
@@ -37,6 +40,8 @@ from .schemas import (
     RuntimeSolveRequest,
     RuntimeSolveResponse,
     RuntimeTaskInvocation,
+    ShellStateSnapshot,
+    SideEffectReceipt,
 )
 from .runtime_api import _compile_request_file_ref, normalize_benchmark_request_id
 from .utils import ensure_directory, file_digest, stable_hash
@@ -45,6 +50,39 @@ from .utils import ensure_directory, file_digest, stable_hash
 class DockerRuntimeExecutor:
     RUNS_MOUNT_ROOT = "/mnt/runs"
     REQUEST_FILES_MOUNT_ROOT = "/mnt/request-files"
+    PATH_PAYLOAD_KEYS = frozenset(
+        {
+            "artifact_path",
+            "artifact_ref",
+            "checkpoint_ref",
+            "failed_path",
+            "file_path",
+            "input_path",
+            "latest_checkpoint_ref",
+            "materialization_state_ref",
+            "path",
+            "payload_ref",
+            "run_root",
+            "runtime_dir",
+            "selected_checkpoint_ref",
+            "source_checkpoint_ref",
+            "stderr_path",
+            "stdout_path",
+            "target_path",
+            "trace_path",
+            "trace_ref",
+            "working_directory",
+            "workspace_root",
+        }
+    )
+    PATH_LIST_PAYLOAD_KEYS = frozenset(
+        {
+            "artifact_refs",
+            "file_paths",
+            "selected_checkpoint_refs",
+            "target_file_paths",
+        }
+    )
 
     def __init__(
         self,
@@ -54,8 +92,10 @@ class DockerRuntimeExecutor:
         base_image: str = "python:3.12-slim",
         artifact_mode: str | ArtifactMode | None = ArtifactMode.ALWAYS,
         sandbox_root: Path | None = None,
+        run_store_workspace: Path | None = None,
     ) -> None:
         self.workspace = Path(workspace)
+        self.run_store_workspace = Path(run_store_workspace) if run_store_workspace is not None else self.workspace
         self.repo_root = repo_root or Path(__file__).resolve().parent.parent
         self.image_name_prefix = image_name_prefix
         self.base_image = base_image
@@ -519,8 +559,19 @@ class DockerRuntimeExecutor:
         provider_json = run_dir / "provider.json"
         output_json = run_dir / "resume_result.json"
         workspace_dir = ensure_directory(run_dir / "workspace")
+        request = self._resolve_resume_checkpoint_request(request)
         resume_request_file_refs = self._checkpoint_request_file_refs(request.checkpoint_ref)
-        container_request, checkpoint_store_dir, run_mount_root = self._container_resume_request(request)
+        container_request, checkpoint_store_dir, run_mount_root = self._container_resume_request(
+            request,
+            runtime_path=runtime_path,
+        )
+        container_request, checkpoint_mount_dir, checkpoint_rewrite_dir = self._materialize_container_resume_checkpoint(
+            container_request,
+            request,
+            run_dir=run_dir,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
         _, request_file_mounts, _, request_file_reverse_map = self._containerize_request_file_refs(
             resume_request_file_refs,
             run_mount_root=run_mount_root,
@@ -534,8 +585,8 @@ class DockerRuntimeExecutor:
             f"{workspace_dir.resolve()}:/mnt/workspace",
             f"{output_json.parent.resolve()}:/mnt/output",
         ]
-        if checkpoint_store_dir is not None:
-            mounts.append(f"{checkpoint_store_dir.resolve()}:/mnt/checkpoints:ro")
+        if checkpoint_mount_dir is not None:
+            mounts.append(f"{checkpoint_mount_dir.resolve()}:/mnt/checkpoints:ro")
         if run_mount_root is not None:
             mounts.append(f"{run_mount_root.resolve()}:{self.RUNS_MOUNT_ROOT}")
         mounts.extend(request_file_mounts)
@@ -603,7 +654,7 @@ class DockerRuntimeExecutor:
         self._rewrite_solve_response_paths(
             response,
             workspace_dir,
-            checkpoint_store_dir,
+            checkpoint_rewrite_dir,
             runtime_path=runtime_path,
             run_mount_root=run_mount_root,
             request_file_reverse_map=request_file_reverse_map,
@@ -612,7 +663,7 @@ class DockerRuntimeExecutor:
             response.solve_result.run_root or request.run_root,
             runtime_path=runtime_path,
             run_mount_root=run_mount_root,
-            checkpoint_store_dir=checkpoint_store_dir,
+            checkpoint_store_dir=checkpoint_rewrite_dir,
             request_file_reverse_map=request_file_reverse_map,
         )
         failed = response.solve_result.status in {"failed", "controlled_failure"} or bool(response.solve_result.faults.get("hard_invalid"))
@@ -673,6 +724,8 @@ class DockerRuntimeExecutor:
     def _container_resume_request(
         cls,
         request: RuntimeResumeRequest,
+        *,
+        runtime_path: Path | None = None,
     ) -> tuple[RuntimeResumeRequest, Path | None, Path | None]:
         run_mount_root = cls._common_run_mount_root([request.run_root])
         checkpoint_store_dir: Path | None = None
@@ -702,41 +755,194 @@ class DockerRuntimeExecutor:
                     relative_ref = Path(checkpoint_path.name)
                 checkpoint_ref = f"/mnt/checkpoints/{relative_ref.as_posix()}"
                 checkpoint_store = "/mnt/checkpoints"
+        trace_context = cls._containerize_resume_trace_context(
+            request.trace_context,
+            runtime_path=runtime_path,
+        )
         return (
             request.model_copy(
                 update={
                     "checkpoint_ref": checkpoint_ref,
                     "checkpoint_store_dir": checkpoint_store,
                     "run_root": cls._container_run_path(request.run_root, run_mount_root) or "",
+                    "trace_context": trace_context,
                 }
             ),
             checkpoint_store_dir,
             run_mount_root,
         )
 
+    @classmethod
+    def _materialize_container_resume_checkpoint(
+        cls,
+        container_request: RuntimeResumeRequest,
+        host_request: RuntimeResumeRequest,
+        *,
+        run_dir: Path,
+        run_mount_root: Path | None,
+        checkpoint_store_dir: Path | None,
+    ) -> tuple[RuntimeResumeRequest, Path | None, Path | None]:
+        checkpoint_ref = str(host_request.checkpoint_ref or "").strip()
+        if not checkpoint_ref:
+            return container_request, checkpoint_store_dir, checkpoint_store_dir
+        host_checkpoint_path = Path(checkpoint_ref).resolve()
+        host_checkpoint_store = (
+            Path(host_request.checkpoint_store_dir).resolve()
+            if str(host_request.checkpoint_store_dir or "").strip()
+            else checkpoint_store_dir.resolve()
+            if checkpoint_store_dir is not None
+            else host_checkpoint_path.parent
+        )
+        try:
+            relative_ref = host_checkpoint_path.relative_to(host_checkpoint_store)
+        except ValueError:
+            relative_ref = Path(host_checkpoint_path.name)
+        payload = json.loads(host_checkpoint_path.read_text(encoding="utf-8"))
+        envelope = (CheckpointEnvelope).model_validate_persisted(payload)
+        containerized = cls._containerize_checkpoint_envelope_paths(
+            envelope,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=host_checkpoint_store,
+        )
+        temp_checkpoint_store = ensure_directory(run_dir / "checkpoint_store")
+        temp_checkpoint_path = temp_checkpoint_store / relative_ref
+        ensure_directory(temp_checkpoint_path.parent)
+        temp_checkpoint_path.write_text(
+            json.dumps((containerized).model_dump(), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return (
+            container_request.model_copy(
+                update={
+                    "checkpoint_ref": f"/mnt/checkpoints/{relative_ref.as_posix()}",
+                    "checkpoint_store_dir": "/mnt/checkpoints",
+                }
+            ),
+            temp_checkpoint_store,
+            host_checkpoint_store,
+        )
+
+    def _resolve_resume_checkpoint_request(
+        self,
+        request: RuntimeResumeRequest,
+    ) -> RuntimeResumeRequest:
+        checkpoint_ref = str(request.checkpoint_ref or "").strip()
+        run_ref = str(request.run_ref or "").strip()
+        run_root = str(request.run_root or "").strip()
+        if not checkpoint_ref and not run_ref and not run_root:
+            return request
+        stores: list[RunStore] = []
+        if run_root:
+            stores.append(RunStore.from_run_root(run_root))
+        stores.append(RunStore(self.run_store_workspace))
+        errors: list[str] = []
+        target = None
+        resolved_run_root = None
+        for store in stores:
+            try:
+                target = store.resolve_resume_target(
+                    run_ref=run_ref or run_root or None,
+                    checkpoint_ref=checkpoint_ref or None,
+                )
+                resolved_run_root = store.resolve_run_root(target.run_manifest.run_root)
+                break
+            except Exception as exc:
+                errors.append(str(exc))
+        if target is None or resolved_run_root is None:
+            if checkpoint_ref:
+                return request
+            detail = f": {'; '.join(error for error in errors if error)}" if errors else ""
+            raise FileNotFoundError(
+                f"docker resume could not resolve a checkpoint for run_ref={run_ref!r} run_root={run_root!r}{detail}"
+            )
+        updates = {
+            "checkpoint_ref": str(target.checkpoint_path.resolve()),
+            "checkpoint_store_dir": str(target.checkpoint_store_dir.resolve()),
+            "run_root": str(resolved_run_root.resolve()),
+        }
+        if not str(request.run_id or "").strip():
+            updates["run_id"] = target.run_manifest.run_id
+        return request.model_copy(update=updates)
+
+    @classmethod
+    def _containerize_resume_trace_context(
+        cls,
+        trace_context: OpenAITraceContext | None,
+        *,
+        runtime_path: Path | None,
+    ) -> OpenAITraceContext | None:
+        if runtime_path is None:
+            return trace_context
+        payload = trace_context.model_dump() if trace_context is not None else {}
+        payload["runtime_dir"] = "/mnt/runtime"
+        return OpenAITraceContext.model_validate(payload)
+
     @staticmethod
-    def _rewrite_exact_string_payload(payload: Any, replacements: Mapping[str, str]) -> Any:
-        if isinstance(payload, Mapping):
-            return {
-                str(key): DockerRuntimeExecutor._rewrite_exact_string_payload(value, replacements)
-                for key, value in payload.items()
-            }
-        if isinstance(payload, list):
-            return [DockerRuntimeExecutor._rewrite_exact_string_payload(item, replacements) for item in payload]
-        if isinstance(payload, str):
-            rewritten = replacements.get(payload, payload)
-            if rewritten != payload:
-                return rewritten
-            for source, target in replacements.items():
-                prefix = f"{source}/"
-                if source and payload.startswith(prefix):
-                    relative = payload[len(prefix):]
-                    return str((Path(target) / Path(*relative.split("/"))).resolve())
-            for source, target in replacements.items():
-                if source and source in rewritten:
-                    rewritten = rewritten.replace(source, target)
+    def _join_replacement_path(target: str, relative: str) -> str:
+        target_text = str(target or "").rstrip("/\\")
+        relative_text = str(relative or "").replace("\\", "/").strip("/")
+        if not relative_text:
+            return target_text
+        if target_text.startswith("/") and not (len(target_text) >= 2 and target_text[1] == ":"):
+            return f"{target_text}/{relative_text}"
+        return str((Path(target_text) / Path(*relative_text.split("/"))).resolve())
+
+    @staticmethod
+    def _rewrite_path_string(path_text: str, replacements: Mapping[str, str]) -> str:
+        rewritten = replacements.get(path_text, path_text)
+        if rewritten != path_text:
             return rewritten
+        for source, target in replacements.items():
+            source_text = str(source or "").rstrip("/\\")
+            if not source_text:
+                continue
+            for separator in ("/", "\\"):
+                prefix = f"{source_text}{separator}"
+                if path_text.startswith(prefix):
+                    relative = path_text[len(prefix):]
+                    return DockerRuntimeExecutor._join_replacement_path(str(target), relative)
+        return path_text
+
+    @classmethod
+    def _rewrite_path_value(cls, value: Any, replacements: Mapping[str, str]) -> Any:
+        if isinstance(value, str):
+            return cls._rewrite_path_string(value, replacements)
+        if isinstance(value, list):
+            return [cls._rewrite_path_value(item, replacements) for item in value]
+        return value
+
+    @classmethod
+    def _rewrite_structured_path_payload(cls, payload: Any, replacements: Mapping[str, str]) -> Any:
+        if isinstance(payload, Mapping):
+            rewritten: dict[str, Any] = {}
+            for key, value in payload.items():
+                key_text = str(key)
+                if key_text in cls.PATH_PAYLOAD_KEYS or key_text in cls.PATH_LIST_PAYLOAD_KEYS:
+                    rewritten[key_text] = cls._rewrite_path_value(value, replacements)
+                else:
+                    rewritten[key_text] = cls._rewrite_structured_path_payload(value, replacements)
+            return rewritten
+        if isinstance(payload, list):
+            return [cls._rewrite_structured_path_payload(item, replacements) for item in payload]
         return payload
+
+    @classmethod
+    def _rewrite_trace_context_paths(cls, trace_context: Any, replacements: Mapping[str, str]) -> Any:
+        if trace_context is None or not hasattr(trace_context, "model_dump"):
+            return trace_context
+        payload = trace_context.model_dump()
+        payload["runtime_dir"] = cls._rewrite_path_value(payload.get("runtime_dir"), replacements)
+        return type(trace_context).model_validate(payload)
+
+    @classmethod
+    def _rewrite_inline_trace_ref(cls, trace_ref: str | None, replacements: Mapping[str, str]) -> str | None:
+        if not trace_ref or not str(trace_ref).startswith(RunResult._inline_trace_prefix()):
+            return trace_ref
+        trace_rows = RunResult.decode_trace_ref(str(trace_ref))
+        if not trace_rows:
+            return trace_ref
+        rewritten = cls._rewrite_structured_path_payload(trace_rows, replacements)
+        return RunResult.encode_trace_ref(rewritten)
 
     @classmethod
     def _mounted_path_replacements(
@@ -816,7 +1022,10 @@ class DockerRuntimeExecutor:
         payload = (request.solve_request).model_dump()
         payload["request_file_refs"] = [(file_ref).model_dump() for file_ref in updated_refs]
         payload["file_paths"] = [file_ref.runtime_path for file_ref in updated_refs]
-        payload["context_items"] = cls._rewrite_exact_string_payload(payload.get("context_items", []), forward_map)
+        payload["context_items"] = cls._rewrite_structured_path_payload(
+            payload.get("context_items", []),
+            forward_map,
+        )
         return (
             request.model_copy(update={"solve_request": (type(request.solve_request)).model_validate(payload)}),
             mounts,
@@ -838,11 +1047,58 @@ class DockerRuntimeExecutor:
             request_file_refs,
             run_mount_root=run_mount_root,
         )
-        payload = cls._rewrite_exact_string_payload((task).model_dump(), forward_map)
+        payload = (task).model_dump()
         payload["file_paths"] = [forward_map.get(str(path), str(path)) for path in task.file_paths]
-        payload.setdefault("metadata", {})
+        payload["context_items"] = cls._rewrite_structured_path_payload(
+            payload.get("context_items", []),
+            forward_map,
+        )
+        payload["operations"] = [
+            {
+                **dict(operation_payload),
+                "args": cls._rewrite_structured_path_payload(
+                    dict(operation_payload).get("args", {}),
+                    forward_map,
+                ),
+            }
+            for operation_payload in payload.get("operations", [])
+            if isinstance(operation_payload, Mapping)
+        ]
+        payload["metadata"] = dict(payload.get("metadata") or {})
         payload["metadata"]["request_file_refs"] = [(file_ref).model_dump() for file_ref in updated_refs]
+        payload["metadata"]["input_binding_overrides"] = cls._containerize_input_binding_overrides(
+            payload["metadata"].get("input_binding_overrides", {}),
+            forward_map,
+        )
         return (BenchmarkTask).model_validate(payload), mounts, reverse_map
+
+    @classmethod
+    def _containerize_input_binding_overrides(
+        cls,
+        input_binding_overrides: Any,
+        forward_map: Mapping[str, str],
+    ) -> Any:
+        if not isinstance(input_binding_overrides, Mapping):
+            return input_binding_overrides
+        rewritten: dict[str, Any] = {}
+        for node_id, bindings in input_binding_overrides.items():
+            if not isinstance(bindings, list):
+                rewritten[str(node_id)] = bindings
+                continue
+            rewritten_bindings: list[Any] = []
+            for binding in bindings:
+                if not isinstance(binding, Mapping):
+                    rewritten_bindings.append(binding)
+                    continue
+                binding_payload = dict(binding)
+                if str(binding_payload.get("source_kind") or "") == "request_file":
+                    binding_payload["source_ref"] = cls._rewrite_path_value(
+                        binding_payload.get("source_ref"),
+                        forward_map,
+                    )
+                rewritten_bindings.append(binding_payload)
+            rewritten[str(node_id)] = rewritten_bindings
+        return rewritten
 
     @classmethod
     def _containerize_batch_request_file_refs(
@@ -935,6 +1191,35 @@ class DockerRuntimeExecutor:
         return cls._host_mounted_path(rewritten, "/mnt/checkpoints", checkpoint_store_dir)
 
     @classmethod
+    def _container_checkpoint_path(cls, path_text: str | None, checkpoint_store_dir: Path | None) -> str | None:
+        if not path_text or checkpoint_store_dir is None:
+            return path_text
+        path_text = str(path_text)
+        if path_text.startswith("/mnt/"):
+            return path_text
+        try:
+            path = Path(path_text).resolve()
+            relative = path.relative_to(checkpoint_store_dir.resolve())
+        except (OSError, ValueError):
+            return path_text
+        if str(relative) == ".":
+            return "/mnt/checkpoints"
+        return f"/mnt/checkpoints/{relative.as_posix()}"
+
+    @classmethod
+    def _container_known_path(
+        cls,
+        path_text: str | None,
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+    ) -> str | None:
+        rewritten = cls._container_run_path(path_text, run_mount_root)
+        if rewritten != path_text:
+            return rewritten
+        return cls._container_checkpoint_path(rewritten, checkpoint_store_dir)
+
+    @classmethod
     def _rewrite_async_handle_paths(
         cls,
         handle: AsyncHandle,
@@ -960,6 +1245,41 @@ class DockerRuntimeExecutor:
         )
         payload["artifact_refs"] = [
             cls._rewrite_known_path(
+                ref,
+                run_mount_root=run_mount_root,
+                checkpoint_store_dir=checkpoint_store_dir,
+            )
+            or ref
+            for ref in handle.artifact_refs
+        ]
+        return (AsyncHandle).model_validate(payload)
+
+    @classmethod
+    def _containerize_async_handle_paths(
+        cls,
+        handle: AsyncHandle,
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+    ) -> AsyncHandle:
+        payload = (handle).model_dump()
+        payload["working_directory"] = cls._container_known_path(
+            handle.working_directory,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        ) or ""
+        payload["stdout_path"] = cls._container_known_path(
+            handle.stdout_path,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        payload["stderr_path"] = cls._container_known_path(
+            handle.stderr_path,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        payload["artifact_refs"] = [
+            cls._container_known_path(
                 ref,
                 run_mount_root=run_mount_root,
                 checkpoint_store_dir=checkpoint_store_dir,
@@ -1031,18 +1351,204 @@ class DockerRuntimeExecutor:
         checkpoint_store_dir: Path | None = None,
     ) -> dict[str, Any]:
         payload = dict(snapshot_payload)
-        payload["shell_state_snapshot"] = dict(payload.get("shell_state_snapshot") or {})
-        payload["shell_state_snapshot"]["open_handles"] = {
-            "handles": [
-                (cls._rewrite_async_handle_paths(
-                        (AsyncHandle).model_validate(handle_payload),
-                        run_mount_root=run_mount_root,
-                        checkpoint_store_dir=checkpoint_store_dir,
-                    )).model_dump()
-                for handle_payload in cls._open_handle_payloads(payload["shell_state_snapshot"].get("open_handles", []))
-            ]
-        }
+        payload["artifacts"] = dict(payload.get("artifacts") or {})
+        payload["side_effect_receipts"] = [
+            cls._copy_side_effect_receipt_payload(receipt_payload)
+            for receipt_payload in list(payload.get("side_effect_receipts", []) or [])
+        ]
+        payload["shell_state_snapshot"] = cls._rewrite_shell_state_snapshot_paths(
+            payload.get("shell_state_snapshot"),
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
         return payload
+
+    @classmethod
+    def _rewrite_shell_state_snapshot_paths(
+        cls,
+        snapshot_payload: Mapping[str, Any] | ShellStateSnapshot | None,
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        if snapshot_payload is None:
+            return {}
+        if isinstance(snapshot_payload, ShellStateSnapshot):
+            normalized = snapshot_payload
+        else:
+            try:
+                normalized = (ShellStateSnapshot).model_validate(snapshot_payload)
+            except Exception:
+                return dict(snapshot_payload)
+        rewritten_handles = [
+            cls._rewrite_async_handle_paths(
+                handle,
+                run_mount_root=run_mount_root,
+                checkpoint_store_dir=checkpoint_store_dir,
+            )
+            for handle in normalized.open_handles.handles
+        ]
+        rewritten = normalized.model_copy(
+            update={
+                "open_handles": OpenHandleTableSnapshot(handles=rewritten_handles),
+            }
+        )
+        return (rewritten).model_dump()
+
+    @classmethod
+    def _containerize_shell_state_snapshot_paths(
+        cls,
+        snapshot_payload: Mapping[str, Any] | ShellStateSnapshot | None,
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        if snapshot_payload is None:
+            return {}
+        if isinstance(snapshot_payload, ShellStateSnapshot):
+            normalized = snapshot_payload
+        else:
+            normalized = (ShellStateSnapshot).model_validate(snapshot_payload)
+        container_handles = [
+            cls._containerize_async_handle_paths(
+                handle,
+                run_mount_root=run_mount_root,
+                checkpoint_store_dir=checkpoint_store_dir,
+            )
+            for handle in normalized.open_handles.handles
+        ]
+        containerized = normalized.model_copy(
+            update={
+                "open_handles": OpenHandleTableSnapshot(handles=container_handles),
+            }
+        )
+        return (containerized).model_dump()
+
+    @classmethod
+    def _containerize_branch_resume_snapshot_paths(
+        cls,
+        snapshot_payload: Mapping[str, Any],
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(snapshot_payload)
+        payload["shell_state_snapshot"] = cls._containerize_shell_state_snapshot_paths(
+            payload.get("shell_state_snapshot"),
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        return payload
+
+    @classmethod
+    def _containerize_working_memory_snapshot_paths(
+        cls,
+        snapshot_payload: Mapping[str, Any],
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(snapshot_payload)
+        selected_refs = payload.get("selected_checkpoint_refs", [])
+        if isinstance(selected_refs, list):
+            payload["selected_checkpoint_refs"] = [
+                cls._container_known_path(
+                    str(ref),
+                    run_mount_root=run_mount_root,
+                    checkpoint_store_dir=checkpoint_store_dir,
+                )
+                or str(ref)
+                for ref in selected_refs
+            ]
+        return payload
+
+    @classmethod
+    def _containerize_checkpoint_envelope_paths(
+        cls,
+        envelope: CheckpointEnvelope,
+        *,
+        run_mount_root: Path | None = None,
+        checkpoint_store_dir: Path | None = None,
+    ) -> CheckpointEnvelope:
+        payload = (envelope).model_dump()
+        payload["run_root"] = cls._container_known_path(
+            envelope.run_root,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        ) or ""
+        payload["source_checkpoint_ref"] = cls._container_known_path(
+            envelope.source_checkpoint_ref,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        payload["selected_checkpoint_ref"] = cls._container_known_path(
+            envelope.selected_checkpoint_ref,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        payload["runtime_state_snapshot"]["latest_checkpoint_ref"] = cls._container_known_path(
+            envelope.runtime_state_snapshot.latest_checkpoint_ref,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        payload["attempt_snapshot"]["run_root"] = cls._container_known_path(
+            envelope.attempt_snapshot.run_root,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        ) or envelope.attempt_snapshot.run_root
+        payload["attempt_snapshot"]["resumed_from_checkpoint_ref"] = cls._container_known_path(
+            envelope.attempt_snapshot.resumed_from_checkpoint_ref,
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        ) or envelope.attempt_snapshot.resumed_from_checkpoint_ref
+        payload["runtime_state_snapshot"]["branch_resume_snapshots"] = {
+            str(key): cls._containerize_branch_resume_snapshot_paths(
+                dict(value),
+                run_mount_root=run_mount_root,
+                checkpoint_store_dir=checkpoint_store_dir,
+            )
+            for key, value in dict(payload["runtime_state_snapshot"].get("branch_resume_snapshots", {})).items()
+        }
+        payload["shell_state_snapshot"] = cls._containerize_shell_state_snapshot_paths(
+            payload.get("shell_state_snapshot"),
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        payload["working_state"] = cls._containerize_working_memory_snapshot_paths(
+            payload.get("working_state", {}),
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        return (CheckpointEnvelope).model_validate(payload)
+
+    @classmethod
+    def _copy_side_effect_receipt_payload(
+        cls,
+        receipt_payload: Mapping[str, Any] | SideEffectReceipt,
+    ) -> dict[str, Any]:
+        return (
+            (receipt_payload).model_dump()
+            if isinstance(receipt_payload, SideEffectReceipt)
+            else dict(receipt_payload)
+        )
+
+    @classmethod
+    def _copy_side_effect_ledger_payload(
+        cls,
+        ledger_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        rewritten: dict[str, Any] = {}
+        for key, value in dict(ledger_payload or {}).items():
+            if isinstance(value, list):
+                rewritten[str(key)] = [
+                    cls._copy_side_effect_receipt_payload(item)
+                    if isinstance(item, (Mapping, SideEffectReceipt))
+                    else item
+                    for item in value
+                ]
+            else:
+                rewritten[str(key)] = value
+        return rewritten
 
     @classmethod
     def _rewrite_checkpoint_reference_paths(
@@ -1156,16 +1662,6 @@ class DockerRuntimeExecutor:
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
         ) or envelope.attempt_snapshot.resumed_from_checkpoint_ref
-        payload["shell_state_snapshot"]["open_handles"] = {
-            "handles": [
-                (cls._rewrite_async_handle_paths(
-                        handle,
-                        run_mount_root=run_mount_root,
-                        checkpoint_store_dir=checkpoint_store_dir,
-                    )).model_dump()
-                for handle in envelope.shell_state_snapshot.open_handles.handles
-            ]
-        }
         payload["runtime_state_snapshot"]["branch_resume_snapshots"] = {
             str(key): cls._rewrite_branch_resume_snapshot_paths(
                 dict(value),
@@ -1174,13 +1670,21 @@ class DockerRuntimeExecutor:
             )
             for key, value in dict(payload["runtime_state_snapshot"].get("branch_resume_snapshots", {})).items()
         }
+        payload["shell_state_snapshot"] = cls._rewrite_shell_state_snapshot_paths(
+            payload.get("shell_state_snapshot"),
+            run_mount_root=run_mount_root,
+            checkpoint_store_dir=checkpoint_store_dir,
+        )
+        # Runtime artifacts and receipt result payloads are replay state; keep
+        # them in the coordinate space recorded by the runtime.
+        payload["side_effect_ledger"] = cls._copy_side_effect_ledger_payload(
+            payload.get("side_effect_ledger", {}),
+        )
         payload["working_state"] = cls._rewrite_working_memory_snapshot_paths(
             payload.get("working_state", {}),
             run_mount_root=run_mount_root,
             checkpoint_store_dir=checkpoint_store_dir,
         )
-        # Checkpoint envelopes contain opaque runtime payloads. Only fields
-        # explicitly modeled above as durable path refs are rewritten here.
         return (CheckpointEnvelope).model_validate(payload)
 
     @classmethod
@@ -1188,21 +1692,13 @@ class DockerRuntimeExecutor:
         cls,
         path: Path,
         *,
-        runtime_path: Path | None = None,
         run_mount_root: Path | None = None,
         checkpoint_store_dir: Path | None = None,
-        request_file_reverse_map: Mapping[str, str] | None = None,
-    ) -> bool:
+    ) -> Any | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        path_replacements = cls._mounted_path_replacements(
-            runtime_path=runtime_path,
-            run_mount_root=run_mount_root,
-            checkpoint_store_dir=checkpoint_store_dir,
-            request_file_reverse_map=request_file_reverse_map,
-        )
+        except Exception as exc:
+            raise ValueError(f"invalid JSON durable path payload at {path}") from exc
         if path.parent.name == "working_memory":
             rewritten = cls._rewrite_working_memory_snapshot_paths(
                 payload if isinstance(payload, Mapping) else {},
@@ -1216,46 +1712,10 @@ class DockerRuntimeExecutor:
                 checkpoint_store_dir=checkpoint_store_dir,
             )
         else:
-            rewritten = cls._rewrite_exact_string_payload(payload, path_replacements)
+            return None
         if rewritten == payload:
-            return False
-        path.write_text(json.dumps(rewritten, indent=2, sort_keys=True), encoding="utf-8")
-        return True
-
-    @classmethod
-    def _rewrite_jsonl_file_payloads(
-        cls,
-        path: Path,
-        *,
-        path_replacements: Mapping[str, str] | None = None,
-    ) -> bool:
-        replacements = dict(path_replacements or {})
-        if not replacements:
-            return False
-        try:
-            original_text = path.read_text(encoding="utf-8")
-        except Exception:
-            return False
-        changed = False
-        rewritten_lines: list[str] = []
-        for line in original_text.splitlines():
-            if not line.strip():
-                rewritten_lines.append(line)
-                continue
-            try:
-                payload = json.loads(line)
-            except Exception:
-                rewritten_lines.append(line)
-                continue
-            rewritten = cls._rewrite_exact_string_payload(payload, replacements)
-            if rewritten != payload:
-                changed = True
-            rewritten_lines.append(json.dumps(rewritten, sort_keys=True))
-        if not changed:
-            return False
-        suffix = "\n" if original_text.endswith("\n") else ""
-        path.write_text("\n".join(rewritten_lines) + suffix, encoding="utf-8")
-        return True
+            return None
+        return rewritten
 
     @classmethod
     def _rewrite_durable_run_paths(
@@ -1271,15 +1731,10 @@ class DockerRuntimeExecutor:
         if not text:
             return
         root = Path(text).resolve()
-        path_replacements = cls._mounted_path_replacements(
-            runtime_path=runtime_path,
-            run_mount_root=run_mount_root,
-            checkpoint_store_dir=checkpoint_store_dir,
-            request_file_reverse_map=request_file_reverse_map,
-        )
         candidate_paths = [root / "run_manifest.json"]
         candidate_paths.extend(sorted((root / "attempts").glob("*/attempt_manifest.json")))
         candidate_paths.extend(sorted((root / "checkpoints").glob("*.json")))
+        prepared_writes: list[tuple[Path, Any]] = []
         rewritten_any = False
         for path in candidate_paths:
             if not path.exists() or not path.is_file():
@@ -1322,44 +1777,29 @@ class DockerRuntimeExecutor:
                             checkpoint_store_dir=checkpoint_store_dir,
                         )).model_dump()
             except Exception:
-                continue
+                raise RuntimeError(f"failed to rewrite durable run path payload at {path}") from None
             if rewritten == payload:
                 continue
-            path.write_text(json.dumps(rewritten, indent=2, sort_keys=True), encoding="utf-8")
-            rewritten_any = True
+            prepared_writes.append((path, rewritten))
         payload_paths: list[Path] = []
-        payload_paths.extend(sorted((root / "request").glob("*.json")))
-        payload_paths.extend(sorted((root / "side_effects").glob("*.json")))
-        payload_paths.extend(sorted((root / "events").glob("*.json")))
-        payload_paths.extend(sorted((root / "traces").glob("*.json")))
-        payload_paths.extend(
-            path
-            for path in sorted((root / "state").rglob("*.json"))
-            if path.name != state_store.INDEX_DIRTY_FILE
-        )
+        payload_paths.extend(sorted((root / "state" / "working_memory").glob("*.json")))
+        payload_paths.extend(sorted((root / "state" / "recovery").rglob("*.json")))
         for path in payload_paths:
             if not path.exists() or not path.is_file():
                 continue
-            rewritten_any = (
-                cls._rewrite_json_file_payload(
+            try:
+                rewritten = cls._rewrite_json_file_payload(
                     path,
-                    runtime_path=runtime_path,
                     run_mount_root=run_mount_root,
                     checkpoint_store_dir=checkpoint_store_dir,
-                    request_file_reverse_map=request_file_reverse_map,
                 )
-                or rewritten_any
-            )
-        for path in sorted((root / "state").rglob("*.jsonl")):
-            if not path.exists() or not path.is_file():
-                continue
-            rewritten_any = (
-                cls._rewrite_jsonl_file_payloads(
-                    path,
-                    path_replacements=path_replacements,
-                )
-                or rewritten_any
-            )
+            except Exception:
+                raise RuntimeError(f"failed to rewrite durable run path payload at {path}") from None
+            if rewritten is not None:
+                prepared_writes.append((path, rewritten))
+        for path, rewritten in prepared_writes:
+            path.write_text(json.dumps(rewritten, indent=2, sort_keys=True), encoding="utf-8")
+            rewritten_any = True
         if rewritten_any and (root / "state").exists():
             try:
                 state_store.rebuild_from_canonical(root)
@@ -1396,7 +1836,15 @@ class DockerRuntimeExecutor:
                 run_mount_root,
             )
             run.run_root = self._host_mounted_path(run.run_root, self.RUNS_MOUNT_ROOT, run_mount_root) or ""
-            run.artifact = self._rewrite_exact_string_payload(
+            run.trace_context = self._rewrite_trace_context_paths(
+                run.trace_context,
+                path_replacements,
+            )
+            run.trace = self._rewrite_structured_path_payload(
+                run.trace,
+                path_replacements,
+            )
+            run.artifact = self._rewrite_structured_path_payload(
                 run.artifact,
                 path_replacements,
             )
@@ -1424,6 +1872,10 @@ class DockerRuntimeExecutor:
             self.RUNS_MOUNT_ROOT,
             run_mount_root,
         )
+        response.solve_result.trace_ref = self._rewrite_inline_trace_ref(
+            response.solve_result.trace_ref,
+            path_replacements,
+        )
         response.solve_result.checkpoint_ref = self._host_mounted_path(
             response.solve_result.checkpoint_ref,
             self.RUNS_MOUNT_ROOT,
@@ -1449,7 +1901,11 @@ class DockerRuntimeExecutor:
             self.RUNS_MOUNT_ROOT,
             run_mount_root,
         ) or ""
-        response.solve_result.artifact = self._rewrite_exact_string_payload(
+        response.solve_result.artifact = self._rewrite_structured_path_payload(
             response.solve_result.artifact,
+            path_replacements,
+        )
+        response.solve_result.post_message_short_term_export = self._rewrite_structured_path_payload(
+            response.solve_result.post_message_short_term_export,
             path_replacements,
         )

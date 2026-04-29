@@ -11,7 +11,7 @@ from .prompts import load_prompt_spec
 from .prompt_builder import build_mutation_prompt
 from .providers import ModelProvider
 from .runtime_profile import load_runtime_profile
-from .schemas import ModelRequest, MutationCandidate
+from .schemas import ModelRequest, MutationCandidate, OpenAITraceContext
 
 
 @dataclass
@@ -25,6 +25,7 @@ class MutationContext:
     failing_train_traces: list[dict[str, object]]
     exemplars: list[dict[str, object]]
     seed: int
+    trace_context: OpenAITraceContext | None = None
 
 
 class HeuristicPatchMutator:
@@ -148,14 +149,26 @@ class ProviderPatchMutator:
                     return candidate.strip()
         return stripped
 
-    def _request_patch(self, *, instructions: str, prompt: str, model_class: str, seed: int, mode: str) -> str:
+    def _request_patch(
+        self,
+        *,
+        instructions: str,
+        prompt: str,
+        model_class: str,
+        seed: int,
+        mode: str,
+        trace_context: OpenAITraceContext | None = None,
+    ) -> str:
+        metadata: dict[str, Any] = {"mode": mode, "max_output_tokens": 16000}
+        if trace_context is not None:
+            metadata["trace_context"] = trace_context.model_dump()
         response = self.provider.generate(
             ModelRequest(
                 instructions=instructions,
                 prompt=prompt,
                 model_class=model_class,
                 seed=seed,
-                metadata={"mode": mode, "max_output_tokens": 16000},
+                metadata=metadata,
             )
         )
         return self._coerce_patch_text(response.text)
@@ -178,6 +191,7 @@ class ProviderPatchMutator:
             model_class=spec.model_class,
             seed=context.seed,
             mode="patch",
+            trace_context=context.trace_context,
         )
         try:
             parse_patch(patch_text)
@@ -201,6 +215,7 @@ class ProviderPatchMutator:
                 model_class=spec.model_class,
                 seed=context.seed,
                 mode="patch_repair",
+                trace_context=context.trace_context,
             )
             parse_patch(patch_text)
         return MutationCandidate(runtime_dir=str(context.runtime_dir), patch_text=patch_text, touched_scope=context.touched_scope, prompt=prompt, objective=context.objective)

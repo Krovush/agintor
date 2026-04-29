@@ -385,3 +385,41 @@ def build_success_criteria_bundle(goal_spec: GoalSpec) -> SuccessCriteriaBundle:
         criteria=criteria,
         assumptions=list(goal_spec.assumptions),
     )
+
+
+def amend_goal_spec(
+    prior_goal: GoalSpec,
+    instruction: str,
+    *,
+    runtime_provider_name: str | None = None,
+    default_runtime_backend: str | None = None,
+) -> GoalSpec:
+    """Amend a prior `GoalSpec` with a follow-up instruction.
+
+    The amended goal preserves the original `goal_id` so the chat keeps a stable
+    identity across follow-ups; the prior goal text and the new instruction are
+    combined into the raw prompt and re-canonicalized to derive updated keywords,
+    phrases, target families, capabilities, constraints, and success criteria.
+    `amendment_index` is bumped and `amendment_history` is extended with the new
+    instruction.
+    """
+
+    instruction_text = canonical_goal_prompt(instruction)
+    if not instruction_text:
+        raise ValueError("amendment instruction may not be empty")
+    combined_prompt = f"{prior_goal.normalized_goal}\n\nFollow-up: {instruction_text}".strip()
+    refreshed = build_goal_spec(
+        combined_prompt,
+        runtime_provider_name=runtime_provider_name,
+        default_runtime_backend=default_runtime_backend,
+    )
+    history: list[str] = list(prior_goal.amendment_history)
+    history.append(instruction_text)
+    return (refreshed).model_copy(
+        update={
+            "goal_id": prior_goal.goal_id,
+            "raw_prompt": instruction_text,
+            "amendment_index": int(prior_goal.amendment_index) + 1,
+            "amendment_history": history,
+        }
+    )

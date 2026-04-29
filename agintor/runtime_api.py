@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .exceptions import BranchCancelled, HardInvalidation, PromptAdaptationError
-from .openai_trace import resolve_trace_session_id, runtime_task_trace_key
+from .openai_trace import resolve_trace_session_id
 from .providers import ModelProvider
 from .runtime_profile import RuntimeProfile, default_runtime_profile
 from .schemas import (
@@ -32,6 +32,7 @@ from .schemas import (
     RunResult,
     RuntimeBatchRequest,
     RuntimeEvent,
+    RuntimeSessionSeed,
     RuntimeSolveResponse,
     RuntimeSolveRequest,
     RuntimeTaskInvocation,
@@ -64,6 +65,36 @@ _URL_RE = re.compile(r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+)", re.IGNOR
 _HTTP_METHOD_RE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\b", re.IGNORECASE)
 _TRAILING_PATH_PUNCTUATION = "\"'`,;:!?)]}"
 _PATH_CLAUSE_BOUNDARY_WORDS = "to|and|using|then|that|which|please|for|by|with|while"
+_PROVIDER_IDEMPOTENCY_TRACE_FIELDS = frozenset(
+    {
+        "task_id",
+        "seed",
+        "evaluation_unit_id",
+        "request_mode",
+        "episode_kind",
+        "episode_step_index",
+        "worker_id",
+        "op_id",
+    }
+)
+_RESUME_TRACE_CONTEXT_OVERRIDE_FIELDS = frozenset(
+    {
+        "session_id",
+        "provider_role",
+        "build_id",
+        "runtime_hash",
+        "runtime_dir",
+        "runtime_session_id",
+        "runtime_message_id",
+        "runtime_message_index",
+        "task_id",
+        "seed",
+        "evaluation_unit_id",
+        "request_mode",
+        "episode_kind",
+        "episode_step_index",
+    }
+)
 _REPO_PATCH_TOKENS = (
     "edit",
     "modify",
@@ -354,8 +385,10 @@ class PolicyContext:
         if self.budget.remaining_model_calls() <= 0:
             raise HardInvalidation(f"model-call budget exhausted before provider request for {purpose}")
         effective_trace_context = trace_context or self.trace_context
-        idempotency_trace_context = (effective_trace_context).model_dump()
-        idempotency_trace_context.pop("run_node_id", None)
+        idempotency_trace_context = _trace_context_subset(
+            effective_trace_context,
+            _PROVIDER_IDEMPOTENCY_TRACE_FIELDS,
+        )
         request_digest = stable_hash(instructions, prompt, model_class, payload or {}, idempotency_trace_context)
         unresolved_launch = False
         terminal_receipt: SideEffectReceipt | None = None
@@ -467,7 +500,7 @@ class PolicyContext:
 
 
 def _normalized_request_prompt(text: str) -> str:
-    return " ".join(str(text or "").split()).strip()
+    return str(text or "").strip()
 
 
 def _coerce_context_items(value: Any) -> list[dict[str, Any]]:
@@ -717,8 +750,8 @@ def evaluation_unit_id_for_invocation(
     return normalize_benchmark_request_id(task.task_id, seed, duplicate_ordinal=duplicate_ordinal)
 
 
-def benchmark_task_episode_kind(task: BenchmarkTask) -> str:
-    return "transfer_episode" if task.transfer_scored and str(task.episode_id or "").strip() else "single_task"
+def benchmark_task_episode_kind(task: BenchmarkTask) -> str | None:
+    return "transfer_episode" if task.transfer_scored and str(task.episode_id or "").strip() else None
 
 
 def benchmark_task_episode_step_index(task: BenchmarkTask) -> int | None:
@@ -733,8 +766,22 @@ def trace_context_field(parent: OpenAITraceContext | None, field_name: str) -> A
     return getattr(parent, field_name, None)
 
 
+def _trace_context_subset(
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None,
+    allowed_fields: frozenset[str],
+) -> dict[str, Any]:
+    if trace_context is None:
+        return {}
+    payload = trace_context.model_dump() if hasattr(trace_context, "model_dump") else dict(trace_context)
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if key in allowed_fields and value is not None and not (isinstance(value, list) and not value)
+    }
+
+
 def batch_evaluation_unit_key(invocation: RuntimeTaskInvocation) -> str:
-    episode_kind = str(getattr(invocation, "episode_kind", "") or "single_task").strip()
+    episode_kind = str(getattr(invocation, "episode_kind", "") or "").strip()
     if episode_kind == "transfer_episode":
         explicit = str(getattr(invocation, "evaluation_unit_id", "") or "").strip()
         if explicit:
@@ -766,11 +813,18 @@ def build_trace_context(
     task_id: str | None = None,
     seed: int | None = None,
     evaluation_unit_id: str | None = None,
+    request_mode: str | None = None,
     episode_kind: str | None = None,
     episode_step_index: int | None = None,
     objective: str | None = None,
     session_id: str | None = None,
     build_id: str | None = None,
+    factory_chat_id: str | None = None,
+    factory_message_id: str | None = None,
+    factory_message_index: int | None = None,
+    runtime_session_id: str | None = None,
+    runtime_message_id: str | None = None,
+    runtime_message_index: int | None = None,
 ) -> OpenAITraceContext:
     return OpenAITraceContext(
         session_id=session_id,
@@ -782,8 +836,15 @@ def build_trace_context(
         seed=seed,
         request_id=request_id,
         evaluation_unit_id=evaluation_unit_id,
+        request_mode=request_mode,
         episode_kind=episode_kind,
         episode_step_index=episode_step_index,
+        factory_chat_id=factory_chat_id,
+        factory_message_id=factory_message_id,
+        factory_message_index=factory_message_index,
+        runtime_session_id=runtime_session_id,
+        runtime_message_id=runtime_message_id,
+        runtime_message_index=runtime_message_index,
         objective=objective,
     )
 
@@ -805,11 +866,18 @@ def runtime_trace_context(
     task_id: str | None = None,
     seed: int | None = None,
     evaluation_unit_id: str | None = None,
+    request_mode: str | None = None,
     episode_kind: str | None = None,
     episode_step_index: int | None = None,
     objective: str | None = None,
+    factory_chat_id: str | None = None,
+    factory_message_id: str | None = None,
+    factory_message_index: int | None = None,
+    runtime_session_id: str | None = None,
+    runtime_message_id: str | None = None,
+    runtime_message_index: int | None = None,
 ) -> OpenAITraceContext:
-    return derive_trace_context(
+    context = derive_trace_context(
         parent,
         session_id=resolve_trace_session_id(trace_context_field(parent, "session_id")),
         provider_role="runtime",
@@ -819,31 +887,20 @@ def runtime_trace_context(
         task_id=task_id,
         seed=seed,
         evaluation_unit_id=evaluation_unit_id,
+        request_mode=request_mode,
         episode_kind=episode_kind,
         episode_step_index=episode_step_index,
         objective=objective,
+        factory_chat_id=factory_chat_id,
+        factory_message_id=factory_message_id,
+        factory_message_index=factory_message_index,
+        runtime_session_id=runtime_session_id,
+        runtime_message_id=runtime_message_id,
+        runtime_message_index=runtime_message_index,
     )
-
-
-def runtime_task_materialization_key(
-    *,
-    request_id: str,
-    task_id: str | None = None,
-    seed: int | None = None,
-    runtime_hash: str | None = None,
-    evaluation_unit_id: str | None = None,
-    episode_kind: str | None = None,
-    episode_step_index: int | None = None,
-) -> str:
-    return runtime_task_trace_key(
-        request_id=request_id,
-        task_id=task_id,
-        seed=seed,
-        runtime_hash=runtime_hash,
-        evaluation_unit_id=evaluation_unit_id,
-        episode_kind=episode_kind,
-        episode_step_index=episode_step_index,
-    ) or ""
+    if str(episode_kind or "").strip() != "transfer_episode":
+        context = context.model_copy(update={"episode_kind": None, "episode_step_index": None})
+    return context
 
 
 def execution_plan_requires_default_provider(plan: ExecutionPlan) -> bool:
@@ -1937,10 +1994,14 @@ def compile_execution_plan_from_task(
     has_terminal_outputs = bool(terminal_output_keys)
     root_node_ids = [node.node_id for node in nodes if not node.dependencies]
     file_ref_specs = _task_file_ref_specs(task)
-    episode_kind = trace_context_field(trace_context, "episode_kind") or benchmark_task_episode_kind(task)
-    episode_step_index = trace_context_field(trace_context, "episode_step_index")
-    if episode_step_index is None:
-        episode_step_index = benchmark_task_episode_step_index(task)
+    if origin_kind == "benchmark" and benchmark_task_episode_kind(task) == "transfer_episode":
+        episode_kind = trace_context_field(trace_context, "episode_kind") or "transfer_episode"
+        episode_step_index = trace_context_field(trace_context, "episode_step_index")
+        if episode_step_index is None:
+            episode_step_index = benchmark_task_episode_step_index(task)
+    else:
+        episode_kind = None
+        episode_step_index = None
     plan_trace_context = runtime_trace_context(
         trace_context,
         request_id=request_id,
@@ -1949,6 +2010,7 @@ def compile_execution_plan_from_task(
         task_id=task.task_id,
         seed=seed,
         evaluation_unit_id=trace_context_field(trace_context, "evaluation_unit_id") or request_id,
+        request_mode="benchmark" if origin_kind == "benchmark" else "user_request",
         episode_kind=episode_kind,
         episode_step_index=episode_step_index,
         objective=task.prompt,
@@ -2038,7 +2100,9 @@ def compile_execution_plan_from_solve_request(
         task_id=task.task_id,
         seed=seed,
         evaluation_unit_id=getattr(trace_context, "evaluation_unit_id", None) or solve_request.request_id,
-        episode_kind=getattr(trace_context, "episode_kind", None) or "user_request",
+        request_mode="user_request",
+        episode_kind=None,
+        episode_step_index=None,
         objective=solve_request.prompt,
     )
     return (
@@ -2094,15 +2158,27 @@ def resume_task_and_plan_from_checkpoint(
     return task, plan
 
 
+def _trace_context_override_payload(trace_context: OpenAITraceContext | Mapping[str, Any] | None) -> dict[str, Any]:
+    return _trace_context_subset(trace_context, _RESUME_TRACE_CONTEXT_OVERRIDE_FIELDS)
+
+
 def _rebound_trace_context_payload(
     payload: Mapping[str, Any] | None,
     active_request_id: str,
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if not isinstance(payload, Mapping):
+    if not isinstance(payload, Mapping) and trace_context is None:
         return None
-    rebound = dict(payload)
+    rebound = dict(payload or {})
+    rebound.update(_trace_context_override_payload(trace_context))
     rebound["request_id"] = active_request_id
     return rebound
+
+
+def _refresh_plan_digest(plan_snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(plan_snapshot)
+    payload["plan_digest"] = ""
+    return (ExecutionPlan).model_validate(payload).model_dump()
 
 
 def _rebind_request_id_mirrors(payload: Any, active_request_id: str) -> Any:
@@ -2122,6 +2198,7 @@ def _rebind_request_id_mirrors(payload: Any, active_request_id: str) -> Any:
 def _rebind_frame_snapshot_request_id(
     frame_payload: Mapping[str, Any] | None,
     active_request_id: str,
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(frame_payload, Mapping):
         return None
@@ -2130,6 +2207,7 @@ def _rebind_frame_snapshot_request_id(
     rebound["trace_context"] = _rebound_trace_context_payload(
         rebound.get("trace_context"),
         active_request_id,
+        trace_context,
     )
     return rebound
 
@@ -2137,6 +2215,7 @@ def _rebind_frame_snapshot_request_id(
 def _rebind_branch_publication_request_id(
     publication_payload: Mapping[str, Any] | None,
     active_request_id: str,
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(publication_payload, Mapping):
         return None
@@ -2144,6 +2223,7 @@ def _rebind_branch_publication_request_id(
     rebound["trace_context"] = _rebound_trace_context_payload(
         rebound.get("trace_context"),
         active_request_id,
+        trace_context,
     )
     return rebound
 
@@ -2151,12 +2231,13 @@ def _rebind_branch_publication_request_id(
 def _rebind_branch_state_request_id(
     branch_state_payload: Mapping[str, Any] | None,
     active_request_id: str,
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(branch_state_payload, Mapping):
         return None
     rebound = dict(branch_state_payload)
     rebound["publications"] = [
-        _rebind_branch_publication_request_id(payload, active_request_id)
+        _rebind_branch_publication_request_id(payload, active_request_id, trace_context)
         for payload in rebound.get("publications", [])
         if payload is not None
     ]
@@ -2166,6 +2247,7 @@ def _rebind_branch_state_request_id(
 def _rebind_branch_resume_snapshot_request_id(
     snapshot_payload: Mapping[str, Any] | None,
     active_request_id: str,
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(snapshot_payload, Mapping):
         return None
@@ -2175,24 +2257,26 @@ def _rebind_branch_resume_snapshot_request_id(
     branch_plan["trace_context"] = _rebound_trace_context_payload(
         branch_plan.get("trace_context"),
         active_request_id,
+        trace_context,
     )
     rebound["branch_plan"] = branch_plan
     rebound["active_frame"] = _rebind_frame_snapshot_request_id(
         rebound.get("active_frame"),
         active_request_id,
+        trace_context,
     )
     rebound["queued_frames"] = [
-        _rebind_frame_snapshot_request_id(frame_payload, active_request_id)
+        _rebind_frame_snapshot_request_id(frame_payload, active_request_id, trace_context)
         for frame_payload in rebound.get("queued_frames", [])
         if frame_payload is not None
     ]
     rebound["branch_publications"] = [
-        _rebind_branch_publication_request_id(publication_payload, active_request_id)
+        _rebind_branch_publication_request_id(publication_payload, active_request_id, trace_context)
         for publication_payload in rebound.get("branch_publications", [])
         if publication_payload is not None
     ]
     rebound["side_effect_receipts"] = [
-        _rebind_side_effect_receipt_request_id(receipt_payload, active_request_id)
+        _rebind_side_effect_receipt_request_id(receipt_payload, active_request_id, trace_context)
         for receipt_payload in rebound.get("side_effect_receipts", [])
         if receipt_payload is not None
     ]
@@ -2202,6 +2286,7 @@ def _rebind_branch_resume_snapshot_request_id(
 def _rebind_side_effect_receipt_request_id(
     receipt_payload: Mapping[str, Any] | None,
     active_request_id: str,
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(receipt_payload, Mapping):
         return None
@@ -2210,6 +2295,7 @@ def _rebind_side_effect_receipt_request_id(
     rebound["trace_context"] = _rebound_trace_context_payload(
         rebound.get("trace_context"),
         active_request_id,
+        trace_context,
     )
     return rebound
 
@@ -2219,6 +2305,7 @@ def rebind_checkpoint_envelope_for_resume(
     *,
     active_request_id: str,
     source_checkpoint_ref: str | None = None,
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None = None,
 ) -> CheckpointEnvelope:
     payload = ((envelope).model_copy(deep=True)).model_dump()
     original_request_id = (
@@ -2237,7 +2324,9 @@ def rebind_checkpoint_envelope_for_resume(
     plan_snapshot["trace_context"] = _rebound_trace_context_payload(
         plan_snapshot.get("trace_context"),
         active_request_id,
+        trace_context,
     )
+    plan_snapshot = _refresh_plan_digest(plan_snapshot)
     payload["plan_snapshot"] = plan_snapshot
     runtime_state_snapshot = dict(payload.get("runtime_state_snapshot") or {})
     runtime_state_snapshot["request_id"] = active_request_id
@@ -2246,31 +2335,32 @@ def rebind_checkpoint_envelope_for_resume(
     runtime_state_snapshot["active_frame"] = _rebind_frame_snapshot_request_id(
         runtime_state_snapshot.get("active_frame"),
         active_request_id,
+        trace_context,
     )
     runtime_state_snapshot["queued_frames"] = [
-        _rebind_frame_snapshot_request_id(frame_payload, active_request_id)
+        _rebind_frame_snapshot_request_id(frame_payload, active_request_id, trace_context)
         for frame_payload in runtime_state_snapshot.get("queued_frames", [])
         if frame_payload is not None
     ]
     runtime_state_snapshot["branch_states"] = {
-        str(key): _rebind_branch_state_request_id(value, active_request_id)
+        str(key): _rebind_branch_state_request_id(value, active_request_id, trace_context)
         for key, value in dict(runtime_state_snapshot.get("branch_states", {})).items()
         if value is not None
     }
     runtime_state_snapshot["branch_publications"] = [
-        _rebind_branch_publication_request_id(publication_payload, active_request_id)
+        _rebind_branch_publication_request_id(publication_payload, active_request_id, trace_context)
         for publication_payload in runtime_state_snapshot.get("branch_publications", [])
         if publication_payload is not None
     ]
     runtime_state_snapshot["branch_resume_snapshots"] = {
-        str(key): _rebind_branch_resume_snapshot_request_id(value, active_request_id)
+        str(key): _rebind_branch_resume_snapshot_request_id(value, active_request_id, trace_context)
         for key, value in dict(runtime_state_snapshot.get("branch_resume_snapshots", {})).items()
         if value is not None
     }
     payload["runtime_state_snapshot"] = runtime_state_snapshot
     side_effect_ledger = dict(payload.get("side_effect_ledger") or {})
     side_effect_ledger["receipts"] = [
-        _rebind_side_effect_receipt_request_id(receipt_payload, active_request_id)
+        _rebind_side_effect_receipt_request_id(receipt_payload, active_request_id, trace_context)
         for receipt_payload in side_effect_ledger.get("receipts", [])
         if receipt_payload is not None
     ]
@@ -2298,12 +2388,14 @@ def solve_request_from_resume_checkpoint(
     request_id_override: str | None = None,
     request_bundle: Mapping[str, Any] | None = None,
     source_checkpoint_ref: str | None = None,
+    trace_context: OpenAITraceContext | Mapping[str, Any] | None = None,
 ) -> tuple[SolveRequest, CheckpointEnvelope, str]:
     effective_request_id = str(request_id_override or envelope.request_id).strip() or envelope.request_id
     rebound_envelope = rebind_checkpoint_envelope_for_resume(
         envelope,
         active_request_id=effective_request_id,
         source_checkpoint_ref=source_checkpoint_ref,
+        trace_context=trace_context,
     )
     task, plan = resume_task_and_plan_from_checkpoint(rebound_envelope)
     bundle = dict(request_bundle or {})
@@ -2499,10 +2591,14 @@ def runtime_solve_request_for_task(
     trace_context: OpenAITraceContext | None = None,
 ) -> RuntimeSolveRequest:
     normalized_request_id = request_id or normalize_benchmark_request_id(task.task_id, seed)
-    episode_kind = trace_context_field(trace_context, "episode_kind") or benchmark_task_episode_kind(task)
-    episode_step_index = trace_context_field(trace_context, "episode_step_index")
-    if episode_step_index is None:
-        episode_step_index = benchmark_task_episode_step_index(task)
+    if benchmark_task_episode_kind(task) == "transfer_episode":
+        episode_kind = trace_context_field(trace_context, "episode_kind") or "transfer_episode"
+        episode_step_index = trace_context_field(trace_context, "episode_step_index")
+        if episode_step_index is None:
+            episode_step_index = benchmark_task_episode_step_index(task)
+    else:
+        episode_kind = None
+        episode_step_index = None
     evaluation_unit_id = (
         trace_context_field(trace_context, "evaluation_unit_id")
         or evaluation_unit_id_for_invocation(task, seed, episode_kind=episode_kind)
@@ -2519,6 +2615,7 @@ def runtime_solve_request_for_task(
             trace_context,
             request_id=normalized_request_id,
             evaluation_unit_id=evaluation_unit_id,
+            request_mode="benchmark",
             episode_kind=episode_kind,
             episode_step_index=episode_step_index,
             task_id=task.task_id,
@@ -2534,6 +2631,10 @@ def runtime_solve_request_for_user_request(
     seed: int,
     solve_request: SolveRequest,
     trace_context: OpenAITraceContext | None = None,
+    runtime_session_id: str | None = None,
+    runtime_message_id: str | None = None,
+    runtime_message_index: int | None = None,
+    session_seed: RuntimeSessionSeed | None = None,
 ) -> RuntimeSolveRequest:
     effective_solve_request = solve_request
     if not solve_request.request_file_refs:
@@ -2543,6 +2644,10 @@ def runtime_solve_request_for_user_request(
                 "file_paths": _request_file_source_paths(solve_request),
             }
         )
+    if session_seed is not None and runtime_session_id is None:
+        runtime_session_id = session_seed.session_id
+    if session_seed is not None and runtime_message_index is None:
+        runtime_message_index = session_seed.message_index
     return RuntimeSolveRequest(
         request_id=effective_solve_request.request_id,
         evaluation_unit_id=effective_solve_request.request_id,
@@ -2550,14 +2655,18 @@ def runtime_solve_request_for_user_request(
         mode="user_request",
         seed=int(seed),
         solve_request=effective_solve_request,
+        session_seed=session_seed,
         budget_overrides=dict(effective_solve_request.budget_overrides),
         trace_context=runtime_trace_context(
             trace_context,
             request_id=effective_solve_request.request_id,
             evaluation_unit_id=effective_solve_request.request_id,
-            episode_kind="user_request",
+            request_mode="user_request",
             seed=seed,
             objective=effective_solve_request.prompt,
+            runtime_session_id=runtime_session_id,
+            runtime_message_id=runtime_message_id,
+            runtime_message_index=runtime_message_index,
         ),
     )
 
@@ -2568,6 +2677,7 @@ def runtime_batch_request_for_tasks(
     runtime_backend: str,
     task_runs: list[tuple[BenchmarkTask, int]],
     budget_overrides: dict[str, Any] | None = None,
+    trace_context: OpenAITraceContext | None = None,
 ) -> RuntimeBatchRequest:
     duplicate_counts: dict[tuple[str, int], int] = {}
     total_counts: dict[tuple[str, int], int] = {}
@@ -2589,7 +2699,7 @@ def runtime_batch_request_for_tasks(
             )
             episode_step_index = int(getattr(task, "episode_order", 0) or 0)
         else:
-            episode_kind = "benchmark_duplicate" if total_counts.get(duplicate_key, 0) > 1 else "single_task"
+            episode_kind = None
             duplicate_counts[duplicate_key] = duplicate_counts.get(duplicate_key, 0) + 1
             duplicate_ordinal = duplicate_counts[duplicate_key] - 1
             request_key = normalize_benchmark_request_id(
@@ -2609,8 +2719,10 @@ def runtime_batch_request_for_tasks(
                 seed=seed,
                 task=task,
                 trace_context=runtime_trace_context(
+                    trace_context,
                     request_id=request_key,
                     evaluation_unit_id=evaluation_unit_id,
+                    request_mode="benchmark",
                     episode_kind=episode_kind,
                     episode_step_index=episode_step_index,
                     task_id=task.task_id,
@@ -2625,9 +2737,10 @@ def runtime_batch_request_for_tasks(
         budget_overrides=dict(budget_overrides or {}),
         invocations=invocations,
         trace_context=runtime_trace_context(
+            trace_context,
             request_id=request_id,
             evaluation_unit_id=request_id,
-            episode_kind="batch",
+            request_mode="batch",
         ),
     )
 

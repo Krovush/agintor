@@ -22,8 +22,15 @@ class OpenAITraceContext(BaseModel):
     seed: Optional[int] = None
     request_id: Optional[str] = None
     evaluation_unit_id: Optional[str] = None
-    episode_kind: Optional[str] = None
+    request_mode: Optional[Literal["benchmark", "user_request", "batch"]] = None
+    episode_kind: Optional[Literal["transfer_episode"]] = None
     episode_step_index: Optional[int] = None
+    factory_chat_id: Optional[str] = None
+    factory_message_id: Optional[str] = None
+    factory_message_index: Optional[int] = None
+    runtime_session_id: Optional[str] = None
+    runtime_message_id: Optional[str] = None
+    runtime_message_index: Optional[int] = None
     iteration: Optional[int] = None
     objective: Optional[str] = None
     touched_scope: List[str] = Field(default_factory=list)
@@ -32,6 +39,20 @@ class OpenAITraceContext(BaseModel):
     worker_id: Optional[str] = None
     op_id: Optional[str] = None
     run_node_id: Optional[str] = None
+
+    @field_validator("episode_kind", mode="before")
+    @classmethod
+    def normalize_episode_kind(cls, value: Any) -> Any:
+        text = str(value or "").strip()
+        if text == "transfer_episode":
+            return text
+        return None
+
+    @model_validator(mode="after")
+    def normalize_episode_scope(self) -> "OpenAITraceContext":
+        if self.episode_kind != "transfer_episode":
+            self.episode_step_index = None
+        return self
 
 
 class RuntimeEvent(BaseModel):
@@ -147,6 +168,8 @@ class GoalSpec(BaseModel):
     target_families: List[str] = Field(default_factory=list)
     deployment_preferences: Dict[str, Any] = Field(default_factory=dict)
     assumptions: List[str] = Field(default_factory=list)
+    amendment_index: int = 0
+    amendment_history: List[str] = Field(default_factory=list)
 
 
 class SuccessCriterion(BaseModel):
@@ -767,6 +790,82 @@ class ShellStateSnapshot(BaseModel):
         if isinstance(value, list):
             return {"handles": value}
         return value
+
+
+class RuntimeSessionSeed(BaseModel):
+    """Hydration seed for a follow-up message in an existing runtime chat session.
+
+    Carryover is narrow: long-term memory and predictor state persist across
+    messages, plus a small condensed short-term recap. Open handles, side-effect
+    ledger, in-flight plan, and message board sequence are NOT carried over —
+    each message executes a fresh plan.
+    """
+    session_id: str
+    message_index: int
+    parent_message_id: Optional[str] = None
+    long_term_graph: LongTermGraphSnapshot = Field(default_factory=LongTermGraphSnapshot)
+    predictor_snapshot: Optional[PredictorSnapshot] = None
+    short_term_carryover: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class RuntimeSessionIdentity(BaseModel):
+    session_id: str
+    runtime_dir: str
+    runtime_hash: str
+    runtime_backend: str = ""
+    created_at: float = 0.0
+    message_count: int = 0
+    last_message_id: Optional[str] = None
+
+
+class RuntimeSessionMessage(BaseModel):
+    message_id: str
+    message_index: int
+    parent_message_id: Optional[str] = None
+    session_id: str
+    request_id: str
+    prompt: str
+    created_at: float = 0.0
+    boundary_state_path: Optional[str] = None
+    long_term_graph_path: Optional[str] = None
+    predictor_snapshot_path: Optional[str] = None
+    result_path: Optional[str] = None
+    response_path: Optional[str] = None
+    checkpoint_ref: Optional[str] = None
+    lifecycle_state: Literal["completed", "paused", "failed", "cancelled"] = "completed"
+
+
+class FactoryChatIdentity(BaseModel):
+    chat_id: str
+    project_dir: str
+    goal_id: str
+    runtime_provider: str
+    agintor_provider: str
+    runtime_backend: str
+    runtime_profile_hash: str = ""
+    created_at: float = 0.0
+    message_count: int = 0
+    last_message_id: Optional[str] = None
+
+
+class FactoryMessage(BaseModel):
+    message_id: str
+    message_index: int
+    parent_message_id: Optional[str] = None
+    chat_id: str
+    prompt: str
+    created_at: float = 0.0
+    build_id: str
+    leader_runtime_hash: str
+    leader_runtime_dir: str = ""
+    goal_spec_path: str = ""
+    success_criteria_path: str = ""
+    benchmark_plan_path: str = ""
+    verifier_bundle_path: str = ""
+    runtime_plan_path: str = ""
+    deployment_contract_path: str = ""
+    export_summary_path: str = ""
+    build_summary_path: str = ""
 
 
 class AttemptSnapshot(BaseModel):
@@ -1466,14 +1565,7 @@ class ExecutionPlan(BaseModel):
         if not self.plan_digest:
             digest_payload = {key: value for key, value in values.items() if key != "plan_digest"}
             digest_payload["request_id"] = None
-            trace_context = digest_payload.get("trace_context")
-            if hasattr(trace_context, "model_dump"):
-                trace_context = trace_context.model_dump()
-            if isinstance(trace_context, dict):
-                normalized_trace_context = {str(key): to_jsonable(item) for key, item in trace_context.items()}
-                normalized_trace_context["request_id"] = None
-                normalized_trace_context["session_id"] = None
-                digest_payload["trace_context"] = normalized_trace_context
+            digest_payload["trace_context"] = None
             self.plan_digest = stable_hash(to_jsonable(digest_payload))
         return self
 
@@ -1537,6 +1629,9 @@ class SolveResult(BaseModel):
     faults: Dict[str, Any] = Field(default_factory=dict)
     verified: bool = False
     best_effort: bool = False
+    post_message_long_term_graph: Optional[LongTermGraphSnapshot] = None
+    post_message_predictor_snapshot: Optional[PredictorSnapshot] = None
+    post_message_short_term_export: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class RuntimeSolveRequest(BaseModel):
@@ -1550,6 +1645,7 @@ class RuntimeSolveRequest(BaseModel):
     seed: int = 0
     task: Optional["BenchmarkTask"] = None
     solve_request: Optional[SolveRequest] = None
+    session_seed: Optional[RuntimeSessionSeed] = None
     budget_overrides: Dict[str, Any] = Field(default_factory=dict)
     trace_context: Optional[OpenAITraceContext] = None
 
@@ -1562,6 +1658,16 @@ class RuntimeSolveRequest(BaseModel):
             raise ValueError("benchmark solve requests require a benchmark task")
         if mode == "user_request" and solve_request is None:
             raise ValueError("user_request solve requests require a solve_request payload")
+        if mode == "benchmark" and self.session_seed is not None:
+            raise ValueError("benchmark solve requests must not carry a runtime session seed")
+        if self.session_seed is not None:
+            trace_context = self.trace_context
+            if trace_context is None:
+                raise ValueError("runtime session seeds require trace session identity")
+            if trace_context.runtime_session_id != self.session_seed.session_id:
+                raise ValueError("runtime session seed does not match trace runtime_session_id")
+            if trace_context.runtime_message_index != self.session_seed.message_index:
+                raise ValueError("runtime session seed does not match trace runtime_message_index")
         return self
 
 
@@ -2123,7 +2229,9 @@ class CheckpointEnvelope(StrictPersistenceModel):
             return values
         if "working_state_summary" in values:
             raise ValueError("legacy checkpoint working_state_summary is not accepted by v4 checkpoint envelopes")
-        schema_version = str(values.get("checkpoint_schema_version") or CHECKPOINT_ENVELOPE_SCHEMA_VERSION).strip()
+        if "checkpoint_schema_version" not in values:
+            return values
+        schema_version = str(values.get("checkpoint_schema_version") or "").strip()
         if schema_version != CHECKPOINT_ENVELOPE_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported checkpoint envelope schema {schema_version!r}; "
@@ -2212,7 +2320,7 @@ class RuntimeSolveResponse(BaseModel):
 class RuntimeTaskInvocation(BaseModel):
     request_id: str
     evaluation_unit_id: str = ""
-    episode_kind: Literal["single_task", "transfer_episode", "benchmark_duplicate"] = "single_task"
+    episode_kind: Optional[Literal["transfer_episode"]] = None
     episode_step_index: Optional[int] = None
     run_id: str = ""
     run_root: str = ""
@@ -2222,19 +2330,25 @@ class RuntimeTaskInvocation(BaseModel):
     task: BenchmarkTask
     trace_context: Optional[OpenAITraceContext] = None
 
+    @field_validator("episode_kind", mode="before")
+    @classmethod
+    def normalize_episode_kind(cls, value: Any) -> Any:
+        text = str(value or "").strip()
+        if text == "transfer_episode":
+            return text
+        return None
+
     @model_validator(mode="after")
     def validate_episode_grouping(self) -> "RuntimeTaskInvocation":
         task = self.task
-        episode_kind = str(self.episode_kind or "single_task")
-        if (
-            episode_kind == "single_task"
-            and task is not None
-            and bool(getattr(task, "transfer_scored", False))
-            and str(getattr(task, "episode_id", "") or "").strip()
-        ):
-            episode_kind = "transfer_episode"
-            self.episode_kind = episode_kind
-        if episode_kind == "transfer_episode":
+        if self.episode_kind is None:
+            if (
+                task is not None
+                and bool(getattr(task, "transfer_scored", False))
+                and str(getattr(task, "episode_id", "") or "").strip()
+            ):
+                self.episode_kind = "transfer_episode"
+        if self.episode_kind == "transfer_episode":
             if self.episode_step_index is None and task is not None:
                 self.episode_step_index = int(getattr(task, "episode_order", 0) or 0)
         else:

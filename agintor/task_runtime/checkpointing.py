@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Mapping, Sequence
 from ..exceptions import BranchCancelled, HardInvalidation, ProviderExhaustedError, ResumeRecoveryError
-from ..openai_trace import resolve_trace_session_id, trace_session_dir_name
+from ..openai_trace import resolve_trace_session_id, trace_grouping_key, trace_session_dir_name
 from ..runtime_api import (
     AgentFrame,
     PolicyContext,
@@ -12,7 +12,6 @@ from ..runtime_api import (
     compile_execution_plan_from_task,
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
-    runtime_task_materialization_key,
 )
 from ..schemas import (
     CHECKPOINT_ENVELOPE_SCHEMA_VERSION,
@@ -618,15 +617,8 @@ class CheckpointingMixin:
                 and str(row.get("trace_call_id") or row.get("call_id") or row.get("openai_call_id") or "").strip()
             }
         )
-        runtime_task_key = runtime_task_materialization_key(
-            request_id=context.request_id,
-            task_id=task.task_id,
-            seed=seed,
-            runtime_hash=self.runtime.runtime_hash,
-            evaluation_unit_id=trace_context.evaluation_unit_id,
-            episode_kind=trace_context.episode_kind,
-            episode_step_index=trace_context.episode_step_index,
-        )
+        grouping = trace_grouping_key(trace_context)
+        runtime_task_key = grouping[1] if grouping is not None else ""
         resolved_session_id = resolve_trace_session_id(trace_context.session_id)
         return TraceCursorSnapshot(
             runtime_trace_length=len(context.trace),

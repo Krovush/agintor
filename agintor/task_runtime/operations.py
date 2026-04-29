@@ -249,12 +249,20 @@ class OperationsMixin:
             return [cls._jsonable_prompt_inputs(item) for item in value]
         return value
 
+    def _prompt_lines_with_session_carryover(self, context: PolicyContext) -> list[str]:
+        prompt_lines = [context.task.prompt]
+        session_carryover = self._session_carryover_rows(context)
+        if session_carryover:
+            prompt_lines.append("Session carryover:")
+            prompt_lines.append(json.dumps(session_carryover, sort_keys=True, default=str))
+        return prompt_lines
+
     def _direct_response_prompt(
         self,
         context: PolicyContext,
         resolved_args: Mapping[str, Any],
     ) -> str:
-        prompt_lines = [context.task.prompt]
+        prompt_lines = self._prompt_lines_with_session_carryover(context)
         if context.task.context_items:
             prompt_lines.append("Context items:")
             prompt_lines.append(json.dumps(context.task.context_items, sort_keys=True, default=str))
@@ -274,6 +282,20 @@ class OperationsMixin:
             prompt_lines.append("Output schema:")
             prompt_lines.append(json.dumps(output_schema, sort_keys=True, default=str))
         return "\n".join(prompt_lines)
+
+    @staticmethod
+    def _session_carryover_rows(context: PolicyContext) -> list[dict[str, Any]]:
+        message_board = getattr(getattr(context, "shell", None), "message_board", None)
+        entries = getattr(message_board, "entries", [])
+        rows: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            if str(entry.get("kind") or "") != "session_carryover":
+                continue
+            payload = entry.get("payload")
+            rows.append(dict(payload) if isinstance(payload, Mapping) else dict(entry))
+        return rows
 
     def _execute_direct_response(
         self,

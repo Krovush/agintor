@@ -22,7 +22,7 @@ from .runtime_host import RuntimeHost
 from .runtime_profile import RuntimeProfile, resolve_runtime_profile
 from .runner import TaskRuntime as TaskRuntime
 from .scoring import ScoreCalculator, estimate_reference_scales, mean_improvement
-from .schemas import EvaluationStageResult, ObjectiveKind, ObjectiveSpec, SuiteEvaluation
+from .schemas import EvaluationStageResult, ObjectiveKind, ObjectiveSpec, OpenAITraceContext, SuiteEvaluation
 from .utils import ensure_directory, stable_hash
 
 
@@ -40,6 +40,7 @@ class RuntimeEvaluator:
         profile_path: Path | None = None,
         artifact_mode: str | ArtifactMode | None = None,
         sandbox_root: Path | None = None,
+        trace_context: OpenAITraceContext | None = None,
     ) -> None:
         self.suite = suite
         self.workspace = Path(workspace)
@@ -60,6 +61,7 @@ class RuntimeEvaluator:
             profile_path=self.profile_path,
         )
         self.runtime_backend = (runtime_backend or os.environ.get("AGINTOR_RUNTIME_BACKEND", "local")).strip().lower()
+        self.trace_context = trace_context
         self.runtime_host = RuntimeHost(
             self.workspace,
             runtime_backend=self.runtime_backend,
@@ -253,6 +255,7 @@ class RuntimeEvaluator:
         tasks_override: Sequence[Any] | None = None,
         *,
         use_reference_scales: bool = True,
+        trace_context: OpenAITraceContext | None = None,
     ) -> SuiteEvaluation:
         runtime_profile = self._effective_runtime_profile(runtime_dir)
         runtime = self._load_runtime(runtime_dir, runtime_profile=runtime_profile)
@@ -279,6 +282,7 @@ class RuntimeEvaluator:
                 provider=self.provider,
                 runtime_profile=runtime_profile,
                 budget_overrides=self.budget_overrides,
+                trace_context=trace_context or self.trace_context,
             )
             self.last_provider_usage = dict(batch_response.provider_usage)
             run_results.extend(batch_response.run_results)

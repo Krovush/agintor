@@ -556,8 +556,9 @@ def test_runtime_batch_request_normalizes_invocation_request_ids():
     assert request.request_id == "batch.test"
     assert request.trace_context.request_id == "batch.test"
     assert request.invocations[0].request_id == "benchmark.demo.task.seed_7"
-    assert request.invocations[0].episode_kind == "single_task"
+    assert request.invocations[0].episode_kind is None
     assert request.invocations[0].trace_context.request_id == "benchmark.demo.task.seed_7"
+    assert request.invocations[0].trace_context.episode_kind is None
 
 
 def test_runtime_batch_request_classifies_transfer_and_duplicate_invocations():
@@ -594,10 +595,7 @@ def test_runtime_batch_request_classifies_transfer_and_duplicate_invocations():
     )
 
     duplicate_invocations = request.invocations[:2]
-    assert [invocation.episode_kind for invocation in duplicate_invocations] == [
-        "benchmark_duplicate",
-        "benchmark_duplicate",
-    ]
+    assert [invocation.episode_kind for invocation in duplicate_invocations] == [None, None]
     assert len({invocation.evaluation_unit_id for invocation in duplicate_invocations}) == 2
     assert {invocation.task.task_id for invocation in duplicate_invocations} == {"demo.duplicate"}
 
@@ -606,6 +604,7 @@ def test_runtime_batch_request_classifies_transfer_and_duplicate_invocations():
         "transfer_episode",
         "transfer_episode",
     ]
+    assert [invocation.episode_step_index for invocation in transfer_invocations] == [0, 1]
     assert len({invocation.evaluation_unit_id for invocation in transfer_invocations}) == 1
 
 
@@ -837,6 +836,8 @@ def test_runtime_host_resume_uses_run_ref_and_reuses_original_solve_request_for_
     checkpoint_path = run_root / "checkpoints" / "checkpoint.resume.test.0002.json"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_path.write_text("{}", encoding="utf-8")
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
     manifest = RunManifest(
         run_id="run.123",
         run_root=str(run_root),
@@ -885,7 +886,7 @@ def test_runtime_host_resume_uses_run_ref_and_reuses_original_solve_request_for_
         request_id=original_request.request_id,
         seed=0,
         runtime_hash="runtime-hash",
-        runtime_dir=str(tmp_path / "runtime"),
+        runtime_dir="/mnt/runtime",
     )
     monkeypatch.setattr(
         host.run_store,
@@ -936,8 +937,16 @@ def test_runtime_host_resume_uses_run_ref_and_reuses_original_solve_request_for_
     )
     monkeypatch.setattr(host, "_run_local_resume", succeed)
     resumed = host.resume(
-        "dummy-runtime",
-        ResumeRequest(run_ref=manifest.run_id, request_id="resume.user.override"),
+        runtime_dir,
+        ResumeRequest(
+            run_ref=manifest.run_id,
+            request_id="resume.user.override",
+            trace_context=OpenAITraceContext(
+                runtime_session_id="sess.resume",
+                runtime_message_id="msg.resume",
+                runtime_message_index=4,
+            ),
+        ),
         provider=provider,
         runtime_profile=runtime_profile,
     )
@@ -946,9 +955,17 @@ def test_runtime_host_resume_uses_run_ref_and_reuses_original_solve_request_for_
     assert captured["request"].run_ref == manifest.run_id
     assert captured["request"].request_id == "resume.user.override"
     assert captured["request"].trace_context.request_id == "resume.user.override"
+    assert captured["request"].trace_context.runtime_dir == str(runtime_dir.resolve())
+    assert captured["request"].trace_context.runtime_session_id == "sess.resume"
+    assert captured["request"].trace_context.runtime_message_id == "msg.resume"
+    assert captured["request"].trace_context.runtime_message_index == 4
     assert isinstance(preflight["request"], RuntimeSolveRequest)
     assert preflight["request"].request_id == "resume.user.override"
     assert preflight["request"].trace_context.request_id == "resume.user.override"
+    assert preflight["request"].trace_context.runtime_dir == str(runtime_dir.resolve())
+    assert preflight["request"].trace_context.runtime_session_id == "sess.resume"
+    assert preflight["request"].trace_context.runtime_message_id == "msg.resume"
+    assert preflight["request"].trace_context.runtime_message_index == 4
     assert resumed.solve_result.artifact == {"status": "resumed"}
     assert resumed.solve_result.request_id == "resume.user.override"
 
@@ -1088,7 +1105,7 @@ def test_runtime_host_resume_resolves_backend_before_inspect(monkeypatch, tmp_pa
     )
     call_order: list[str] = []
 
-    def resolve(resume_request):
+    def resolve(resume_request, **kwargs):
         call_order.append("resolve")
         return runtime_request, preflight_request, manifest, attempt
 
@@ -1133,12 +1150,13 @@ def test_runtime_host_run_batch_uses_effective_backend_for_dispatch(monkeypatch,
     )
     original_builder = runtime_batch_request_for_tasks
 
-    def build_docker_batch_request(*, request_id, runtime_backend, task_runs, budget_overrides=None):
+    def build_docker_batch_request(*, request_id, runtime_backend, task_runs, budget_overrides=None, trace_context=None):
         return original_builder(
             request_id=request_id,
             runtime_backend="docker",
             task_runs=task_runs,
             budget_overrides=budget_overrides,
+            trace_context=trace_context,
         )
 
     capability_exchange = _capability_exchange()
@@ -1211,12 +1229,13 @@ def test_runtime_host_run_batch_rejects_mixed_backends_before_launch(monkeypatch
     original_builder = runtime_batch_request_for_tasks
     called = {"inspect": False, "local": False, "docker": False}
 
-    def build_mixed_batch_request(*, request_id, runtime_backend, task_runs, budget_overrides=None):
+    def build_mixed_batch_request(*, request_id, runtime_backend, task_runs, budget_overrides=None, trace_context=None):
         request = original_builder(
             request_id=request_id,
             runtime_backend="docker",
             task_runs=task_runs,
             budget_overrides=budget_overrides,
+            trace_context=trace_context,
         )
         return request.model_copy(
             update={
@@ -1766,7 +1785,7 @@ def test_runtime_host_resume_finalizes_attempt_on_protocol_mismatch(monkeypatch,
     monkeypatch.setattr(
         host,
         "_resolve_runtime_resume_request",
-        lambda request: (runtime_request, preflight_request, manifest, attempt),
+        lambda request, **kwargs: (runtime_request, preflight_request, manifest, attempt),
     )
     monkeypatch.setattr(host, "_preflight_solve_contract", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -1845,7 +1864,7 @@ def test_runtime_host_resume_rejects_missing_runtime_resume_support(monkeypatch,
     monkeypatch.setattr(
         host,
         "_resolve_runtime_resume_request",
-        lambda request: (runtime_request, original_request, manifest, attempt),
+        lambda request, **kwargs: (runtime_request, original_request, manifest, attempt),
     )
     monkeypatch.setattr(host, "inspect", lambda *args, **kwargs: capability_exchange)
 
@@ -1894,7 +1913,7 @@ def test_runtime_host_resume_finalizes_attempt_when_inspect_fails(monkeypatch, t
     monkeypatch.setattr(
         host,
         "_resolve_runtime_resume_request",
-        lambda request: (runtime_request, original_request, manifest, attempt),
+        lambda request, **kwargs: (runtime_request, original_request, manifest, attempt),
     )
     monkeypatch.setattr(host, "inspect", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeLoadError("inspect failed")))
 

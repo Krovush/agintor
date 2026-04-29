@@ -292,7 +292,7 @@ class BoundedIOMixin:
             ),
             prompt="\n".join(
                 [
-                    context.task.prompt,
+                    *self._prompt_lines_with_session_carryover(context),
                     "Target files:",
                     json.dumps(file_snapshots, sort_keys=True, default=str),
                 ]

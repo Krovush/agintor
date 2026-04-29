@@ -12,6 +12,7 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
+from ..memory_graph import LongTermGraph
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -36,6 +37,7 @@ from ..schemas import (
     ReceiptReconciliationRecord,
     ReplayAllocation,
     RunResult,
+    RuntimeSessionSeed,
     SideEffectReceipt,
     capability_scope_allows,
     plan_node_requires_default_provider,
@@ -55,6 +57,7 @@ class ExecutionLoopMixin:
         *,
         checkpoint_envelope: CheckpointEnvelope | None = None,
         reconciliation_policy: str = "strict",
+        session_seed: RuntimeSessionSeed | None = None,
     ) -> RunResult:
         with self._isolated_provider_environment():
             main_provider_usage_before = self._provider_usage_snapshot(self.provider)
@@ -102,6 +105,8 @@ class ExecutionLoopMixin:
                 transfer_scored=task.transfer_scored,
                 episode_id=episode_scope,
             )
+            if session_seed is not None and checkpoint_envelope is None:
+                self._apply_session_seed(session_seed)
             budget_payload = self._runtime_budget_overrides()
             budget_payload.update(plan.budget_overrides)
             budget = RuntimeBudget(**budget_payload)

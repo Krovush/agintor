@@ -12,6 +12,7 @@ from ..runtime_api import (
     get_plan_node_descriptor,
     normalize_benchmark_request_id,
 )
+from ..memory_graph import LongTermGraph
 from ..schemas import (
     AgentTemplate,
     AsyncHandle,
@@ -27,15 +28,18 @@ from ..schemas import (
     CheckpointEnvelope,
     ChildSpec,
     ExecutionPlan,
+    LongTermGraphSnapshot,
     MemoryNode,
     OpenAITraceContext,
     PlanNode,
+    PredictorSnapshot,
     QueuedAgentSnapshot,
     QueuedFrameSnapshot,
     RecoveryFailureKind,
     ReceiptReconciliationRecord,
     ReplayAllocation,
     RunResult,
+    RuntimeSessionSeed,
     SideEffectReceipt,
     capability_scope_allows,
     plan_node_requires_default_provider,
@@ -47,6 +51,90 @@ from ..utils import count_tokens_rough, ensure_directory, merge_provider_usage, 
 
 
 class MemoryMixin:
+    def _apply_session_seed(self, seed: RuntimeSessionSeed) -> None:
+        """Hydrate runtime memory from a prior message in the same chat session.
+
+        Carries forward long-term graph and (optionally) predictor state. Open
+        handles, side-effect ledger, and message-board sequence are not seeded;
+        they remain fresh for the new message.
+
+        ``short_term_carryover`` rows from the prior message are appended to the
+        message board and short-term graph as recap entries with provenance
+        ``session_carryover`` so the new run's first context-ingestion step sees
+        them.
+        """
+        self.shell.long_term = LongTermGraph.fork_from_snapshot(seed.long_term_graph)
+        if seed.predictor_snapshot is not None:
+            self.shell.predictors.restore(seed.predictor_snapshot)
+        for row in seed.short_term_carryover:
+            if not isinstance(row, Mapping):
+                continue
+            payload = dict(row)
+            payload.setdefault("provenance", {"source": "session_carryover", "session_id": seed.session_id})
+            payload.setdefault("parent_message_id", seed.parent_message_id)
+            self.shell.message_board.append(
+                "session",
+                {
+                    "kind": "session_carryover",
+                    "session_id": seed.session_id,
+                    "parent_message_id": seed.parent_message_id,
+                    "payload": payload,
+                },
+            )
+            label = str(payload.get("label") or payload.get("kind") or "carryover")
+            self.shell.short_term.add_node("RawBlob", label, payload)
+
+    def _export_post_message_state(
+        self,
+        *,
+        run_result: RunResult | None = None,
+    ) -> tuple[LongTermGraphSnapshot, PredictorSnapshot, list[dict[str, Any]]]:
+        """Capture state to seed the next message in this chat session.
+
+        Returns the post-message long-term graph, predictor snapshot, and a
+        condensed short-term export (the user prompt and the final assistant
+        terminal answer) for the next message's recap header.
+        """
+        long_term = self.shell.long_term.snapshot()
+        predictor = self.shell.predictors.snapshot()
+        short_term_export: list[dict[str, Any]] = []
+        if run_result is not None:
+            objective = ""
+            if run_result.trace_context is not None:
+                objective = str(run_result.trace_context.objective or "").strip()
+            if objective:
+                short_term_export.append(
+                    {
+                        "kind": "user_message",
+                        "content": objective,
+                        "request_id": run_result.request_id,
+                    }
+                )
+            artifact = run_result.artifact
+            if artifact is not None:
+                short_term_export.append(
+                    {
+                        "kind": "assistant_summary",
+                        "content": artifact,
+                        "request_id": run_result.request_id,
+                        "lifecycle_state": run_result.run_lifecycle_state or run_result.lifecycle_state,
+                    }
+                )
+        for node_id, node in self.shell.short_term.nodes.items():
+            node_type = str(node.get("type") or "")
+            if node_type not in {"Artifact", "VerifierEvidence", "TaskNote"}:
+                continue
+            short_term_export.append(
+                {
+                    "kind": "post_message_export",
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "label": str(node.get("label") or ""),
+                    "content": node.get("content"),
+                }
+            )
+        return long_term, predictor, short_term_export
+
     def _promote_memory_candidate(self, context: PolicyContext, candidate: MemoryNode) -> None:
         score = self.runtime.memory.score_memory_unit(context, candidate, self.shell.long_term.all_nodes())
         if not self.runtime.memory.should_promote(context, candidate, score):

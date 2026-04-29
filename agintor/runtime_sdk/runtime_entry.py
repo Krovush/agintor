@@ -336,6 +336,7 @@ def _solve(args: argparse.Namespace) -> int:
             request_id=request.request_id,
             trace_context=request.trace_context,
             plan=execution_plan,
+            session_seed=request.session_seed,
         )
         solve_result = solve_result_from_run_result_with_context(
             solve_request,
@@ -344,6 +345,11 @@ def _solve(args: argparse.Namespace) -> int:
             mode=request.mode,
             provider_usage=run_result.provider_usage,
         )
+        if request.mode == "user_request" and str(run_result.run_lifecycle_state or run_result.lifecycle_state or "").lower() == "completed":
+            long_term, predictor, short_term_export = runner._export_post_message_state(run_result=run_result)
+            solve_result.post_message_long_term_graph = long_term
+            solve_result.post_message_predictor_snapshot = predictor
+            solve_result.post_message_short_term_export = short_term_export
         response = RuntimeSolveResponse(
             request_id=request.request_id,
             capability_exchange=capability_exchange,
@@ -426,6 +432,7 @@ def _resume(args: argparse.Namespace) -> int:
             request_id_override=request.request_id or envelope.request_id,
             request_bundle=request_bundle,
             source_checkpoint_ref=source_checkpoint_ref,
+            trace_context=request.trace_context,
         )
         _, checkpoint_plan = resume_task_and_plan_from_checkpoint(rebound_envelope)
         mode = "benchmark" if checkpoint_plan.origin.origin_kind == "benchmark" else "user_request"

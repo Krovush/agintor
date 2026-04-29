@@ -2,6 +2,17 @@
 
 Agintor CLI MVP — "bounded evolutionary runtime search for agent topology, memory, tooling, and control". Python 3.12, Pydantic v2 (`>=2,<3`), Typer CLI.
 
+## Product-first reasoning
+
+Think from the human product shape inward before mapping ideas onto the current architecture. DO NOT start with trace, checkpoint, or runtime internals and then invent UX concepts that make those internals sound coherent. Start with what the user is doing, how they are using Agintor, and which layer they are talking to (Agintor factory, or the MAS that Agintor build).
+
+The primary prompt distinction is target, not internal execution machinery:
+
+- **Agintor / factory**: the outer builder that creates and evolves a runtime. The first message in a factory chat starts one build/evolution project; later messages in that same chat are follow-up instructions for that project. A new factory chat starts a separate project.
+- **Built runtime**: the product Agintor created. Runtime prompts are normal chat messages to that runtime. The same runtime chat continues the same conversation/session; a new runtime chat starts a separate conversation with the same runtime.
+
+Do not split runtime prompts into artificial categories just to satisfy existing infrastructure. Follow-up behavior should come from chat/session/checkpoint identity. Benchmark episode terms such as `transfer_episode` are benchmark/trace grouping machinery and must not be confused with user-facing prompt categories.
+
 ## Common commands
 
 Install in editable mode with the test extras:

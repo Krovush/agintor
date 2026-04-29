@@ -265,6 +265,15 @@ class StateStore:
             if isinstance(payload, Mapping) and payload.get("checkpoint_id"):
                 self.index_checkpoint(payload, {"ref": str(checkpoint_path.resolve())})
 
+        for working_memory_path in sorted((self.state_root / "working_memory").glob("*.json")):
+            payload = _load_optional_json(working_memory_path)
+            if isinstance(payload, Mapping):
+                self.index_working_memory_snapshot(
+                    payload,
+                    checkpoint_id=working_memory_path.stem,
+                    canonical_path=working_memory_path,
+                )
+
         for event_path in sorted((self.run_root / "events").glob("*.json")):
             payload = _load_optional_json(event_path)
             if isinstance(payload, Mapping):
@@ -389,10 +398,12 @@ class StateStore:
             _first_present(
                 primary_row.get("episode_kind"),
                 _episode_kind_from_task(primary_task_payload, default=None),
-                "user_request" if request_mode == "user_request" else None,
             )
         )
         episode_step_index = _optional_int(primary_row.get("episode_step_index"))
+        if episode_kind != "transfer_episode":
+            episode_kind = None
+            episode_step_index = None
         with self._transaction() as conn:
             self._delete_canonical(conn, canonical_ref)
             self._insert(
@@ -438,7 +449,6 @@ class StateStore:
                         row_payload.get("episode_kind"),
                         row_trace_context.get("episode_kind"),
                         _episode_kind_from_task(row_task_payload, default=None),
-                        "user_request" if request_mode == "user_request" else None,
                     )
                 )
                 row_episode_step_index = _optional_int(
@@ -449,6 +459,9 @@ class StateStore:
                         _episode_step_index_from_task(row_task_payload) if row_episode_kind == "transfer_episode" else None,
                     )
                 )
+                if row_episode_kind != "transfer_episode":
+                    row_episode_kind = None
+                    row_episode_step_index = None
                 if row_task_id:
                     self._insert(
                         conn,
@@ -911,6 +924,11 @@ class StateStore:
         runtime_task_key = _text(payload.get("runtime_task_key"))
         record_id = stable_hash(session_id, runtime_task_key, payload.get("call_count"))[:16]
         canonical_ref = _text(payload.get("canonical_ref")) or f"openai_api_traces/sessions/{session_id}/index.json"
+        episode_kind = _none_or_text(payload.get("episode_kind"))
+        episode_step_index = _optional_int(payload.get("episode_step_index"))
+        if episode_kind != "transfer_episode":
+            episode_kind = None
+            episode_step_index = None
         with self._transaction() as conn:
             self._insert(
                 conn,
@@ -921,8 +939,8 @@ class StateStore:
                     "evaluation_unit_id": _none_or_text(payload.get("evaluation_unit_id")),
                     "request_id": _none_or_text(payload.get("request_id")),
                     "runtime_task_key": runtime_task_key,
-                    "episode_kind": _none_or_text(payload.get("episode_kind")),
-                    "episode_step_index": _optional_int(payload.get("episode_step_index")),
+                    "episode_kind": episode_kind,
+                    "episode_step_index": episode_step_index,
                     "call_count": _int(payload.get("call_count")),
                     "materialization_state_ref": _none_or_text(payload.get("materialization_state_ref")),
                     **_canonical("trace", canonical_ref, record_id),
@@ -1565,6 +1583,9 @@ def _request_bundle_execution_rows(
             trace_context.get("episode_step_index"),
             _episode_step_index_from_task(task_payload) if episode_kind == "transfer_episode" else None,
         )
+        if episode_kind != "transfer_episode":
+            episode_kind = None
+            episode_step_index = None
         rows.append(
             {
                 "payload": payload,
@@ -1580,7 +1601,7 @@ def _request_bundle_execution_rows(
     return rows
 
 
-def _episode_kind_from_task(task_payload: Mapping[str, Any], *, default: str | None = "single_task") -> str | None:
+def _episode_kind_from_task(task_payload: Mapping[str, Any], *, default: str | None = None) -> str | None:
     if _bool(task_payload.get("transfer_scored")) and _text(task_payload.get("episode_id")):
         return "transfer_episode"
     return default

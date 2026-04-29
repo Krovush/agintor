@@ -19,6 +19,8 @@ from agintor.schemas import (
     MemoryNode,
     OpenAITraceContext,
     RecoveryAttempt,
+    RuntimeSolveRequest,
+    SolveRequest,
     TraceCursorSnapshot,
     WorkingMemorySnapshot,
 )
@@ -121,6 +123,57 @@ def test_checkpoint_file_load_rejects_missing_schema_version(tmp_path: Path) -> 
         shell.load_checkpoint_envelope(checkpoint_ref=checkpoint_ref)
 
 
+def test_user_request_request_bundle_has_no_episode_rows(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    manifest = store.create_run(
+        request_id="solve.user.seed_0",
+        evaluation_unit_id="solve.user.seed_0",
+        request_mode="user_request",
+        runtime_backend="local",
+    )
+    request = RuntimeSolveRequest(
+        request_id=manifest.request_id,
+        evaluation_unit_id=manifest.evaluation_unit_id,
+        runtime_backend="local",
+        mode="user_request",
+        solve_request=SolveRequest(request_id=manifest.request_id, prompt="hello"),
+        trace_context=OpenAITraceContext(
+            request_id=manifest.request_id,
+            evaluation_unit_id=manifest.evaluation_unit_id,
+        ),
+    )
+
+    store.write_request_bundle(
+        manifest,
+        request_envelope={
+            "request_kind": "runtime_solve_request",
+            "request_mode": "user_request",
+            "request_id": manifest.request_id,
+            "evaluation_unit_id": manifest.evaluation_unit_id,
+            "payload": {
+                **request.model_dump(),
+                "trace_context": {
+                    "request_id": manifest.request_id,
+                    "evaluation_unit_id": manifest.evaluation_unit_id,
+                    "episode_kind": "single_task",
+                    "episode_step_index": 7,
+                },
+            },
+        },
+    )
+
+    with state_store.open_state_store(manifest.run_root)._connection() as conn:
+        evaluation_units = conn.execute(
+            "SELECT episode_kind, episode_step_index FROM evaluation_units"
+        ).fetchall()
+        episodes = conn.execute("SELECT * FROM episodes").fetchall()
+
+    assert [dict(row) for row in evaluation_units] == [
+        {"episode_kind": None, "episode_step_index": None}
+    ]
+    assert episodes == []
+
+
 def test_trace_materialization_skips_records_without_runtime_identity(tmp_path: Path, monkeypatch) -> None:
     trace_root = tmp_path / "openai_traces"
     monkeypatch.setenv("AGINTOR_OPENAI_TRACE_DIR", str(trace_root))
@@ -145,19 +198,28 @@ def test_trace_materialization_skips_records_without_runtime_identity(tmp_path: 
     assert state is not None
     assert state.call_count == 1
     assert state.grouped_call_count == 0
-    assert state.runtime_task_keys == []
+    assert state.benchmark_task_keys == []
+    assert state.runtime_session_message_keys == []
+    assert state.factory_message_keys == []
     assert state.known_call_ids == [first_call_id]
     assert state.last_finalized_call_id == first_call_id
-    assert state.materialized_runtime_task_keys == []
-    assert state.pending_runtime_task_keys == []
+    assert state.materialized_benchmark_task_keys == []
+    assert state.materialized_runtime_session_message_keys == []
+    assert state.materialized_factory_message_keys == []
+    assert state.pending_benchmark_task_keys == []
+    assert state.pending_runtime_session_message_keys == []
+    assert state.pending_factory_message_keys == []
     assert state.errors == []
     assert (session_dir / "INDEX.md").exists()
     assert (session_dir / "TRANSCRIPT.md").exists()
     assert not (session_dir / "builds").exists()
     assert not (session_dir / "solves").exists()
-    assert not (session_dir / "runtime_tasks").exists()
+    assert not (session_dir / "benchmark_tasks").exists()
+    assert not (session_dir / "runtime_sessions").exists()
+    assert not (session_dir / "factory_projects").exists()
     raw_record = json.loads(next((session_dir / "calls").glob("*.json")).read_text(encoding="utf-8"))
-    assert "runtime_task_key" not in raw_record
+    assert "trace_group_key" not in raw_record
+    assert "trace_group_kind" not in raw_record
     assert raw_record["trace_context"]["session_id"] == session_dir.name
     assert raw_record["request_metadata"]["trace_context"]["session_id"] == session_dir.name
 
@@ -167,7 +229,6 @@ def test_trace_materialization_skips_records_without_runtime_identity(tmp_path: 
         evaluation_unit_id="evaluation.1",
         task_id="task.1",
         seed=0,
-        episode_kind="single_task",
     )
     second_call_id = persist_openai_trace(
         provider="openai",
@@ -186,12 +247,14 @@ def test_trace_materialization_skips_records_without_runtime_identity(tmp_path: 
     assert state is not None
     assert state.call_count == 2
     assert state.grouped_call_count == 0
-    assert state.runtime_task_keys == []
+    assert state.benchmark_task_keys == []
+    assert state.runtime_session_message_keys == []
     assert state.materialized_solve_request_ids == ["request.1"]
     assert state.pending_solve_request_ids == []
     assert (session_dir / "solves" / "request.1" / "INDEX.md").exists()
     assert (session_dir / "solves" / "request.1" / "TRANSCRIPT.md").exists()
-    assert not (session_dir / "runtime_tasks").exists()
+    assert not (session_dir / "benchmark_tasks").exists()
+    assert not (session_dir / "runtime_sessions").exists()
 
     complete_trace_context = trace_context.model_copy(update={"runtime_hash": "runtime.hash.1"})
     third_call_id = persist_openai_trace(
@@ -211,36 +274,57 @@ def test_trace_materialization_skips_records_without_runtime_identity(tmp_path: 
     assert state is not None
     assert state.schema_version == "agintor.trace-materialization.v1"
     assert state.call_count == 3
-    assert state.grouped_call_count == 1
+    assert state.grouped_call_count == 0
     assert state.known_call_ids == [first_call_id, second_call_id, third_call_id]
     assert state.last_finalized_call_id == third_call_id
-    assert state.runtime_task_keys == ["task.1|seed_0|runtime.hash.1|evaluation.1"]
-    assert state.materialized_runtime_task_keys == state.runtime_task_keys
+    assert state.benchmark_task_keys == []
+    assert state.materialized_benchmark_task_keys == state.benchmark_task_keys
     assert state.materialized_solve_request_ids == ["request.1"]
     assert state.pending_build_ids == []
     assert state.pending_solve_request_ids == []
-    assert state.pending_runtime_task_keys == []
+    assert state.pending_benchmark_task_keys == []
     assert state.errors == []
-    runtime_view = (
+
+    benchmark_trace_context = complete_trace_context.model_copy(update={"request_mode": "benchmark"})
+    fourth_call_id = persist_openai_trace(
+        provider="openai",
+        method_name="responses.create",
+        model_class="default",
+        model_name="gpt-test",
+        reasoning_effort=None,
+        instructions="solve",
+        input_value="benchmark hello",
+        request_payload={"model": "gpt-test"},
+        request_metadata={"mode": "benchmark", "trace_context": (benchmark_trace_context).model_dump()},
+        response_text="ok",
+    )
+    assert fourth_call_id
+    state = load_materialization_state(session_dir)
+    assert state is not None
+    assert state.call_count == 4
+    assert state.grouped_call_count == 1
+    assert state.known_call_ids == [first_call_id, second_call_id, third_call_id, fourth_call_id]
+    assert state.last_finalized_call_id == fourth_call_id
+    assert state.benchmark_task_keys == ["task.1|seed_0|runtime.hash.1|evaluation.1"]
+    assert state.materialized_benchmark_task_keys == state.benchmark_task_keys
+    benchmark_view = (
         session_dir
-        / "runtime_tasks"
+        / "benchmark_tasks"
         / "task.1"
         / "seed_0"
-        / "runtimes"
         / "runtime.hash.1"
-        / "requests"
         / "evaluation.1"
     )
-    assert (runtime_view / "INDEX.md").exists()
-    assert (runtime_view / "TRANSCRIPT.md").exists()
-    assert "hello again" in (runtime_view / "TRANSCRIPT.md").read_text(encoding="utf-8")
+    assert (benchmark_view / "INDEX.md").exists()
+    assert (benchmark_view / "TRANSCRIPT.md").exists()
+    assert "benchmark hello" in (benchmark_view / "TRANSCRIPT.md").read_text(encoding="utf-8")
 
     from agintor.openai_trace import rebuild_trace_materialization
 
     rebuilt_state = rebuild_trace_materialization(session_dir)
     assert rebuilt_state.known_call_ids == state.known_call_ids
     assert rebuilt_state.materialized_solve_request_ids == state.materialized_solve_request_ids
-    assert rebuilt_state.materialized_runtime_task_keys == state.materialized_runtime_task_keys
+    assert rebuilt_state.materialized_benchmark_task_keys == state.materialized_benchmark_task_keys
 
 
 def test_concurrent_trace_persistence_rebuilds_grouped_views_without_losing_calls(
@@ -270,10 +354,10 @@ def test_concurrent_trace_persistence_rebuilds_grouped_views_without_losing_call
             session_id="session.concurrent",
             request_id=f"request.{label}",
             evaluation_unit_id="evaluation.concurrent",
+            request_mode="benchmark",
             task_id="task.concurrent",
             seed=0,
             runtime_hash="runtime.concurrent",
-            episode_kind="single_task",
         )
         return persist_openai_trace(
             provider="openai",
@@ -284,7 +368,7 @@ def test_concurrent_trace_persistence_rebuilds_grouped_views_without_losing_call
             instructions=f"solve {label}",
             input_value=f"hello {label}",
             request_payload={"model": "gpt-test"},
-            request_metadata={"mode": "user_request", "trace_context": (trace_context).model_dump()},
+            request_metadata={"mode": "benchmark", "trace_context": (trace_context).model_dump()},
             response_text=f"ok {label}",
         )
 
@@ -308,22 +392,20 @@ def test_concurrent_trace_persistence_rebuilds_grouped_views_without_losing_call
     assert state is not None
     assert state.call_count == 2
     assert state.grouped_call_count == 2
-    assert state.materialized_runtime_task_keys == [
+    assert state.materialized_benchmark_task_keys == [
         "task.concurrent|seed_0|runtime.concurrent|evaluation.concurrent"
     ]
-    assert state.pending_runtime_task_keys == []
-    runtime_view = (
+    assert state.pending_benchmark_task_keys == []
+    benchmark_view = (
         session_dir
-        / "runtime_tasks"
+        / "benchmark_tasks"
         / "task.concurrent"
         / "seed_0"
-        / "runtimes"
         / "runtime.concurrent"
-        / "requests"
         / "evaluation.concurrent"
     )
-    assert (runtime_view / "INDEX.md").exists()
-    index_text = (runtime_view / "INDEX.md").read_text(encoding="utf-8")
+    assert (benchmark_view / "INDEX.md").exists()
+    index_text = (benchmark_view / "INDEX.md").read_text(encoding="utf-8")
     assert first_call_id in index_text
     assert second_call_id in index_text
 
@@ -341,10 +423,10 @@ def test_trace_materialization_separates_runtime_task_groups_by_runtime_hash(
             session_id="session.runtime-hash",
             request_id="request.same",
             evaluation_unit_id="evaluation.same",
+            request_mode="benchmark",
             task_id="task.same",
             seed=7,
             runtime_hash=runtime_hash,
-            episode_kind="single_task",
         )
         call_id = persist_openai_trace(
             provider="openai",
@@ -355,7 +437,7 @@ def test_trace_materialization_separates_runtime_task_groups_by_runtime_hash(
             instructions=f"solve {runtime_hash}",
             input_value="hello",
             request_payload={"model": "gpt-test"},
-            request_metadata={"mode": "user_request", "trace_context": (trace_context).model_dump()},
+            request_metadata={"mode": "benchmark", "trace_context": (trace_context).model_dump()},
             response_text="ok",
         )
         assert call_id is not None
@@ -367,32 +449,82 @@ def test_trace_materialization_separates_runtime_task_groups_by_runtime_hash(
     assert state.known_call_ids == call_ids
     assert state.last_finalized_call_id == call_ids[-1]
     assert state.materialized_solve_request_ids == ["request.same"]
-    assert state.materialized_runtime_task_keys == [
+    assert state.materialized_benchmark_task_keys == [
         "task.same|seed_7|runtime.alpha|evaluation.same",
         "task.same|seed_7|runtime.beta|evaluation.same",
     ]
     alpha_view = (
         session_dir
-        / "runtime_tasks"
+        / "benchmark_tasks"
         / "task.same"
         / "seed_7"
-        / "runtimes"
         / "runtime.alpha"
-        / "requests"
         / "evaluation.same"
     )
     beta_view = (
         session_dir
-        / "runtime_tasks"
+        / "benchmark_tasks"
         / "task.same"
         / "seed_7"
-        / "runtimes"
         / "runtime.beta"
-        / "requests"
         / "evaluation.same"
     )
     assert call_ids[0] in (alpha_view / "INDEX.md").read_text(encoding="utf-8")
     assert call_ids[1] in (beta_view / "INDEX.md").read_text(encoding="utf-8")
+
+
+def test_trace_materialization_separates_transfer_episode_steps(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    trace_root = tmp_path / "openai_traces"
+    monkeypatch.setenv("AGINTOR_OPENAI_TRACE_DIR", str(trace_root))
+    call_ids: list[str] = []
+
+    for step_index in (0, 1):
+        trace_context = OpenAITraceContext(
+            session_id="session.transfer-steps",
+            request_id=f"request.step-{step_index}",
+            evaluation_unit_id="evaluation.transfer",
+            request_mode="benchmark",
+            task_id="task.repeated",
+            seed=3,
+            runtime_hash="runtime.same",
+            episode_kind="transfer_episode",
+            episode_step_index=step_index,
+        )
+        call_id = persist_openai_trace(
+            provider="openai",
+            method_name="responses.create",
+            model_class="default",
+            model_name="gpt-test",
+            reasoning_effort=None,
+            instructions=f"solve step {step_index}",
+            input_value=f"hello step {step_index}",
+            request_payload={"model": "gpt-test"},
+            request_metadata={"mode": "benchmark", "trace_context": (trace_context).model_dump()},
+            response_text=f"ok step {step_index}",
+        )
+        assert call_id is not None
+        call_ids.append(call_id)
+
+    session_dir = trace_root / "sessions" / "session.transfer-steps"
+    state = load_materialization_state(session_dir)
+    assert state is not None
+    assert state.materialized_benchmark_task_keys == [
+        "task.repeated|seed_3|episode_transfer_episode|step_0|runtime.same|evaluation.transfer",
+        "task.repeated|seed_3|episode_transfer_episode|step_1|runtime.same|evaluation.transfer",
+    ]
+    runtime_dir = (
+        session_dir
+        / "benchmark_tasks"
+        / "task.repeated"
+        / "seed_3"
+        / "runtime.same"
+    )
+    for step_index, call_id in enumerate(call_ids):
+        step_view = next(runtime_dir.glob(f"*__step_{step_index}"))
+        assert call_id in (step_view / "INDEX.md").read_text(encoding="utf-8")
 
 
 def test_memory_promotion_uses_policy_hook_with_durable_write_scope(tmp_path: Path) -> None:
