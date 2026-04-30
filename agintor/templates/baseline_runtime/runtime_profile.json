@@ -1,0 +1,181 @@
+{
+  "control": {
+    "assign_model_weights": {
+      "cost": 0.2,
+      "dollar": 0.1,
+      "fail": 0.2,
+      "latency": 0.15
+    },
+    "check_voi": {
+      "benchmark_bias": -0.08,
+      "benchmark_positive": 0.65,
+      "local_bias": -0.04,
+      "local_positive": 0.3,
+      "repo_bias": -0.08,
+      "repo_positive": 0.18,
+      "subtree_bias": -0.06,
+      "subtree_positive": 0.22
+    },
+    "model_order": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "model_specs": {
+      "large": {
+        "cost": 0.35,
+        "dollar": 0.32,
+        "fail": 0.04,
+        "latency": 0.25,
+        "solve": 0.85
+      },
+      "medium": {
+        "cost": 0.2,
+        "dollar": 0.18,
+        "fail": 0.08,
+        "latency": 0.16,
+        "solve": 0.74
+      },
+      "small": {
+        "cost": 0.1,
+        "dollar": 0.1,
+        "fail": 0.12,
+        "latency": 0.1,
+        "solve": 0.6
+      }
+    },
+    "negative_steps_before_escalation": 2,
+    "required_solve": {
+      "base": 0.6,
+      "dependency_bonus": 0.05,
+      "generated_bonus": 0.1
+    },
+    "stop_policy": {
+      "require_verified_terminal": true
+    }
+  },
+  "execution": {
+    "checks_max": 16,
+    "context_window_tokens": 768,
+    "cost_max": 100.0,
+    "latency_max": 120.0,
+    "max_steps": 64,
+    "model_calls_max": 64
+  },
+  "memory": {
+    "b_hi": 0.75,
+    "b_lo": 0.55,
+    "compaction_weights": {
+      "event_bonus": 0.1,
+      "info_loss": 0.15,
+      "latency": 0.05,
+      "orphan": 0.2,
+      "retained_utility": 0.55,
+      "token_saving": 0.04,
+      "verifier_bonus": 0.05
+    },
+    "eta_verify": 0.5,
+    "max_summaries_per_pass": 3,
+    "promotion_weights": {
+      "centrality": 0.8,
+      "compositional": 0.6,
+      "contradiction": 0.8,
+      "duplicate": 1.0,
+      "novelty": 1.2,
+      "reuse": 0.9,
+      "task_spread": 0.5,
+      "verifier": 1.0,
+      "write_cost": 0.4
+    },
+    "retrieval_weights": {
+      "cos": 0.3,
+      "exact_path_bonus": 0.25,
+      "exact_task_context_bonus": 0.1,
+      "exact_verify_bonus": 0.2,
+      "lex": 0.2,
+      "path": 0.1,
+      "provenance": 0.05,
+      "recency": 0.1,
+      "staleness": 0.05,
+      "type": 0.15,
+      "verify": 0.1
+    },
+    "theta_e": 0.92,
+    "theta_l": 0.6,
+    "theta_prom": 0.55,
+    "token_window": 512.0
+  },
+  "prompts": {
+    "memory_summary": "memory.span_summarize.v1",
+    "mutation_patch": "evolve.mutator_patch.v1",
+    "tool_spec": "tool.spec_generate.v1"
+  },
+  "runtime_provider": {
+    "api_key_env": "AGINTOR_MAS_MINIMAX_API_KEY",
+    "api_key_file_env": "AGINTOR_MAS_MINIMAX_KEY_FILE",
+    "base_url_env": "AGINTOR_MAS_MINIMAX_BASE_URL",
+    "model_map": {
+      "large": "MiniMax-M2.7-Flash",
+      "medium": "MiniMax-M2.7-Flash",
+      "small": "MiniMax-M2.7-Flash"
+    },
+    "name": "minimax",
+    "pricing_env": "AGINTOR_MAS_MINIMAX_PRICING",
+    "temperature": null
+  },
+  "tooling": {
+    "build_weight": 0.2,
+    "category_ranking_weights": {
+      "cachehit": 0.1,
+      "coldstart": 0.1,
+      "descendants": 0.08,
+      "histpass": 0.1,
+      "iface": 0.2,
+      "permrisk": 0.07,
+      "sim": 0.35
+    },
+    "create_gate": {
+      "build_cost_base": 0.38,
+      "build_cost_per_extra_arg": 0.04,
+      "default_current_gain": 0.2,
+      "default_future_gain": 0.05,
+      "exec_cost": 0.18,
+      "explicit_expression_bonus": 0.1,
+      "generated_current_gain": 0.62,
+      "generated_future_gain": 0.25,
+      "reuse_base": 0.55,
+      "reuse_depth_bonus": 0.08,
+      "safety_cost": 0.06
+    },
+    "dispatch_latency": {
+      "base": 12.0,
+      "per_arg": 6.0
+    },
+    "eta_p": 0.8,
+    "eta_r": 3,
+    "exec_weight": 0.1,
+    "future_weight": 0.1,
+    "k_c": 3,
+    "safety_weight": 0.05,
+    "t_slice": 60.0,
+    "tool_ranking_weights": {
+      "cachehit": 0.1,
+      "coldstart": 0.1,
+      "depdepth": 0.08,
+      "pass_rate": 0.15,
+      "permrisk": 0.07,
+      "sigmatch": 0.2,
+      "sim": 0.3
+    }
+  },
+  "topology": {
+    "coldstart_penalty": 0.02,
+    "conflict_penalty": 0.03,
+    "coord_penalty": 0.05,
+    "dep_penalty": 0.04,
+    "k_max": 3,
+    "size_penalty": 0.03,
+    "spawn_penalty": 0.06,
+    "theta_create": 0.58
+  }
+}
