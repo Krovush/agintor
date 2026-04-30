@@ -178,6 +178,14 @@ def test_legacy_minimax_profile_allows_base_url_env_override(tmp_path: Path, mon
     assert provider.base_url == "https://minimax.example.test/anthropic"
 
 
+def test_baseline_runtime_templates_ship_with_package() -> None:
+    """Regression: package-data templates must exist for init_runtime and wheel installs."""
+    root = importlib.resources.files("agintor").joinpath("templates", "baseline_runtime")
+    assert root.is_dir()
+    assert (root / RUNTIME_PROFILE_FILE).is_file()
+    assert (root / "deployment_contract.json").is_file()
+
+
 def test_init_runtime_refreshes_runtime_manifest_contract_version(monkeypatch, tmp_path: Path):
     current_contract_version = f"{RUNTIME_CONTRACT_VERSION}.test"
     monkeypatch.setattr(project, "RUNTIME_CONTRACT_VERSION", current_contract_version)
