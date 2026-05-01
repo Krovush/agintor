@@ -7,25 +7,25 @@ from typing import Any, Optional
 
 import typer
 
-from .artifacts import ArtifactAllocator, ArtifactMode, WorkspaceLease
-from .benchmarks import load_suite
-from .exceptions import AgintorError
-from .evaluator import RuntimeEvaluator
-from .evolution import EvolutionEngine
-from .factory_chat_store import FactoryChatStore
-from .project import init_runtime as init_runtime_dir, write_demo_suite
+from .storage.artifacts import ArtifactAllocator, ArtifactMode, WorkspaceLease
+from .evaluation.benchmarks import load_suite
+from .core.exceptions import AgintorError
+from .evaluation.evaluator import RuntimeEvaluator
+from .search.engine import EvolutionEngine
+from .storage.factory_chat_store import FactoryChatStore
+from .runtime.project import init_runtime as init_runtime_dir, write_demo_suite
 from .providers import build_provider
-from .runtime_api import (
+from .runtime.api import (
     load_solve_request,
     runtime_solve_request_for_task,
     runtime_solve_request_for_user_request,
 )
-from .runtime_builder import apply_factory_message
-from .runtime_host import RuntimeHost
-from .runtime_loader import load_runtime
-from .runtime_profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile
-from .runtime_session_store import RuntimeSessionStore
-from .schemas import RuntimeSessionMessage
+from .factory.service import apply_factory_message
+from .runtime.host import RuntimeHost
+from .runtime.loader import load_runtime
+from .runtime.profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile
+from .storage.runtime_session_store import RuntimeSessionStore
+from .contracts import RuntimeSessionMessage
 from .utils import now_ts
 
 

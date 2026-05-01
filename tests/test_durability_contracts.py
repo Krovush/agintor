@@ -10,10 +10,11 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from agintor import openai_trace, state_store
-from agintor.openai_trace import load_materialization_state, persist_openai_trace
-from agintor.run_store import RunStore
-from agintor.schemas import (
+import agintor.tracing.persistence as openai_trace
+from agintor.storage import state_store
+from agintor.tracing import load_materialization_state, persist_openai_trace
+from agintor.storage.run_store import RunStore
+from agintor.contracts import (
     CHECKPOINT_ENVELOPE_SCHEMA_VERSION,
     CheckpointEnvelope,
     MemoryNode,
@@ -24,9 +25,9 @@ from agintor.schemas import (
     TraceCursorSnapshot,
     WorkingMemorySnapshot,
 )
-from agintor.shell import FixedShell
-from agintor.task_runtime.memory import MemoryMixin
-from agintor.versioning import RUNTIME_CONTRACT_VERSION
+from agintor.runtime.kernel.shell import FixedShell
+from agintor.runtime.kernel.memory import MemoryMixin
+from agintor.core.versioning import RUNTIME_CONTRACT_VERSION
 
 
 def _memory_node(node_id: str, content: str, *, source_task_id: str = "task.1") -> MemoryNode:
@@ -319,7 +320,7 @@ def test_trace_materialization_skips_records_without_runtime_identity(tmp_path: 
     assert (benchmark_view / "TRANSCRIPT.md").exists()
     assert "benchmark hello" in (benchmark_view / "TRANSCRIPT.md").read_text(encoding="utf-8")
 
-    from agintor.openai_trace import rebuild_trace_materialization
+    from agintor.tracing import rebuild_trace_materialization
 
     rebuilt_state = rebuild_trace_materialization(session_dir)
     assert rebuilt_state.known_call_ids == state.known_call_ids

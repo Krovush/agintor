@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from agintor.goal_rubric import build_goal_spec
-from agintor.runtime_builder import (
+from agintor.factory.goals import build_goal_spec
+from agintor.factory.service import (
     _build_benchmark_plan,
     _build_verifier_bundle,
     _normalize_benchmark_plan_against_suite,
     build_goal_conditioned_suite,
 )
-from agintor.runtime_profile import load_runtime_profile
-from agintor.schemas import BenchmarkPlan
+from agintor.runtime.profile import load_runtime_profile
+from agintor.contracts import BenchmarkPlan
 
 
 def _profile():

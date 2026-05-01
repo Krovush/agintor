@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from agintor import openai_trace
-from agintor.openai_trace import (
+import agintor.tracing.persistence as openai_trace
+from agintor.tracing import (
     TRACE_GROUP_BENCHMARK_TASK,
     TRACE_GROUP_FACTORY_MESSAGE,
     TRACE_GROUP_RUNTIME_SESSION_MESSAGE,
@@ -17,13 +17,13 @@ from agintor.openai_trace import (
     runtime_message_trace_key,
     trace_grouping_key,
 )
-from agintor.runtime_api import (
+from agintor.runtime.api import (
     compile_execution_plan_from_solve_request,
     load_solve_request,
     runtime_batch_request_for_tasks,
     runtime_solve_request_for_user_request,
 )
-from agintor.schemas import BenchmarkTask, OpenAITraceContext
+from agintor.contracts import BenchmarkTask, OpenAITraceContext
 
 
 def _persist(
