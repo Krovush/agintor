@@ -1,70 +1,34 @@
 from __future__ import annotations
 
-import contextlib
 import json
-import secrets
 import shutil
-import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable
 
 from ..storage.artifacts import ArtifactMode
-from ..evaluation.benchmarks import BenchmarkSuite, build_demo_suite
-from ..search.engine import EvolutionEngine
 from ..storage.factory_chat_store import CHAT_DIR_NAME, FactoryChatError, FactoryChatStore
 from ..factory.goals import (
-    amend_goal_spec,
     build_goal_spec,
-    build_success_criteria_bundle,
     canonical_goal_prompt,
 )
-from ..runtime.project import baseline_template_dir, init_runtime
-from ..providers import LocalDeterministicProvider, ModelProvider
-from ..runtime.api import build_trace_context, load_solve_request, runtime_solve_request_for_user_request
-from ..runtime.host import RuntimeHost
+from ..providers import ModelProvider
 from ..runtime.loader import (
     DEPLOYMENT_CONTRACT_FILE,
-    RUNTIME_EXPORT_BUNDLE_FILE,
     load_runtime,
 )
 from ..runtime.profile import (
     RUNTIME_PROFILE_FILE,
-    HostedProviderProfile,
     RuntimeProfile,
     load_runtime_profile,
     runtime_profile_payload,
 )
-from ..runtime.sdk import (
-    KERNEL_BUNDLE_DIR,
-    KERNEL_CAPABILITY_FLAGS,
-    KERNEL_MANIFEST_FILE,
-    bundle_runtime_kernel,
-    preview_kernel_manifest,
-)
 from ..contracts import (
-    ArchiveEntry,
-    ArchiveRecord,
-    BenchmarkPlan,
-    BuildSummary,
-    DeploymentContract,
-    ExportSummary,
     FactoryChatIdentity,
     FactoryMessage,
     GoalSpec,
-    ProviderPlan,
-    ProviderRole,
-    RuntimeIsolationPolicy,
-    RuntimeManifest,
-    RuntimePlan,
-    ModelRequest,
     OpenAITraceContext,
-    SuccessCriteriaBundle,
-    VerifierBundle,
-    VerifierSpec,
 )
 from ..utils import ensure_directory, now_ts, stable_hash
-from ..core.versioning import RUNTIME_CONTRACT_VERSION
 
 
 from .export import _replace_runtime_destination
@@ -422,14 +386,3 @@ def apply_factory_message(
     )
     refreshed_chat = chat_store.load_chat()
     return FactoryMessageOutcome(chat=refreshed_chat, message=recorded, result=result)
-
-
-def _load_runtime_hash(runtime_dir: Path) -> str:
-    bundle_path = runtime_dir / RUNTIME_EXPORT_BUNDLE_FILE
-    if not bundle_path.exists():
-        return ""
-    try:
-        payload = json.loads(bundle_path.read_text(encoding="utf-8"))
-    except Exception:
-        return ""
-    return str(payload.get("runtime_hash") or "")

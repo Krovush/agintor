@@ -4,11 +4,11 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Iterable, Mapping
 
 from ...storage.artifacts import ArtifactMode, ArtifactPolicy
 from ...core.exceptions import HardInvalidation
-from .memory_graph import GraphEdge, LongTermGraph, ShortTermGraph
+from .memory_graph import LongTermGraph, ShortTermGraph
 from ...storage.run_store import RunStore, _write_json_atomic
 from ...contracts import (
     AgentTemplate,
@@ -24,7 +24,7 @@ from ...contracts import (
     SideEffectReceipt,
 )
 from ..tools import SafetyGuard, SandboxManager, ToolExecutor, ToolRegistry
-from ...utils import ensure_directory, now_ts, stable_hash
+from ...utils import ensure_directory, stable_hash
 from .predictors import RuntimePredictorState
 
 

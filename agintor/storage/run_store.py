@@ -4,9 +4,10 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Any, Mapping
+from typing import Any
 
 from . import state_store
 from ..contracts import (
@@ -45,6 +46,44 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
         temp_path = Path(handle.name)
     temp_path.replace(path)
     _fsync_directory(path.parent)
+
+
+def _checkpoint_index_sort_key(row: Mapping[str, Any]) -> tuple[int, float, str]:
+    return (
+        int(row.get("sequence_no", 0) or 0),
+        float(row.get("created_at", 0.0) or 0.0),
+        str(row.get("checkpoint_id", "")),
+    )
+
+
+def _read_checkpoint_index_rows(index_path: Path) -> list[dict[str, Any]]:
+    if not index_path.exists():
+        return []
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeError(f"failed to read checkpoint index {index_path}") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"malformed checkpoint index {index_path}") from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"checkpoint index {index_path} must contain a list")
+    rows: list[dict[str, Any]] = []
+    for position, row in enumerate(payload):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"checkpoint index {index_path} row {position} must be an object")
+        rows.append(dict(row))
+    return rows
+
+
+def _checkpoint_index_row_ref(row: Mapping[str, Any]) -> str:
+    return str(row.get("ref") or "").strip()
+
+
+def _latest_resume_eligible_checkpoint_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for row in reversed(sorted(rows, key=_checkpoint_index_sort_key)):
+        if bool(row.get("resume_eligible", True)) and _checkpoint_index_row_ref(row):
+            return row
+    return None
 
 
 @dataclass(frozen=True)
@@ -207,12 +246,13 @@ class RunStore:
                 "finished_at": timestamp,
             }
         )
+        run_root = self.resolve_run_root(updated.run_root)
         _write_json_atomic(
-            self.resolve_run_root(updated.run_root) / "attempts" / updated.attempt_id / "attempt_manifest.json",
+            run_root / "attempts" / updated.attempt_id / "attempt_manifest.json",
             (updated).model_dump(),
         )
         self._index_state_after_canonical(
-            self.resolve_run_root(updated.run_root),
+            run_root,
             "index_attempt_manifest_failed",
             lambda: state_store.index_attempt_manifest(updated),
         )
@@ -227,7 +267,8 @@ class RunStore:
         task_payload: Mapping[str, Any] | None = None,
         runtime_identity: Mapping[str, Any] | None = None,
     ) -> None:
-        request_dir = ensure_directory(self.resolve_run_root(manifest.run_root) / "request")
+        run_root = self.resolve_run_root(manifest.run_root)
+        request_dir = ensure_directory(run_root / "request")
         envelope = dict(request_envelope)
         envelope.setdefault("request_id", manifest.request_id)
         envelope.setdefault("evaluation_unit_id", manifest.evaluation_unit_id or manifest.request_id)
@@ -240,7 +281,7 @@ class RunStore:
         if runtime_identity is not None:
             _write_json_atomic(request_dir / "runtime_identity.json", dict(runtime_identity))
         self._index_state_after_canonical(
-            self.resolve_run_root(manifest.run_root),
+            run_root,
             "index_request_bundle_failed",
             lambda: state_store.index_request_bundle(
                 manifest,
@@ -274,6 +315,8 @@ class RunStore:
     def write_checkpoint(self, envelope: CheckpointEnvelope) -> CheckpointReference:
         run_root = self.resolve_run_root(envelope.run_root)
         checkpoints_dir = ensure_directory(run_root / "checkpoints")
+        index_path = checkpoints_dir / "index.json"
+        rows = _read_checkpoint_index_rows(index_path)
         checkpoint_path = checkpoints_dir / f"{envelope.checkpoint_id}.json"
         _write_json_atomic(checkpoint_path, (envelope).model_dump())
         self._index_state_after_canonical(
@@ -281,12 +324,6 @@ class RunStore:
             "write_memory_checkpoint_shards_failed",
             lambda: state_store.write_memory_checkpoint_shards(run_root, envelope),
         )
-        index_path = checkpoints_dir / "index.json"
-        rows = []
-        if index_path.exists():
-            payload = json.loads(index_path.read_text(encoding="utf-8"))
-            if isinstance(payload, list):
-                rows = [dict(row) for row in payload if isinstance(row, dict)]
         ref = CheckpointReference(
             ref=str(checkpoint_path.resolve()),
             run_id=envelope.run_id,
@@ -307,24 +344,15 @@ class RunStore:
         )
         rows = [row for row in rows if row.get("checkpoint_id") != envelope.checkpoint_id]
         rows.append((ref).model_dump())
-        rows.sort(key=lambda row: (int(row.get("sequence_no", 0) or 0), float(row.get("created_at", 0.0) or 0.0)))
-        latest_eligible_ref: str | None = None
-        latest_eligible_id: str | None = None
-        for row in reversed(rows):
-            if not bool(row.get("resume_eligible", True)):
-                continue
-            latest_eligible_ref = str(row.get("ref") or "").strip() or None
-            latest_eligible_id = str(row.get("checkpoint_id") or "").strip() or None
-            if latest_eligible_ref:
-                break
+        rows.sort(key=_checkpoint_index_sort_key)
+        latest_row = _latest_resume_eligible_checkpoint_row(rows)
+        latest_eligible_ref = _checkpoint_index_row_ref(latest_row or {}) or None
+        latest_eligible_id = str((latest_row or {}).get("checkpoint_id") or "").strip() or None
         for row in rows:
             row["latest"] = bool(latest_eligible_id) and str(row.get("checkpoint_id") or "").strip() == latest_eligible_id
         _write_json_atomic(index_path, rows)
         latest_path = checkpoints_dir / "LATEST.json"
-        if latest_eligible_ref:
-            latest_row = next(
-                row for row in rows if str(row.get("checkpoint_id") or "").strip() == latest_eligible_id
-            )
+        if latest_row is not None and latest_eligible_ref:
             _write_json_atomic(latest_path, latest_row)
         elif latest_path.exists():
             latest_path.unlink()
@@ -492,18 +520,11 @@ class RunStore:
                     add_candidate(attempt.latest_checkpoint_ref)
         add_candidate(self.latest_checkpoint_ref(run_root))
         index_path = run_root / "checkpoints" / "index.json"
-        if index_path.exists():
-            payload = json.loads(index_path.read_text(encoding="utf-8"))
-            if isinstance(payload, list):
-                rows = sorted(
-                    (dict(row) for row in payload if isinstance(row, dict)),
-                    key=lambda row: (int(row.get("sequence_no", 0) or 0), float(row.get("created_at", 0.0) or 0.0)),
-                    reverse=True,
-                )
-                for row in rows:
-                    if "resume_eligible" in row and not bool(row.get("resume_eligible")):
-                        continue
-                    add_candidate(str(row.get("ref") or row.get("checkpoint_ref") or "").strip())
+        rows = sorted(_read_checkpoint_index_rows(index_path), key=_checkpoint_index_sort_key, reverse=True)
+        for row in rows:
+            if "resume_eligible" in row and not bool(row.get("resume_eligible")):
+                continue
+            add_candidate(str(row.get("ref") or row.get("checkpoint_ref") or "").strip())
         manifest_latest_ref = str(getattr(manifest, "latest_checkpoint_ref", "") or "").strip() if manifest is not None else ""
         for candidate in candidates:
             try:

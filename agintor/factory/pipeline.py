@@ -192,7 +192,6 @@ def _run_factory_pipeline(
             goal_spec,
             goal_suite,
             benchmark_plan,
-            verifier_bundle,
             merged_profile,
             agintor_provider=agintor_provider,
             runtime_backend=effective_runtime_backend,

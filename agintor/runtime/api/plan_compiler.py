@@ -1,60 +1,21 @@
 from __future__ import annotations
 
-import json
-import re
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Mapping
 
-from ...core.exceptions import BranchCancelled, HardInvalidation, PromptAdaptationError
-from ...tracing import resolve_trace_session_id
-from ...providers import ModelProvider
-from ..profile import RuntimeProfile, default_runtime_profile
 from ...contracts import (
-    AgentTemplate,
     BenchmarkTask,
-    BranchResumeSnapshot,
-    CapabilityExchange,
-    CheckpointEnvelope,
     ExecutionFlags,
     ExecutionPlan,
-    ExecutionPlanRequirements,
-    InputBinding,
-    Checkpoint,
     OpenAITraceContext,
-    PlanNode,
     PlanOrigin,
-    InspectRequest,
-    ModelRequest,
-    ModelResponse,
     OperationSpec,
     RequestFileRef,
-    RunResult,
-    RuntimeBatchRequest,
-    RuntimeEvent,
-    RuntimeSessionSeed,
-    RuntimeSolveResponse,
     RuntimeSolveRequest,
-    RuntimeTaskInvocation,
-    SideEffectReceipt,
     SolveRequest,
-    SolveResult,
     VerificationPlan,
-    capability_scope_allows,
-    capability_scope_requires_filesystem_write,
-    capability_scope_requires_network_access,
-    capability_scope_service_categories,
-    capability_scope_service_transports,
-    expand_capability_scopes,
-    get_plan_node_descriptor,
-    is_terminal_receipt,
-    normalize_capability_scopes,
-    normalize_service_transports,
-    plan_node_allowed_in_prompt_mode_local_only,
-    plan_node_requires_default_provider,
-    service_action_transport_compatibility,
 )
-from ...utils import now_ts, stable_hash
+from ...utils import stable_hash
 
 from .capabilities import (
     _category_allowed,
@@ -92,6 +53,7 @@ from .tracing import (
     runtime_trace_context,
     trace_context_field,
 )
+
 
 def solve_request_to_task(request: SolveRequest) -> BenchmarkTask:
     prompt = request.prompt

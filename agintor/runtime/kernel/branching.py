@@ -1,48 +1,22 @@
 from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
-from ...core.exceptions import BranchCancelled, HardInvalidation, ProviderExhaustedError, ResumeRecoveryError
+from ...core.exceptions import HardInvalidation, ResumeRecoveryError
 from ..api import (
     AgentFrame,
     PolicyContext,
-    RuntimeBudget,
-    RuntimeState,
-    compile_execution_plan_from_task,
-    get_plan_node_descriptor,
-    normalize_benchmark_request_id,
 )
 from ...contracts import (
-    AgentTemplate,
-    AsyncHandle,
     BenchmarkTask,
-    BranchBudget,
     BranchPlan,
     BranchPublication,
     BranchResumeSnapshot,
     BranchResult,
     BranchState,
-    CancellationRecord,
-    Checkpoint,
-    CheckpointEnvelope,
-    ChildSpec,
     ExecutionPlan,
-    MemoryNode,
-    OpenAITraceContext,
-    PlanNode,
-    QueuedAgentSnapshot,
-    QueuedFrameSnapshot,
-    RecoveryFailureKind,
-    ReceiptReconciliationRecord,
-    ReplayAllocation,
-    RunResult,
     SideEffectReceipt,
-    capability_scope_allows,
-    plan_node_requires_default_provider,
-    service_action_transport_compatibility,
-    is_terminal_receipt,
-    terminalize_receipt,
 )
-from ...utils import count_tokens_rough, ensure_directory, merge_provider_usage, now_ts, stable_hash
+from ...utils import stable_hash
 
 
 class BranchingMixin:
@@ -98,6 +72,26 @@ class BranchingMixin:
             return None
         return max(candidates, key=lambda publication: (publication.sequence_no, publication.publication_id))
 
+    @staticmethod
+    def _worker_output_payload(
+        *,
+        branch_id: str,
+        merge_priority: int,
+        predicted_solve: float,
+        artifact: Any,
+        verifier_support: float,
+        unresolved_critical: int,
+    ) -> dict[str, Any]:
+        return {
+            "worker_id": branch_id,
+            "branch_id": branch_id,
+            "merge_priority": merge_priority,
+            "artifact": artifact,
+            "verifier_support": verifier_support,
+            "predicted_solve": predicted_solve,
+            "unresolved_critical": unresolved_critical,
+        }
+
     def _restored_branch_frontier(
         self,
         context: PolicyContext,
@@ -133,15 +127,14 @@ class BranchingMixin:
             if publication is None:
                 continue
             worker_outputs.append(
-                {
-                    "worker_id": branch_state.branch_id,
-                    "branch_id": branch_state.branch_id,
-                    "merge_priority": branch_state.merge_priority,
-                    "artifact": publication.payload.get("artifact"),
-                    "verifier_support": publication.verifier_support,
-                    "predicted_solve": branch_state.predicted_solve,
-                    "unresolved_critical": publication.unresolved_critical,
-                }
+                self._worker_output_payload(
+                    branch_id=branch_state.branch_id,
+                    merge_priority=branch_state.merge_priority,
+                    predicted_solve=branch_state.predicted_solve,
+                    artifact=publication.payload.get("artifact"),
+                    verifier_support=publication.verifier_support,
+                    unresolved_critical=publication.unresolved_critical,
+                )
             )
         return worker_outputs or None
 
@@ -305,11 +298,11 @@ class BranchingMixin:
         branch_plan: BranchPlan,
         artifacts: Mapping[str, Any],
     ) -> Any:
-        output_keys = [
-            self._plan_node_by_id(plan, node_id).output_key
-            for node_id in branch_plan.assigned_node_ids
-            if self._plan_node_by_id(plan, node_id).output_key in artifacts
-        ]
+        output_keys: list[str] = []
+        for node_id in branch_plan.assigned_node_ids:
+            output_key = self._plan_node_by_id(plan, node_id).output_key
+            if output_key in artifacts:
+                output_keys.append(output_key)
         if not output_keys:
             return None
         if len(output_keys) == 1:
@@ -497,15 +490,14 @@ class BranchingMixin:
             if branch_result.branch_state.status != "completed":
                 continue
             worker_outputs.append(
-                {
-                    "worker_id": branch_result.branch_plan.branch_id,
-                    "branch_id": branch_result.branch_plan.branch_id,
-                    "merge_priority": branch_result.branch_state.merge_priority,
-                    "artifact": branch_result.artifact,
-                    "verifier_support": branch_result.branch_state.verifier_support,
-                    "predicted_solve": branch_result.branch_state.predicted_solve,
-                    "unresolved_critical": branch_result.branch_state.unresolved_critical,
-                }
+                self._worker_output_payload(
+                    branch_id=branch_result.branch_plan.branch_id,
+                    merge_priority=branch_result.branch_state.merge_priority,
+                    predicted_solve=branch_result.branch_state.predicted_solve,
+                    artifact=branch_result.artifact,
+                    verifier_support=branch_result.branch_state.verifier_support,
+                    unresolved_critical=branch_result.branch_state.unresolved_critical,
+                )
             )
         context.budget.latency += max_branch_latency
         self._accept_branch_publications(context, branch_results)

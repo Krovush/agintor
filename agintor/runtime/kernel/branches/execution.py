@@ -2,57 +2,26 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from threading import Event, Lock
-from typing import Any, Mapping, Sequence
-from ....core.exceptions import BranchCancelled, HardInvalidation, ProviderExhaustedError, ResumeRecoveryError
-from ....providers import (
-    ModelProvider,
-    ReplayProvider,
-    clone_provider,
-    known_provider_environment_names,
-    provider_environment_names,
-    provider_environment_names_for_instance,
-)
+from typing import Any, Sequence
+from ....core.exceptions import BranchCancelled, ResumeRecoveryError
 from ...api import (
     AgentFrame,
     PolicyContext,
     RuntimeBudget,
     RuntimeState,
-    compile_execution_plan_from_task,
-    get_plan_node_descriptor,
-    normalize_benchmark_request_id,
 )
 from ....contracts import (
-    AgentTemplate,
-    AsyncHandle,
     BenchmarkTask,
-    BranchBudget,
     BranchPlan,
-    BranchPublication,
     BranchResumeSnapshot,
     BranchResult,
     BranchState,
-    CancellationRecord,
-    Checkpoint,
-    CheckpointEnvelope,
-    ChildSpec,
     ExecutionPlan,
-    MemoryNode,
-    OpenAITraceContext,
-    PlanNode,
-    QueuedAgentSnapshot,
-    QueuedFrameSnapshot,
     RecoveryFailureKind,
-    ReceiptReconciliationRecord,
-    ReplayAllocation,
-    RunResult,
     SideEffectReceipt,
-    capability_scope_allows,
-    plan_node_requires_default_provider,
-    service_action_transport_compatibility,
-    is_terminal_receipt,
-    terminalize_receipt,
 )
-from ....utils import count_tokens_rough, ensure_directory, merge_provider_usage, now_ts, stable_hash
+from ....utils import stable_hash
+from .providers import _clone_provider
 
 class BranchRunMixin:
     def _execute_horizontal_branches(
@@ -98,11 +67,19 @@ class BranchRunMixin:
         executor = ThreadPoolExecutor(max_workers=len(prepared_branches), thread_name_prefix=f"branch-{plan.plan_id[:8]}")
         try:
             provider_overrides = self._branch_provider_overrides()
-            future_map = {
-                provider_overrides.__setitem__(prepared_branch_plan.branch_id, branch_provider) or
-                executor.submit(self._run_branch_plan, context, task, plan, prepared_branch_plan, cancellation_event, persist_lock): prepared_branch_plan
-                for prepared_branch_plan, branch_provider in prepared_branches
-            }
+            future_map = {}
+            for prepared_branch_plan, branch_provider in prepared_branches:
+                provider_overrides[prepared_branch_plan.branch_id] = branch_provider
+                future = executor.submit(
+                    self._run_branch_plan,
+                    context,
+                    task,
+                    plan,
+                    prepared_branch_plan,
+                    cancellation_event,
+                    persist_lock,
+                )
+                future_map[future] = prepared_branch_plan
             pending = set(future_map)
             sibling_cancellation_reason: str | None = None
             sibling_cancellation_details: dict[str, Any] = {}
@@ -191,6 +168,36 @@ class BranchRunMixin:
             branch_results,
             provider_usage_ledger,
             propagated_resume_error=propagated_resume_error,
+        )
+
+    def _completed_branch_result(
+        self,
+        branch_plan: BranchPlan,
+        branch_context: PolicyContext,
+        *,
+        artifact: Any,
+        verifier_support: float,
+        unresolved_critical: int,
+    ) -> BranchResult:
+        return BranchResult(
+            branch_plan=branch_plan,
+            branch_state=BranchState(
+                branch_id=branch_plan.branch_id,
+                status="completed",
+                parent_frame_id=branch_plan.parent_frame_id,
+                assigned_node_ids=list(branch_plan.assigned_node_ids),
+                merge_priority=branch_plan.merge_priority,
+                predicted_solve=branch_plan.predicted_solve,
+                reserved_budget=branch_plan.reserved_budget,
+                publications=self._branch_publications_snapshot(branch_context),
+                budget_consumed=self._branch_budget_consumed(branch_context),
+                verifier_support=verifier_support,
+                unresolved_critical=unresolved_critical,
+            ),
+            artifact=artifact,
+            verifier_support=verifier_support,
+            unresolved_critical=unresolved_critical,
+            side_effect_receipts=self._branch_receipts_snapshot(branch_context),
         )
 
     def _run_branch_plan(
@@ -393,25 +400,12 @@ class BranchRunMixin:
                     assigned_node_ids=list(branch_plan.assigned_node_ids),
                 )
                 return finalize_branch_result(
-                    BranchResult(
-                        branch_plan=branch_plan,
-                        branch_state=BranchState(
-                            branch_id=branch_plan.branch_id,
-                            status="completed",
-                            parent_frame_id=branch_plan.parent_frame_id,
-                            assigned_node_ids=list(branch_plan.assigned_node_ids),
-                            merge_priority=branch_plan.merge_priority,
-                            predicted_solve=branch_plan.predicted_solve,
-                            reserved_budget=branch_plan.reserved_budget,
-                            publications=self._branch_publications_snapshot(branch_context),
-                            budget_consumed=self._branch_budget_consumed(branch_context),
-                            verifier_support=verifier_support,
-                            unresolved_critical=unresolved_critical,
-                        ),
+                    self._completed_branch_result(
+                        branch_plan,
+                        branch_context,
                         artifact=output,
                         verifier_support=verifier_support,
                         unresolved_critical=unresolved_critical,
-                        side_effect_receipts=self._branch_receipts_snapshot(branch_context),
                     ),
                     boundary="after_branch_completion",
                 )
@@ -513,25 +507,12 @@ class BranchRunMixin:
             assigned_node_ids=list(branch_plan.assigned_node_ids),
         )
         return finalize_branch_result(
-            BranchResult(
-                branch_plan=branch_plan,
-                branch_state=BranchState(
-                    branch_id=branch_plan.branch_id,
-                    status="completed",
-                    parent_frame_id=branch_plan.parent_frame_id,
-                    assigned_node_ids=list(branch_plan.assigned_node_ids),
-                    merge_priority=branch_plan.merge_priority,
-                    predicted_solve=branch_plan.predicted_solve,
-                    reserved_budget=branch_plan.reserved_budget,
-                    publications=self._branch_publications_snapshot(branch_context),
-                    budget_consumed=self._branch_budget_consumed(branch_context),
-                    verifier_support=verifier_support,
-                    unresolved_critical=unresolved_critical,
-                ),
+            self._completed_branch_result(
+                branch_plan,
+                branch_context,
                 artifact=output,
                 verifier_support=verifier_support,
                 unresolved_critical=unresolved_critical,
-                side_effect_receipts=self._branch_receipts_snapshot(branch_context),
             ),
             boundary="after_branch_completion",
         )

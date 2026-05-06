@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 import ast
-import json
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 import inspect
 
 from ..storage.artifacts import ArtifactMode, ArtifactPolicy
-from ..search.archive import objective_specs_from_suite
 from ..evaluation.benchmarks import BenchmarkSuite
 from ..core.exceptions import PatchApplyError
-from ..search.mutators import MutationCandidate
 from ..core.patches import parse_patch
 from ..learning.predictors import DecisionFamilyModelBank
 from ..factory.prompt_builder import METHOD_CONTRACTS
@@ -21,7 +18,7 @@ from ..runtime.loader import load_runtime
 from ..runtime.host import RuntimeHost
 from ..runtime.profile import RuntimeProfile, resolve_runtime_profile
 from ..evaluation.scoring import ScoreCalculator, estimate_reference_scales, mean_improvement
-from ..contracts import EvaluationStageResult, ObjectiveKind, ObjectiveSpec, OpenAITraceContext, SuiteEvaluation
+from ..contracts import EvaluationStageResult, MutationCandidate, ObjectiveKind, ObjectiveSpec, OpenAITraceContext, SuiteEvaluation
 from ..utils import ensure_directory, stable_hash
 
 
@@ -76,7 +73,6 @@ class RuntimeEvaluator:
         self.cache: dict[tuple[str, str, tuple[int, ...], tuple[str, ...]], SuiteEvaluation] = {}
         self.reference_scales = ({}, {})
         self.last_provider_usage: dict[str, Any] = {}
- 
 
     def prepare_reference_scales(self, force: bool = False) -> None:
         if self._baseline_runtime_dir is None:
@@ -285,8 +281,6 @@ class RuntimeEvaluator:
             )
             self.last_provider_usage = dict(batch_response.provider_usage)
             run_results.extend(batch_response.run_results)
-        except Exception:
-            raise
         finally:
             self.predictors.unfreeze()
         task_family_map = {task.task_id: task.family for task in tasks}
@@ -310,11 +304,7 @@ class RuntimeEvaluator:
             for scope in candidate.touched_scope
             if scope in runtime.manifest.policy_modules
         }
-        allowed_methods_by_file = {
-            runtime.manifest.policy_modules[scope].split(":", 1)[0]: set(METHOD_CONTRACTS.get(scope, []))
-            for scope in candidate.touched_scope
-            if scope in runtime.manifest.policy_modules
-        }
+        allowed_methods_by_file = self._allowed_methods_by_file(runtime, candidate.touched_scope)
         blocks = parse_patch(candidate.patch_text)
         touched_files: set[str] = set()
         for block in blocks:

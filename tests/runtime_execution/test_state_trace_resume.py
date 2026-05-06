@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from .helpers import (
     json,
     Path,
@@ -44,9 +46,12 @@ def test_runtime_bundle_includes_run_store_module(tmp_path):
 
     bundled_run_store = runtime_dir / "runtime_sdk" / "agintor_runtime" / "storage" / "run_store.py"
     bundled_state_store = runtime_dir / "runtime_sdk" / "agintor_runtime" / "storage" / "state_store" / "store.py"
+    loaded_runtime = load_runtime(runtime_dir, runtime_backend="local")
 
     assert bundled_run_store.exists()
     assert bundled_state_store.exists()
+    assert loaded_runtime.runtime_hash
+    assert loaded_runtime.capability_exchange.runtime_asset_capabilities["runtime_sdk"] is True
 
 def test_run_store_canonicalizes_relative_workspace_run_roots_and_checkpoint_refs(tmp_path, monkeypatch):
     workdir = tmp_path / "cwd"
@@ -85,6 +90,177 @@ def test_run_store_canonicalizes_relative_workspace_run_roots_and_checkpoint_ref
     )
     assert indexed_latest is not None
     assert indexed_latest["checkpoint_id"] == envelope.checkpoint_id
+
+def _run_store_checkpoint_envelope(
+    manifest,
+    checkpoint_id: str,
+    *,
+    sequence_no: int,
+    resume_eligible: bool = True,
+) -> CheckpointEnvelope:
+    return CheckpointEnvelope(
+        checkpoint_id=checkpoint_id,
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
+        runtime_hash="runtime-hash",
+        run_id=manifest.run_id,
+        run_root=manifest.run_root,
+        attempt_id="attempt_0001",
+        request_id=manifest.request_id,
+        plan_id=f"plan.{checkpoint_id}",
+        task_id=f"task.{checkpoint_id}",
+        seed=0,
+        sequence_no=sequence_no,
+        boundary="after_provider_completion",
+        created_at=float(sequence_no),
+        resume_eligible=resume_eligible,
+        resume_ineligibility_reason=None if resume_eligible else "not resumable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("index_payload", "expected_message"),
+    [
+        ("{not-json", "malformed checkpoint index"),
+        (json.dumps({"not": "a-list"}), "must contain a list"),
+    ],
+)
+def test_run_store_write_checkpoint_rejects_corrupt_checkpoint_index(
+    tmp_path,
+    index_payload,
+    expected_message,
+):
+    store = RunStore(tmp_path / "store")
+    manifest = store.create_run(
+        request_id="runstore.corrupt-index",
+        evaluation_unit_id="runstore.corrupt-index",
+        request_mode="user_request",
+        runtime_backend="local",
+    )
+    first = _run_store_checkpoint_envelope(
+        manifest,
+        "checkpoint.runstore.corrupt-index.0001",
+        sequence_no=1,
+    )
+    first_ref = store.write_checkpoint(first)
+    index_path = Path(manifest.run_root) / "checkpoints" / "index.json"
+    index_path.write_text(index_payload, encoding="utf-8")
+    second = _run_store_checkpoint_envelope(
+        manifest,
+        "checkpoint.runstore.corrupt-index.0002",
+        sequence_no=2,
+    )
+
+    with pytest.raises(ValueError, match=expected_message):
+        store.write_checkpoint(second)
+
+    assert index_path.read_text(encoding="utf-8") == index_payload
+    assert not (Path(manifest.run_root) / "checkpoints" / f"{second.checkpoint_id}.json").exists()
+    assert store.load_run_manifest(manifest.run_id).latest_checkpoint_ref == first_ref.ref
+
+
+def test_run_store_latest_usable_checkpoint_ref_rejects_corrupt_checkpoint_index(tmp_path):
+    store = RunStore(tmp_path / "store")
+    manifest = store.create_run(
+        request_id="runstore.discovery-corrupt-index",
+        evaluation_unit_id="runstore.discovery-corrupt-index",
+        request_mode="user_request",
+        runtime_backend="local",
+    )
+    first = _run_store_checkpoint_envelope(
+        manifest,
+        "checkpoint.runstore.discovery-corrupt-index.0001",
+        sequence_no=1,
+    )
+    store.write_checkpoint(first)
+    index_path = Path(manifest.run_root) / "checkpoints" / "index.json"
+    index_path.write_text("[", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="malformed checkpoint index"):
+        store.latest_usable_checkpoint_ref(manifest.run_id)
+
+
+def test_run_store_latest_checkpoint_selection_skips_rows_without_usable_ref(tmp_path):
+    store = RunStore(tmp_path / "store")
+    manifest = store.create_run(
+        request_id="runstore.no-ref-index-row",
+        evaluation_unit_id="runstore.no-ref-index-row",
+        request_mode="user_request",
+        runtime_backend="local",
+    )
+    first = _run_store_checkpoint_envelope(
+        manifest,
+        "checkpoint.runstore.no-ref-index-row.0001",
+        sequence_no=1,
+    )
+    first_ref = store.write_checkpoint(first)
+    index_path = Path(manifest.run_root) / "checkpoints" / "index.json"
+    rows = json.loads(index_path.read_text(encoding="utf-8"))
+    rows.append(
+        {
+            "checkpoint_id": "checkpoint.runstore.no-ref-index-row.0002",
+            "run_id": manifest.run_id,
+            "run_root": manifest.run_root,
+            "attempt_id": "attempt_0001",
+            "request_id": manifest.request_id,
+            "sequence_no": 2,
+            "created_at": 2.0,
+            "resume_eligible": True,
+            "ref": "   ",
+            "latest": False,
+        }
+    )
+    index_path.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
+    ineligible = _run_store_checkpoint_envelope(
+        manifest,
+        "checkpoint.runstore.no-ref-index-row.0003",
+        sequence_no=3,
+        resume_eligible=False,
+    )
+
+    store.write_checkpoint(ineligible)
+
+    reloaded_manifest = store.load_run_manifest(manifest.run_id)
+    reloaded_rows = {row["checkpoint_id"]: row for row in json.loads(index_path.read_text(encoding="utf-8"))}
+    assert reloaded_manifest.latest_checkpoint_ref == first_ref.ref
+    assert reloaded_manifest.resumable is True
+    assert store.latest_checkpoint_ref(manifest.run_id) == first_ref.ref
+    assert store.latest_usable_checkpoint_ref(manifest.run_id) == first_ref.ref
+    assert reloaded_rows[first.checkpoint_id]["latest"] is True
+    assert reloaded_rows["checkpoint.runstore.no-ref-index-row.0002"]["latest"] is False
+    assert reloaded_rows[ineligible.checkpoint_id]["latest"] is False
+
+
+def test_run_store_latest_refs_ignore_newer_resume_ineligible_checkpoint(tmp_path):
+    store = RunStore(tmp_path / "runs")
+    manifest = store.create_run(
+        request_id="req.latest-usable",
+        evaluation_unit_id="req.latest-usable",
+        request_mode="user_request",
+        runtime_backend="local",
+    )
+    eligible = _run_store_checkpoint_envelope(
+        manifest,
+        "checkpoint.req.latest-usable.0001",
+        sequence_no=1,
+    )
+    ineligible = _run_store_checkpoint_envelope(
+        manifest,
+        "checkpoint.req.latest-usable.0002",
+        sequence_no=2,
+        resume_eligible=False,
+    )
+
+    eligible_ref = store.write_checkpoint(eligible)
+    ineligible_ref = store.write_checkpoint(ineligible)
+
+    assert store.latest_checkpoint_ref(manifest.run_id) == eligible_ref.ref
+    assert store.latest_usable_checkpoint_ref(manifest.run_id) == eligible_ref.ref
+    assert store.checkpoint_ref_is_resume_eligible(ineligible_ref.ref) is False
+    index_rows = json.loads((Path(manifest.run_root) / "checkpoints" / "index.json").read_text(encoding="utf-8"))
+    assert [row["checkpoint_id"] for row in index_rows if row.get("latest")] == [eligible.checkpoint_id]
+    latest_payload = json.loads((Path(manifest.run_root) / "checkpoints" / "LATEST.json").read_text(encoding="utf-8"))
+    assert latest_payload["checkpoint_id"] == eligible.checkpoint_id
+
 
 def test_fixed_shell_checkpoint_lookup_can_resume_from_external_store_with_container_refs(tmp_path):
     store_shell = FixedShell(tmp_path / "store-workspace", artifact_mode=ArtifactMode.ALWAYS)

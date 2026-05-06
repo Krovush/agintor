@@ -175,14 +175,21 @@ def _load_module(module_name: str, path: Path) -> ModuleType:
     return module
 
 
+def _path_at_or_inside_root(root: Path, path: Path) -> bool:
+    """Return True when path resolves to root itself or a descendant of root."""
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
 def _resolve_manifest_path(runtime_path: Path, rel_path: str) -> Path:
     candidate = Path(rel_path)
     if candidate.is_absolute():
-        if candidate.is_file() and runtime_path.resolve() in candidate.resolve().parents:
+        if candidate.is_file() and _path_at_or_inside_root(runtime_path, candidate):
             return candidate
         raise RuntimeLoadError(f"missing immutable dependency {rel_path}")
     resolved = (runtime_path / candidate).resolve()
-    if runtime_path.resolve() in resolved.parents and resolved.is_file():
+    if _path_at_or_inside_root(runtime_path, resolved) and resolved.is_file():
         return resolved
     raise RuntimeLoadError(f"missing immutable dependency {rel_path}")
 
@@ -192,7 +199,7 @@ def _resolve_runtime_owned_path(runtime_path: Path, rel_path: str, *, label: str
     if candidate.is_absolute():
         raise RuntimeLoadError(f"{label} must be runtime-relative: {rel_path}")
     resolved = (runtime_path / candidate).resolve()
-    if runtime_path.resolve() in resolved.parents and resolved.is_file():
+    if _path_at_or_inside_root(runtime_path, resolved) and resolved.is_file():
         return resolved
     raise RuntimeLoadError(f"missing {label} {rel_path}")
 
@@ -328,7 +335,7 @@ def _verified_kernel_bundle_fingerprints(runtime_path: Path, kernel_manifest: Ke
         if relative_path.is_absolute():
             raise RuntimeLoadError(f"invalid kernel bundle path {rel_path!r} in {runtime_path}")
         file_path = (bundle_root / relative_path).resolve()
-        if bundle_root != file_path.parent and bundle_root not in file_path.parents:
+        if not _path_at_or_inside_root(bundle_root, file_path):
             raise RuntimeLoadError(f"kernel bundle path escapes runtime bundle: {rel_path!r}")
         if not file_path.is_file():
             raise RuntimeLoadError(f"missing bundled kernel file {rel_path!r} in {runtime_path}")
