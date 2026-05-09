@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import shutil
 from pathlib import Path
@@ -17,8 +18,25 @@ from ..providers import ModelProvider
 from ..runtime.loader import load_runtime
 from ..runtime.host import RuntimeHost
 from ..runtime.profile import RuntimeProfile, resolve_runtime_profile
+from ..evaluation.progress_oracle import ProgressOracle
 from ..evaluation.scoring import ScoreCalculator, estimate_reference_scales, mean_improvement
-from ..contracts import EvaluationStageResult, MutationCandidate, ObjectiveKind, ObjectiveSpec, OpenAITraceContext, SuiteEvaluation
+from ..contracts.verifiers import rescore_private_run_results
+from ..contracts import (
+    BenchmarkTask,
+    DomainEvidenceContract,
+    EvaluationStageResult,
+    EvidenceRecord,
+    MutationCandidate,
+    ObjectiveKind,
+    ObjectiveSpec,
+    OpenAITraceContext,
+    OutcomeAxisScore,
+    PromotionDecision,
+    RunResult,
+    SuiteEvaluation,
+    runtime_visible_benchmark_task,
+    sealed_benchmark_task_payload,
+)
 from ..utils import ensure_directory, stable_hash
 
 
@@ -37,6 +55,7 @@ class RuntimeEvaluator:
         artifact_mode: str | ArtifactMode | None = None,
         sandbox_root: Path | None = None,
         trace_context: OpenAITraceContext | None = None,
+        evidence_contract: DomainEvidenceContract | None = None,
     ) -> None:
         self.suite = suite
         self.workspace = Path(workspace)
@@ -58,6 +77,7 @@ class RuntimeEvaluator:
         )
         self.runtime_backend = (runtime_backend or os.environ.get("AGINTOR_RUNTIME_BACKEND", "local")).strip().lower()
         self.trace_context = trace_context
+        self.evidence_contract = evidence_contract or getattr(suite, "evidence_contract", None)
         self.runtime_host = RuntimeHost(
             self.workspace,
             runtime_backend=self.runtime_backend,
@@ -73,6 +93,11 @@ class RuntimeEvaluator:
         self.cache: dict[tuple[str, str, tuple[int, ...], tuple[str, ...]], SuiteEvaluation] = {}
         self.reference_scales = ({}, {})
         self.last_provider_usage: dict[str, Any] = {}
+        self.progress_oracle = ProgressOracle()
+        self.evaluation_workspace = ensure_directory(self.workspace / "evaluation")
+        self.evidence_ledger_path = self.evaluation_workspace / "evidence_ledger.jsonl"
+        self.paired_comparison_ledger_path = self.evaluation_workspace / "paired_comparisons.jsonl"
+        self.promotion_ledger_path = self.evaluation_workspace / "promotion_ledger.jsonl"
 
     def prepare_reference_scales(self, force: bool = False) -> None:
         if self._baseline_runtime_dir is None:
@@ -174,6 +199,328 @@ class RuntimeEvaluator:
     def _trace_rows(self, run) -> list[dict[str, Any]]:
         return run.trace_rows() if hasattr(run, "trace_rows") else []
 
+    def _stage4_ledger_paths(self) -> dict[str, str]:
+        return {
+            "evidence_ledger_path": str(self.evidence_ledger_path),
+            "paired_comparisons_path": str(self.paired_comparison_ledger_path),
+            "promotion_ledger_path": str(self.promotion_ledger_path),
+        }
+
+    def _append_jsonl(self, path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+        if not rows:
+            return
+        ensure_directory(path.parent)
+        with path.open("a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(dict(row), sort_keys=True, separators=(",", ":")) + "\n")
+
+    def _run_ref(self, run) -> str:
+        return str(getattr(run, "run_root", "") or getattr(run, "run_id", "") or getattr(run, "request_id", ""))
+
+    def _trace_ref(self, run) -> str:
+        if getattr(run, "trace_path", None):
+            return str(run.trace_path)
+        return run.trace_ref() if hasattr(run, "trace_ref") else ""
+
+    def _contract_task_matches(self, task: BenchmarkTask) -> bool:
+        if self.evidence_contract is None:
+            return False
+        metadata = dict(task.metadata or {})
+        distribution = dict(self.evidence_contract.challenge_distribution or {})
+        expected_domain = str(distribution.get("domain_kind") or self.evidence_contract.domain_kind or "")
+        if expected_domain and str(metadata.get("domain_kind", "")) != expected_domain:
+            return False
+        required_tags = {
+            str(tag)
+            for tag in distribution.get("slice_tags", [])
+            if str(tag)
+        }
+        task_tags = {str(tag) for tag in metadata.get("slice_tags", [])}
+        return required_tags.issubset(task_tags)
+
+    def _stage4_contract_attestation(self, child_eval: SuiteEvaluation) -> tuple[dict[str, str] | None, str | None]:
+        if self.evidence_contract is None:
+            return None, None
+        status: dict[str, str] = {}
+        required = {str(key) for key in dict(self.evidence_contract.health_floors or {})}
+        run_task_ids = {str(run.task_id) for run in child_eval.run_results}
+        suite_tasks = [
+            task
+            for task in getattr(self.suite, "train", [])
+            if str(getattr(task, "task_id", "")) in run_task_ids and self._contract_task_matches(task)
+        ]
+        if not suite_tasks and not required and not self.evidence_contract.leakage_policy:
+            return {}, None
+
+        metadata_by_id = {task.task_id: dict(task.metadata or {}) for task in suite_tasks}
+        distinct_challenges = {task.task_id for task in suite_tasks}
+        minimum = int(
+            dict(self.evidence_contract.challenge_distribution or {}).get(
+                "minimum_frontier_tasks",
+                dict(self.evidence_contract.statistical_rule or {}).get("minimum_pairs", 0),
+            )
+            or 0
+        )
+        if "generator" in required:
+            distribution = dict(self.evidence_contract.challenge_distribution or {})
+            expected_generator_id = str(distribution.get("generator_id") or "")
+            expected_generator_version = str(distribution.get("generator_version") or "")
+            expected_domain_kind = str(distribution.get("domain_kind") or self.evidence_contract.domain_kind or "")
+            generator_ok = bool(suite_tasks) and all(
+                metadata_by_id[task.task_id].get("generator_id")
+                and metadata_by_id[task.task_id].get("generator_version")
+                and metadata_by_id[task.task_id].get("domain_kind")
+                and (not expected_generator_id or str(metadata_by_id[task.task_id].get("generator_id", "")) == expected_generator_id)
+                and (not expected_generator_version or str(metadata_by_id[task.task_id].get("generator_version", "")) == expected_generator_version)
+                and (not expected_domain_kind or str(metadata_by_id[task.task_id].get("domain_kind", "")) == expected_domain_kind)
+                for task in suite_tasks
+            )
+            status["generator"] = "pass" if generator_ok else "missing"
+        if "answer" in required:
+            answer_ok = bool(suite_tasks) and all(
+                getattr(task, "private_expected", None) is not None
+                for task in suite_tasks
+            )
+            status["answer"] = "pass" if answer_ok else "missing"
+        if "validator" in required or "verifier" in required:
+            validator_ok = bool(suite_tasks) and all(
+                bool(getattr(task, "verification_required", False))
+                and str(getattr(task, "verifier_type", "none")) != "none"
+                for task in suite_tasks
+            )
+            key = "validator" if "validator" in required else "verifier"
+            status[key] = "pass" if validator_ok else "missing"
+        if "statistics" in required:
+            statistics_ok = bool(suite_tasks) and (minimum <= 0 or len(distinct_challenges) >= minimum)
+            status["statistics"] = "pass" if statistics_ok else "missing"
+
+        leakage_required = "leakage" in required or bool(self.evidence_contract.leakage_policy)
+        leakage_state = "unknown"
+        if leakage_required:
+            leakage_ok = bool(suite_tasks)
+            for task in suite_tasks:
+                visible = self._runtime_visible_task(task)
+                visible_metadata = dict(visible.metadata or {})
+                private_keys_visible = any(
+                    str(key).startswith("private_")
+                    or str(key) in {"private_answer_ref", "private_answer_mechanism", "private_expected", "expected_digest"}
+                    for key in visible_metadata
+                )
+                if getattr(task, "private_expected", None) is not None:
+                    leakage_ok = leakage_ok and visible.expected is None and visible.private_expected is None
+                leakage_ok = leakage_ok and not private_keys_visible
+            status["leakage"] = "pass" if leakage_ok else ("missing" if not suite_tasks else "fail")
+            leakage_state = "clean" if status["leakage"] == "pass" else "unknown"
+            if status["leakage"] == "fail":
+                leakage_state = "leaked"
+        return status, leakage_state
+
+    def _stage4_decision(self, parent_eval: SuiteEvaluation, child_eval: SuiteEvaluation) -> PromotionDecision:
+        health_floor_status, leakage_status = self._stage4_contract_attestation(child_eval)
+        return self.progress_oracle.decide_evaluations(
+            parent_eval,
+            child_eval,
+            contract=self.evidence_contract,
+            health_floor_status=health_floor_status,
+            leakage_status=leakage_status,
+        )
+
+    def _axis_id_for_task(self, decision: PromotionDecision, task_id: str) -> str:
+        comparison = decision.progress_signal.pairwise_comparisons[0] if decision.progress_signal and decision.progress_signal.pairwise_comparisons else None
+        if comparison is None:
+            return task_id
+        for axis_id, task_ids in dict(comparison.axis_task_ids or {}).items():
+            if str(task_id) in {str(item) for item in task_ids}:
+                return str(axis_id)
+        return task_id
+
+    def _stage4_evidence_rows(
+        self,
+        evaluation: SuiteEvaluation,
+        *,
+        role: str,
+        decision: PromotionDecision,
+        paired_run_keys: set[tuple[str, int]] | None = None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for run in sorted(evaluation.run_results, key=lambda item: (str(item.task_id), int(item.seed), str(item.request_id))):
+            if paired_run_keys is not None and (str(run.task_id), int(run.seed)) not in paired_run_keys:
+                continue
+            checkpoint_ref = str(getattr(run, "latest_checkpoint_ref", None) or getattr(run, "checkpoint_ref", None) or "")
+            trace_ref = self._trace_ref(run)
+            record_id = stable_hash(
+                "stage4.evidence",
+                role,
+                decision.comparison_ref,
+                evaluation.runtime_hash,
+                run.task_id,
+                int(run.seed),
+                self._run_ref(run),
+            )[:24]
+            digest_payload = {
+                "role": role,
+                "runtime_hash": evaluation.runtime_hash,
+                "task_id": str(run.task_id),
+                "seed": int(run.seed),
+                "run_ref": self._run_ref(run),
+                "trace_ref": trace_ref,
+                "checkpoint_ref": checkpoint_ref,
+                "artifact": run.artifact,
+                "verifier_score": float(run.verifier_score),
+                "hard_invalid": bool(run.hard_invalid),
+                "invalid_reason": str(run.invalid_reason or ""),
+            }
+            digest = stable_hash(digest_payload)
+            record = EvidenceRecord(
+                record_id=record_id,
+                contract_id=decision.contract_id,
+                challenge_id=str(run.task_id),
+                candidate_runtime_hash=evaluation.runtime_hash,
+                parent_runtime_hash=decision.parent_runtime_hash,
+                run_ref=self._run_ref(run),
+                attempt_ref=str(getattr(run, "attempt_id", "") or ""),
+                checkpoint_refs=[checkpoint_ref] if checkpoint_ref else [],
+                trace_refs=[trace_ref] if trace_ref else [],
+                artifact_ref=str(getattr(run, "artifact_ref", "") or ""),
+                axis_scores=[
+                    OutcomeAxisScore(
+                        axis_id=self._axis_id_for_task(decision, str(run.task_id)),
+                        score=float(run.verifier_score),
+                        authority="A4" if not run.hard_invalid else "A0",
+                        evidence_ref=record_id,
+                        evidence_digest=digest,
+                    )
+                ],
+                efficiency_scores={
+                    "cost": float(run.cost),
+                    "latency": float(run.latency),
+                    "tokens": float(run.tokens_used or (run.input_tokens + run.output_tokens) or 0),
+                    "faults": float(run.faults),
+                },
+                verifier_evidence=[
+                    {
+                        "role": role,
+                        "verifier_score": float(run.verifier_score),
+                        "hard_invalid": bool(run.hard_invalid),
+                        "artifact": run.artifact,
+                    }
+                ],
+                authority_level="A4" if not run.hard_invalid else "A0",
+                invalid_reason=str(run.invalid_reason or ""),
+                evidence_digest=digest,
+            )
+            rows.append(record.model_dump(mode="json", exclude_none=True))
+        return rows
+
+    def _write_stage4_ledgers(self, parent_eval: SuiteEvaluation, child_eval: SuiteEvaluation, decision: PromotionDecision) -> PromotionDecision:
+        comparison = decision.progress_signal.pairwise_comparisons[0] if decision.progress_signal and decision.progress_signal.pairwise_comparisons else None
+        paired_run_keys = {(str(run.task_id), int(run.seed)) for run in child_eval.run_results}
+        if comparison is not None and (comparison.challenge_ids or comparison.axis_task_ids):
+            paired_challenges = {str(challenge_id) for challenge_id in comparison.challenge_ids}
+            for task_ids in dict(comparison.axis_task_ids or {}).values():
+                paired_challenges.update(str(task_id) for task_id in task_ids)
+            paired_run_keys = {
+                key
+                for key in paired_run_keys
+                if key[0] in paired_challenges
+            }
+        parent_rows = self._stage4_evidence_rows(parent_eval, role="parent", decision=decision, paired_run_keys=paired_run_keys)
+        child_rows = self._stage4_evidence_rows(child_eval, role="child", decision=decision, paired_run_keys=paired_run_keys)
+        evidence_refs = [str(row["record_id"]) for row in [*parent_rows, *child_rows]]
+        evidence_digest = stable_hash(
+            [
+                {"record_id": row["record_id"], "evidence_digest": row.get("evidence_digest", "")}
+                for row in [*parent_rows, *child_rows]
+            ]
+        )
+        if comparison is not None:
+            decision_id = stable_hash(
+                "promotion-decision",
+                comparison.comparison_id,
+                str(getattr(decision.decision_type, "value", decision.decision_type)),
+                list(decision.reason_codes),
+                evidence_digest,
+            )[:24]
+            comparison = comparison.model_copy(
+                update={
+                    "decision_ref": decision_id,
+                    "evidence_refs": evidence_refs,
+                    "evidence_digest": evidence_digest,
+                }
+            )
+            if decision.progress_signal is not None:
+                signal_id = stable_hash(
+                    "progress-signal",
+                    comparison.comparison_id,
+                    str(getattr(decision.decision_type, "value", decision.decision_type)),
+                    evidence_digest,
+                )[:24]
+                signal = decision.progress_signal.model_copy(
+                    update={
+                        "signal_id": signal_id,
+                        "pairwise_comparisons": [comparison],
+                        "evidence_digest": evidence_digest,
+                    }
+                )
+                decision = decision.model_copy(
+                    update={
+                        "decision_id": decision_id,
+                        "progress_signal": signal,
+                        "progress_signal_ref": signal_id,
+                        "evidence_refs": evidence_refs,
+                        "evidence_digest": evidence_digest,
+                    }
+                )
+            else:
+                decision = decision.model_copy(
+                    update={
+                        "decision_id": decision_id,
+                        "evidence_refs": evidence_refs,
+                        "evidence_digest": evidence_digest,
+                    }
+                )
+        comparison_rows = [comparison.model_dump(mode="json", exclude_none=True)] if comparison is not None else []
+        self._append_jsonl(self.evidence_ledger_path, parent_rows + child_rows)
+        self._append_jsonl(self.paired_comparison_ledger_path, comparison_rows)
+        self._append_jsonl(self.promotion_ledger_path, [decision.model_dump(mode="json", exclude_none=True)])
+        return decision
+
+    def _stage4_result_from_decision(
+        self,
+        decision: PromotionDecision,
+        *,
+        epsilon_full: float,
+        child_eval: SuiteEvaluation,
+        reason_prefix: str = "full train progress decision",
+    ) -> EvaluationStageResult:
+        signal = decision.progress_signal
+        decision_type = str(getattr(decision.decision_type, "value", decision.decision_type))
+        promoted = decision_type in {"capability", "efficiency", "preference", "subskill"} and not child_eval.invalid
+        metrics = {
+            "delta": float(decision.quality_delta_estimate or 0.0),
+            "lcb": float(decision.quality_delta_lower or 0.0),
+            "epsilon_full": epsilon_full,
+            "promotion_decision": decision.model_dump(mode="json", exclude_none=True),
+            "progress_decision": decision_type,
+            "quality_delta_lower": float(decision.quality_delta_lower or 0.0),
+            "efficiency_delta_lower": float(decision.efficiency_delta_lower or 0.0),
+            "progress_reason_codes": list(decision.reason_codes),
+            **self._stage4_ledger_paths(),
+        }
+        return EvaluationStageResult(
+            stage=4,
+            passed=promoted,
+            reason=f"{reason_prefix}: {decision_type}",
+            metrics=metrics,
+            suite_evaluation=child_eval,
+            progress_signal=signal,
+            promotion_decision=decision,
+            promotion_type=decision.decision_type,
+            promotion_decision_ref=decision.decision_id,
+            progress_signal_ref=decision.progress_signal_ref,
+            evidence_contract_id=decision.contract_id,
+        )
+
     def _cleanup_path(self, path: Path | None, *, failed: bool = False) -> None:
         if path is None or not path.exists():
             return
@@ -241,6 +588,12 @@ class RuntimeEvaluator:
         if stage_name == "stage3":
             self.epsilon_part = max(0.0, self.epsilon_part - 0.0025)
 
+    def _runtime_visible_task(self, task: BenchmarkTask) -> BenchmarkTask:
+        return runtime_visible_benchmark_task(task)
+
+    def _rescore_private_results(self, runs: Sequence[RunResult], tasks: Sequence[BenchmarkTask]) -> list[RunResult]:
+        return rescore_private_run_results(runs, tasks)
+
     def evaluate_runtime(
         self,
         runtime_dir: str | Path,
@@ -256,7 +609,10 @@ class RuntimeEvaluator:
         runtime = self._load_runtime(runtime_dir, runtime_profile=runtime_profile)
         task_key = ()
         if tasks_override is not None:
-            task_key = tuple(stable_hash((task).model_dump()) for task in tasks_override)
+            task_key = tuple(
+                stable_hash(sealed_benchmark_task_payload(task) if isinstance(task, BenchmarkTask) else (task).model_dump())
+                for task in tasks_override
+            )
         cache_key = (runtime.runtime_hash, partition, tuple(seeds), task_key)
         if use_cache and cache_key in self.cache:
             return self.cache[cache_key]
@@ -280,14 +636,16 @@ class RuntimeEvaluator:
                 trace_context=trace_context or self.trace_context,
             )
             self.last_provider_usage = dict(batch_response.provider_usage)
-            run_results.extend(batch_response.run_results)
+            run_results.extend(self._rescore_private_results(batch_response.run_results, tasks))
         finally:
             self.predictors.unfreeze()
         task_family_map = {task.task_id: task.family for task in tasks}
+        task_metadata = {task.task_id: dict(task.metadata) for task in tasks}
         evaluation = self._score_calculator(use_reference_scales=use_reference_scales).suite_score(
             runtime.runtime_hash,
             task_family_map,
             run_results,
+            task_metadata=task_metadata,
         )
         if use_cache:
             self.cache[cache_key] = evaluation
@@ -462,41 +820,86 @@ class RuntimeEvaluator:
         passed = lcb > -epsilon_part and not child_eval.invalid
         return EvaluationStageResult(stage=3, passed=passed, reason="local subset LCB gate", metrics={"delta": avg, "se": se, "lcb": lcb}, suite_evaluation=child_eval)
 
-    def stage4_full(self, parent_dir: Path, child_dir: Path, epsilon_full: float | None = None) -> EvaluationStageResult:
+    def stage4_full(
+        self,
+        parent_dir: Path,
+        child_dir: Path,
+        epsilon_full: float | None = None,
+        objective: ObjectiveSpec | None = None,
+    ) -> EvaluationStageResult:
         epsilon_full = self.epsilon_full if epsilon_full is None else epsilon_full
         seeds = self.reference_profile.evaluation.full_train_seeds
         parent_eval = self.evaluate_runtime(parent_dir, partition="train", seeds=seeds)
         task_family_map = {task.task_id: task.family for task in self.suite.train}
+        task_metadata = {task.task_id: dict(task.metadata) for task in self.suite.train}
         aggregated_runs = []
         parent_scores_accum: list[float] = []
         child_scores_accum: list[float] = []
         for batch in self._train_batches():
             child_batch = self.evaluate_runtime(child_dir, partition="train", seeds=seeds, use_cache=False, tasks_override=batch)
             if child_batch.invalid:
-                return EvaluationStageResult(stage=4, passed=False, reason="full train evaluation invalid", metrics={"delta": 0.0, "se": 0.0, "epsilon_full": epsilon_full}, suite_evaluation=child_batch)
+                decision = self._stage4_decision(parent_eval, child_batch)
+                decision = self._write_stage4_ledgers(parent_eval, child_batch, decision)
+                return self._stage4_result_from_decision(
+                    decision,
+                    epsilon_full=epsilon_full,
+                    child_eval=child_batch,
+                    reason_prefix="full train evaluation invalid",
+                )
             aggregated_runs.extend(child_batch.run_results)
             parent_scores_accum.extend(parent_eval.objective_scores.get(f"s:{task.task_id}", 0.0) for task in batch)
             child_scores_accum.extend(child_batch.objective_scores.get(f"s:{task.task_id}", 0.0) for task in batch)
             avg_batch, se_batch, _ = mean_improvement(child_scores_accum, parent_scores_accum)
             if avg_batch + 1.96 * se_batch < -self.delta_rej:
+                try:
+                    runtime_hash = self._load_runtime(child_dir).runtime_hash
+                except Exception:
+                    runtime_hash = str(child_dir)
+                partial_eval = self._score_calculator().suite_score(runtime_hash, task_family_map, aggregated_runs)
+                partial_eval = partial_eval.model_copy(update={"task_metadata": task_metadata})
+                health_floor_status, leakage_status = self._stage4_contract_attestation(partial_eval)
+                decision = self.progress_oracle.reject_evaluations(
+                    parent_eval,
+                    partial_eval,
+                    contract=self.evidence_contract,
+                    health_floor_status=health_floor_status,
+                    leakage_status=leakage_status,
+                    reason_codes=["stage4_early_rejection"],
+                )
+                decision = self._write_stage4_ledgers(parent_eval, partial_eval, decision)
+                result = self._stage4_result_from_decision(
+                    decision,
+                    epsilon_full=epsilon_full,
+                    child_eval=partial_eval,
+                    reason_prefix="stage4 early rejection",
+                )
+                result.metrics.update({"ucb": avg_batch + 1.96 * se_batch, "delta_rej": self.delta_rej})
                 return EvaluationStageResult(
                     stage=4,
                     passed=False,
                     reason="stage4 early rejection",
-                    metrics={"delta": avg_batch, "se": se_batch, "ucb": avg_batch + 1.96 * se_batch, "delta_rej": self.delta_rej},
+                    metrics=result.metrics,
+                    suite_evaluation=partial_eval,
+                    progress_signal=result.progress_signal,
+                    promotion_decision=result.promotion_decision,
+                    promotion_type=result.promotion_type,
+                    promotion_decision_ref=result.promotion_decision_ref,
+                    progress_signal_ref=result.progress_signal_ref,
+                    evidence_contract_id=result.evidence_contract_id,
                 )
         try:
             runtime_hash = self._load_runtime(child_dir).runtime_hash
         except Exception:
             runtime_hash = str(child_dir)
-        child_eval = self._score_calculator().suite_score(runtime_hash, task_family_map, aggregated_runs)
-        task_ids = [task.task_id for task in self.suite.train]
-        parent_scores = [parent_eval.objective_scores.get(f"s:{task_id}", 0.0) for task_id in task_ids]
-        child_scores = [child_eval.objective_scores.get(f"s:{task_id}", 0.0) for task_id in task_ids]
-        avg, se, lcb = mean_improvement(child_scores, parent_scores)
-        passed = (lcb > -epsilon_full) and not child_eval.invalid
-        reason = "full train evaluation completed" if passed else "full train evaluation regressed or invalid"
-        return EvaluationStageResult(stage=4, passed=passed, reason=reason, metrics={"delta": avg, "se": se, "lcb": lcb, "epsilon_full": epsilon_full}, suite_evaluation=child_eval)
+        child_eval = self._score_calculator().suite_score(
+            runtime_hash,
+            task_family_map,
+            aggregated_runs,
+            task_metadata=task_metadata,
+        )
+        decision = self._stage4_decision(parent_eval, child_eval)
+        decision = self._write_stage4_ledgers(parent_eval, child_eval, decision)
+        return self._stage4_result_from_decision(decision, epsilon_full=epsilon_full, child_eval=child_eval)
 
     def evaluate_validation(self, runtime_dir: Path) -> SuiteEvaluation:
         return self.evaluate_runtime(runtime_dir, partition="val", seeds=self.reference_profile.evaluation.validation_seeds)
@@ -522,7 +925,7 @@ class RuntimeEvaluator:
         if not stage3.passed:
             self._cleanup_path(child_dir, failed=True)
             return results, child_dir
-        stage4 = self.stage4_full(parent_dir, child_dir)
+        stage4 = self.stage4_full(parent_dir, child_dir, objective=objective)
         results.append(stage4)
         if not stage4.passed:
             self._cleanup_path(child_dir, failed=True)

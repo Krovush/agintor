@@ -43,6 +43,7 @@ class BenchmarkTask(BaseModel):
     context_items: List[Dict[str, Any]] = Field(default_factory=list)
     operations: List[OperationSpec] = Field(default_factory=list)
     expected: Any
+    private_expected: Any = Field(default=None, exclude=True)
     verifier_type: str = "json_exact"
     externally_visible: bool = True
     verification_required: bool = True
@@ -54,6 +55,52 @@ class BenchmarkTask(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
+
+
+_PRIVATE_RUNTIME_METADATA_KEYS = {
+    "private_answer_ref",
+    "private_answer_mechanism",
+    "private_expected",
+    "expected_digest",
+}
+
+
+def runtime_visible_benchmark_task(task: BenchmarkTask) -> BenchmarkTask:
+    """Return the task payload a candidate runtime is allowed to inspect."""
+    metadata = dict(task.metadata)
+    has_private_metadata = bool(set(metadata) & _PRIVATE_RUNTIME_METADATA_KEYS) or any(
+        str(key).startswith("private_")
+        for key in metadata
+    )
+    if task.private_expected is None and not has_private_metadata:
+        return task
+    metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key not in _PRIVATE_RUNTIME_METADATA_KEYS and not str(key).startswith("private_")
+    }
+    update: Dict[str, Any] = {"metadata": metadata}
+    if task.private_expected is not None:
+        update.update(
+            {
+                "expected": None,
+                "private_expected": None,
+                "verifier_type": "none",
+                "verification_required": False,
+            }
+        )
+    return task.model_copy(
+        update=update,
+        deep=True,
+    )
+
+
+def sealed_benchmark_task_payload(task: BenchmarkTask) -> dict[str, Any]:
+    """Serialize benchmark-authoritative task data, including sealed answers."""
+    payload = task.model_dump()
+    if task.private_expected is not None:
+        payload["private_expected"] = task.private_expected
+    return payload
 
 
 class TaskScore(BaseModel):
@@ -73,6 +120,7 @@ class SuiteEvaluation(BaseModel):
     task_scores: Dict[str, TaskScore]
     family_scores: Dict[str, Dict[str, float]]
     run_results: List[RunResult]
+    task_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     invalid: bool = False
 
 

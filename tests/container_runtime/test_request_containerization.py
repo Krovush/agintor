@@ -4,7 +4,7 @@ from pathlib import Path
 
 from agintor.runtime.host.backends.docker.executor import DockerRuntimeExecutor
 from agintor.runtime.api import load_solve_request, runtime_solve_request_for_user_request
-from agintor.contracts import BenchmarkTask, RuntimeBatchRequest, RuntimeBatchResponse, RuntimeTaskInvocation
+from agintor.contracts import BenchmarkTask, RunResult, RuntimeBatchRequest, RuntimeBatchResponse, RuntimeTaskInvocation
 
 from .helpers import _capability_exchange, _task
 
@@ -71,13 +71,37 @@ def test_containerize_batch_request_rewrites_invocation_run_roots(tmp_path: Path
 def test_docker_run_batch_wrapper_accepts_real_benchmark_tasks_without_hash_crash(tmp_path: Path, monkeypatch):
     executor = DockerRuntimeExecutor(tmp_path / "executor")
     captured: dict[str, RuntimeBatchRequest] = {}
+    private_task = _task("one").model_copy(
+        update={
+            "expected": None,
+            "private_expected": 7,
+            "verifier_type": "number_exact",
+        }
+    )
 
     def fake_run_batch_protocol(runtime_dir, request, **kwargs):
         captured["request"] = request
+        invocation = request.invocations[0]
         return RuntimeBatchResponse(
             request_id=request.request_id,
             capability_exchange=_capability_exchange(),
-            run_results=[],
+            run_results=[
+                RunResult(
+                    request_id=invocation.request_id,
+                    run_id=invocation.run_id,
+                    run_root=invocation.run_root,
+                    attempt_id=invocation.attempt_id,
+                    runtime_hash="runtime",
+                    runtime_backend=invocation.runtime_backend,
+                    task_id=invocation.task.task_id,
+                    seed=invocation.seed,
+                    artifact=7,
+                    verifier_score=0.0,
+                    cost=0.0,
+                    latency=0.1,
+                    faults=0,
+                )
+            ],
             provider_usage={},
         )
 
@@ -85,12 +109,21 @@ def test_docker_run_batch_wrapper_accepts_real_benchmark_tasks_without_hash_cras
 
     runs = executor.run_batch(
         "dummy-runtime",
-        [(_task("one"), 0)],
+        [(private_task, 0)],
         provider=None,  # type: ignore[arg-type]
     )
+    request = captured["request"]
+    invocation = request.invocations[0]
+    payload = request.model_dump(mode="json")
 
-    assert runs == []
-    assert captured["request"].request_id.startswith("docker.")
+    assert runs[0].verifier_score == 1.0
+    assert request.request_id.startswith("docker.")
+    assert invocation.task.private_expected is None
+    assert invocation.task.verifier_type == "none"
+    assert invocation.authoritative_task is not None
+    assert invocation.authoritative_task.private_expected == 7
+    assert "authoritative_task" not in payload["invocations"][0]
+    assert "private_expected" not in payload["invocations"][0]["task"]
 
 
 def test_containerize_solve_request_file_refs_rewrites_absolute_host_paths_with_spaces(tmp_path: Path):

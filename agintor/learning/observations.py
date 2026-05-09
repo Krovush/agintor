@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
-from ..contracts import SuiteEvaluation
+from ..contracts import SuiteEvaluation, decision_attr, decision_type_value
 
 
 @dataclass
@@ -37,21 +37,49 @@ def _feature_vector(run, counts: dict[str, int], trace: list[dict[str, Any]], fa
     ]
 
 
+def _base_metadata(
+    run,
+    *,
+    accepted: bool | None,
+    task_family: str,
+    promotion_decision: Mapping[str, object] | object | None,
+    decision_type: str,
+    updates_capability_prior: bool,
+) -> dict[str, object]:
+    return {
+        "accepted": accepted,
+        "promotion_type": decision_type,
+        "promotion_decision_type": decision_type,
+        "promotion_decision_id": decision_attr(promotion_decision, "decision_id"),
+        "promotion_contract_id": decision_attr(promotion_decision, "contract_id", ""),
+        "promotion_comparison_ref": decision_attr(promotion_decision, "comparison_ref", ""),
+        "updates_capability_prior": updates_capability_prior,
+        "task_family": task_family,
+        "task_id": run.task_id,
+        "trace_path": run.trace_path,
+        "trace_ref": run.trace_ref(),
+    }
+
+
 def extract_predictor_observations(
     evaluation: SuiteEvaluation,
     task_family_map: dict[str, str],
     *,
-    accepted: bool,
+    promotion_decision: Mapping[str, object] | object | None = None,
+    retained: bool | None = None,
 ) -> list[PredictorObservation]:
     observations: list[PredictorObservation] = []
+    decision_type = decision_type_value(promotion_decision) or "abstain"
+    accepted = retained if retained is not None else decision_type in {"capability", "efficiency", "subskill", "preference"}
+    updates_capability_prior = decision_type == "capability"
     for run in evaluation.run_results:
         trace = run.trace_rows()
         counts = _event_counts(trace)
         family_name = task_family_map.get(run.task_id, "")
         family_bias = float(["top", "mem", "tool", "e2e"].index(family_name)) if family_name in {"top", "mem", "tool", "e2e"} else 0.0
         features = _feature_vector(run, counts, trace, family_bias)
-        success = 1.0 if run.verifier_score >= 1.0 and not run.hard_invalid else 0.0
         fault = 1.0 if run.faults > 0 or run.hard_invalid else 0.0
+        cost = max(0.0, float(run.cost))
         latency = max(0.0, float(run.latency))
         tokens = max(1.0, float(run.tokens_used or (run.input_tokens + run.output_tokens) or 1.0))
         families: list[str] = []
@@ -68,26 +96,73 @@ def extract_predictor_observations(
         if counts.get("stop", 0):
             families.append("stopping")
         for family in families:
-            metadata = {
-                "accepted": accepted,
-                "task_family": family_name,
-                "task_id": run.task_id,
-                "trace_path": run.trace_path,
-                "trace_ref": run.trace_ref(),
-            }
-            observations.append(
-                PredictorObservation(
-                    family=family,
-                    feature_vector=features,
-                    label_probability=success,
-                    metadata=metadata,
-                )
+            metadata = _base_metadata(
+                run,
+                accepted=accepted,
+                task_family=family_name,
+                promotion_decision=promotion_decision,
+                decision_type=decision_type,
+                updates_capability_prior=updates_capability_prior,
             )
+            if decision_type == "efficiency":
+                observations.append(
+                    PredictorObservation(
+                        family=f"efficiency:{family}:cost",
+                        feature_vector=features,
+                        label_positive_scalar=cost,
+                        metadata=metadata,
+                    )
+                )
+                observations.append(
+                    PredictorObservation(
+                        family=f"efficiency:{family}:latency",
+                        feature_vector=features,
+                        label_positive_scalar=latency,
+                        metadata=metadata,
+                    )
+                )
+                observations.append(
+                    PredictorObservation(
+                        family=f"efficiency:{family}:token",
+                        feature_vector=features,
+                        label_positive_scalar=tokens,
+                        metadata=metadata,
+                    )
+                )
+                continue
+            if decision_type == "capability":
+                observations.append(
+                    PredictorObservation(
+                        family=f"capability:{family}",
+                        feature_vector=features,
+                        label_probability=1.0,
+                        metadata=metadata,
+                    )
+                )
+            elif decision_type in {"subskill", "preference", "reject", "no_progress", "abstain", "quarantine"}:
+                observations.append(
+                    PredictorObservation(
+                        family=f"{decision_type}:{family}",
+                        feature_vector=features,
+                        label_probability=1.0,
+                        metadata=metadata,
+                    )
+                )
+                if decision_type not in {"reject", "quarantine"}:
+                    continue
             observations.append(
                 PredictorObservation(
                     family=f"{family}:fault",
                     feature_vector=features,
                     label_probability=fault,
+                    metadata=metadata,
+                )
+            )
+            observations.append(
+                PredictorObservation(
+                    family=f"{family}:cost",
+                    feature_vector=features,
+                    label_positive_scalar=cost,
                     metadata=metadata,
                 )
             )
@@ -108,3 +183,16 @@ def extract_predictor_observations(
                 )
             )
     return observations
+
+
+def extract_predictor_observations_for_promotion(
+    evaluation: SuiteEvaluation,
+    task_family_map: dict[str, str],
+    *,
+    decision: Mapping[str, object] | object | None,
+) -> list[PredictorObservation]:
+    return extract_predictor_observations(
+        evaluation,
+        task_family_map,
+        promotion_decision=decision,
+    )

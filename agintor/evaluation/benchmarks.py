@@ -6,8 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping
 
-from pydantic import BaseModel
-from ..contracts import BenchmarkTask, OperationSpec
+from ..contracts import BenchmarkTask, DomainEvidenceContract, OperationSpec
+from .challenge_generators import (
+    TOOL_WORKFLOW_GENERATOR_ID,
+    TOOL_WORKFLOW_GENERATOR_VERSION,
+    ToolWorkflowDifficulty,
+    generate_tool_workflow_challenges,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +22,7 @@ class BenchmarkSuite:
     val: list[BenchmarkTask]
     test: list[BenchmarkTask]
     proxy: list[BenchmarkTask]
+    evidence_contract: DomainEvidenceContract | None = None
 
     def all_tasks(self, partition: str = "train") -> list[BenchmarkTask]:
         return [(task).model_copy(deep=True) for task in getattr(self, partition)]
@@ -367,6 +373,109 @@ def build_demo_suite() -> BenchmarkSuite:
     return BenchmarkSuite(name="demo", train=top_train + mem_train + tool_train + e2e_train, val=val, test=test, proxy=proxy)
 
 
+def _interleave_frontier_and_static(static_tasks: list[BenchmarkTask], frontier_tasks: list[BenchmarkTask]) -> list[BenchmarkTask]:
+    tasks: list[BenchmarkTask] = []
+    for index in range(max(len(static_tasks), len(frontier_tasks))):
+        if index < len(frontier_tasks):
+            tasks.append(frontier_tasks[index])
+        if index < len(static_tasks):
+            tasks.append(static_tasks[index])
+    return tasks
+
+
+def build_tool_frontier_suite(
+    *,
+    train_count: int = 8,
+    val_count: int = 4,
+    test_count: int = 4,
+    seed: int = 1729,
+) -> BenchmarkSuite:
+    demo = build_demo_suite()
+    train_frontier = generate_tool_workflow_challenges(
+        partition="train",
+        count=train_count,
+        seed=seed,
+        difficulty=ToolWorkflowDifficulty(expression_depth=4, dependency_width=2, distractor_count=2, numeric_edge_cases=True),
+    )
+    val_frontier = generate_tool_workflow_challenges(
+        partition="val",
+        count=val_count,
+        seed=seed + 1,
+        difficulty=ToolWorkflowDifficulty(expression_depth=5, dependency_width=2, distractor_count=3, numeric_edge_cases=True),
+    )
+    test_frontier = generate_tool_workflow_challenges(
+        partition="test",
+        count=test_count,
+        seed=seed + 2,
+        difficulty=ToolWorkflowDifficulty(expression_depth=6, dependency_width=3, distractor_count=4, numeric_edge_cases=True),
+    )
+    return BenchmarkSuite(
+        name="tool-frontier",
+        train=_interleave_frontier_and_static(demo.train, train_frontier),
+        val=_interleave_frontier_and_static(demo.val, val_frontier),
+        test=_interleave_frontier_and_static(demo.test, test_frontier),
+        proxy=list(demo.proxy),
+        evidence_contract=build_tool_frontier_evidence_contract(minimum_frontier_tasks=train_count),
+    )
+
+
+def build_tool_frontier_evidence_contract(*, minimum_frontier_tasks: int = 8) -> DomainEvidenceContract:
+    minimum = max(1, int(minimum_frontier_tasks))
+    return DomainEvidenceContract(
+        contract_id="tool-frontier-generated-workflow-v1",
+        domain_kind="generated_tool_workflow",
+        version="v1",
+        scope={
+            "domain": "tool",
+            "slice_tags": ["generated", "frontier"],
+            "allowed_claim_language": ["generated tool workflow only"],
+        },
+        challenge_distribution={
+            "minimum_frontier_tasks": minimum,
+            "domain_kind": "generated_tool_workflow",
+            "generator_id": TOOL_WORKFLOW_GENERATOR_ID,
+            "generator_version": TOOL_WORKFLOW_GENERATOR_VERSION,
+            "slice_tags": ["frontier"],
+        },
+        answer_mechanism={"type": "deterministic_interpreter", "authority": "A4"},
+        quality_axes=[
+            {
+                "axis_id": "expression_generalization",
+                "promotion_kind": "capability",
+                "comparator_type": "hidden_challenge",
+                "minimum_authority": "A4",
+                "epsilon": 0.03,
+                "protected_regression_tolerance": 0.01,
+                "metadata": {
+                    "domain_kind": "generated_tool_workflow",
+                    "slice_tags": ["frontier"],
+                    "source": "hidden_frontier",
+                },
+            }
+        ],
+        efficiency_axes=[
+            {
+                "axis_id": "runtime_efficiency",
+                "promotion_kind": "efficiency",
+                "metric": "cost",
+                "epsilon": 0.02,
+            }
+        ],
+        health_floors={
+            "generator": "pass",
+            "answer": "pass",
+            "validator": "pass",
+            "statistics": "pass",
+            "leakage": "pass",
+        },
+        leakage_policy={
+            "status_required": True,
+            "attestation": "runtime_visible_task_stripping_and_private_rescore",
+        },
+        statistical_rule={"type": "fixed_confirmatory", "minimum_pairs": minimum, "alpha": 0.05},
+    )
+
+
 SuiteProvider = Callable[[str], BenchmarkSuite]
 _SUITE_PROVIDERS: dict[str, SuiteProvider] = {}
 
@@ -389,6 +498,7 @@ def _suite_from_payload(data: dict[str, Any], source: str) -> BenchmarkSuite:
         val=[(BenchmarkTask).model_validate(item) for item in data["val"]],
         test=[(BenchmarkTask).model_validate(item) for item in data["test"]],
         proxy=[(BenchmarkTask).model_validate(item) for item in data["proxy"]],
+        evidence_contract=DomainEvidenceContract.model_validate(data["evidence_contract"]) if data.get("evidence_contract") else None,
     )
 
 
@@ -411,15 +521,28 @@ def _load_suite_plugin(spec: str) -> BenchmarkSuite:
     return suite
 
 def load_suite(name_or_path: str) -> BenchmarkSuite:
-    if name_or_path == "demo":
+    normalized_name = str(name_or_path).strip().lower()
+    if normalized_name == "demo":
         return build_demo_suite()
+    if normalized_name == "tool-frontier":
+        return build_tool_frontier_suite()
+    if normalized_name in {"tool_frontier", "generated_tool_workflow_v1"}:
+        raise ValueError("unknown benchmark suite alias; use 'tool-frontier'")
     if name_or_path.startswith("plugin:"):
         return _load_suite_plugin(name_or_path)
-    if str(name_or_path).strip().lower() in _SUITE_PROVIDERS:
-        return _SUITE_PROVIDERS[str(name_or_path).strip().lower()](name_or_path)
+    if normalized_name in _SUITE_PROVIDERS:
+        return _SUITE_PROVIDERS[normalized_name](name_or_path)
     path = Path(name_or_path)
     data = json.loads(path.read_text(encoding="utf-8"))
     return _suite_from_payload(data, str(path))
 
 
-__all__ = ["BenchmarkSuite", "build_demo_suite", "load_suite", "register_suite_provider", "unregister_suite_provider"]
+__all__ = [
+    "BenchmarkSuite",
+    "build_demo_suite",
+    "build_tool_frontier_evidence_contract",
+    "build_tool_frontier_suite",
+    "load_suite",
+    "register_suite_provider",
+    "unregister_suite_provider",
+]

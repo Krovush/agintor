@@ -98,6 +98,7 @@ def _factory_message_artifacts(result: BuiltRuntimeResult) -> dict[str, str | Pa
         "deployment_contract_path": str(Path(result.runtime_plan_path).with_name(DEPLOYMENT_CONTRACT_FILE)),
         "export_summary_path": result.export_summary_path,
         "build_summary_path": result.summary_path,
+        "signal_sufficiency_path": result.signal_sufficiency_path,
     }
 
 

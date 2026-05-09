@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..storage.artifacts import ArtifactMode
+from ..contracts import DomainEvidenceContract, sealed_benchmark_task_payload
 from ..evaluation.benchmarks import BenchmarkSuite, build_demo_suite
 from ..search.engine import EvolutionEngine
 from ..storage.factory_chat_store import CHAT_DIR_NAME, FactoryChatError, FactoryChatStore
@@ -43,7 +44,6 @@ from ..runtime.sdk import (
     preview_kernel_manifest,
 )
 from ..contracts import (
-    ArchiveEntry,
     ArchiveRecord,
     BenchmarkPlan,
     BuildSummary,
@@ -162,42 +162,27 @@ def _mean_goal_score(scores: dict[str, float], goal_keys: list[str]) -> float:
 
 
 def _export_candidate_records(engine: EvolutionEngine, goal_keys: list[str]) -> list[ArchiveRecord]:
-    runtime_dirs = getattr(engine.archive, "runtime_dirs", None)
-    runtime_evaluations = getattr(engine.archive, "runtime_evaluations", None)
-    runtime_descriptors = getattr(engine.archive, "runtime_descriptors", None)
-    if isinstance(runtime_dirs, dict) and isinstance(runtime_evaluations, dict) and isinstance(runtime_descriptors, dict):
-        candidates: list[ArchiveRecord] = []
-        for runtime_hash, runtime_dir in runtime_dirs.items():
-            evaluation = runtime_evaluations.get(runtime_hash)
-            descriptor = runtime_descriptors.get(runtime_hash)
-            if evaluation is None or descriptor is None:
-                continue
-            candidates.append(
-                ArchiveRecord(
-                    objective="build",
-                    key=runtime_hash,
-                    entry=ArchiveEntry(
-                        code_hash=descriptor.code_hash,
-                        runtime_hash=runtime_hash,
-                        scores=evaluation.objective_scores,
-                        behavior_bin=list(descriptor.behavior_bin),
-                        scope_tag=descriptor.scope_tag,
-                        complexity_bucket=descriptor.complexity_bucket,
-                        mutable_loc=descriptor.mutable_loc,
-                        trace_refs=[],
-                    ),
-                    runtime_dir=str(runtime_dir),
-                )
-            )
-        return candidates
     objective_names: list[str] = []
     for objective_name in [*goal_keys, "sbar:global"]:
         if objective_name not in objective_names:
             objective_names.append(objective_name)
+    objective_rank = {name: index for index, name in enumerate(objective_names)}
     deduped: dict[str, ArchiveRecord] = {}
-    for objective_name in objective_names:
-        for record in engine.archive.island(objective_name):
-            deduped.setdefault(record.entry.runtime_hash, record)
+    capability_records = getattr(engine.archive, "archive_records", lambda _kind=None: [])("capability")
+    for record in capability_records:
+        if record.objective not in objective_rank:
+            continue
+        existing = deduped.get(record.entry.runtime_hash)
+        if existing is None:
+            deduped[record.entry.runtime_hash] = record
+            continue
+        current_rank = objective_rank.get(record.objective, len(objective_rank))
+        existing_rank = objective_rank.get(existing.objective, len(objective_rank))
+        if current_rank < existing_rank:
+            deduped[record.entry.runtime_hash] = record
+            continue
+        if current_rank == existing_rank and record.entry.scores.get(record.objective, float("-inf")) > existing.entry.scores.get(existing.objective, float("-inf")):
+            deduped[record.entry.runtime_hash] = record
     return list(deduped.values())
 
 
@@ -359,7 +344,8 @@ def _score_rows_for_candidates(
     for record in candidates:
         runtime_hash = record.entry.runtime_hash
         export_eligible = (
-            winning_goal_score is not None
+            record.archive_kind == "capability"
+            and winning_goal_score is not None
             and goal_scores[runtime_hash] == winning_goal_score
             and runtime_hash in validation_scores
         )
@@ -372,6 +358,8 @@ def _score_rows_for_candidates(
                 "validation_evaluated": runtime_hash in validation_scores or runtime_hash in validation_errors,
                 "validation_error": validation_errors.get(runtime_hash),
                 "export_eligible": export_eligible,
+                "archive_kind": record.archive_kind,
+                "promotion_type": str(getattr(record.promotion_type or record.entry.promotion_type, "value", record.promotion_type or record.entry.promotion_type or "")),
                 "train_score": record.entry.scores.get("sbar:global", float("-inf")),
                 "mutable_loc": record.entry.mutable_loc,
                 "scope_tag": record.entry.scope_tag,
@@ -395,10 +383,11 @@ def _persist_benchmark_suite(path: Path, suite: BenchmarkSuite) -> BenchmarkSuit
     payload = {
         "suite_id": f"benchmark-suite.{suite.name}",
         "name": suite.name,
-        "train": [(task).model_dump() for task in suite.train],
-        "val": [(task).model_dump() for task in suite.val],
-        "test": [(task).model_dump() for task in suite.test],
-        "proxy": [(task).model_dump() for task in suite.proxy],
+        "train": [sealed_benchmark_task_payload(task) for task in suite.train],
+        "val": [sealed_benchmark_task_payload(task) for task in suite.val],
+        "test": [sealed_benchmark_task_payload(task) for task in suite.test],
+        "proxy": [sealed_benchmark_task_payload(task) for task in suite.proxy],
+        "evidence_contract": suite.evidence_contract.model_dump(mode="json") if suite.evidence_contract is not None else None,
     }
     _write_json(path, payload)
     reloaded = json.loads(path.read_text(encoding="utf-8"))
@@ -408,4 +397,5 @@ def _persist_benchmark_suite(path: Path, suite: BenchmarkSuite) -> BenchmarkSuit
         val=[(type(suite.val[0])).model_validate(item) for item in reloaded["val"]] if suite.val else [],
         test=[(type(suite.test[0])).model_validate(item) for item in reloaded["test"]] if suite.test else [],
         proxy=[(type(suite.proxy[0])).model_validate(item) for item in reloaded["proxy"]] if suite.proxy else [],
+        evidence_contract=DomainEvidenceContract.model_validate(reloaded["evidence_contract"]) if reloaded.get("evidence_contract") else None,
     )

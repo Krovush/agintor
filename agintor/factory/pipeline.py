@@ -381,6 +381,12 @@ def _run_factory_pipeline(
             archive_index_path=getattr(summary, "archive_index_path", ""),
             validation_history_path=getattr(summary, "validation_history_path", ""),
             stage_failures_path=getattr(summary, "stage_failures_path", ""),
+            evidence_ledger_path=getattr(summary, "evidence_ledger_path", ""),
+            paired_comparisons_path=getattr(summary, "paired_comparisons_path", ""),
+            promotion_ledger_path=getattr(summary, "promotion_ledger_path", ""),
+            signal_sufficiency_path=getattr(summary, "signal_sufficiency_path", ""),
+            promotion_counts=dict(getattr(summary, "promotion_counts", {}) or {}),
+            decision_counts=dict(getattr(summary, "decision_counts", {}) or {}),
             leaderboard_path=str(leaderboard_path),
             leader_runtime_hash=leader.entry.runtime_hash,
             leader_runtime_dir=str(leader.runtime_dir),
@@ -421,4 +427,5 @@ def _run_factory_pipeline(
         export_bundle_file=RUNTIME_EXPORT_BUNDLE_FILE,
         export_summary_path=str(layout.export_dir / "export_summary.json"),
         summary_path=str(layout.export_dir / "build_summary.json"),
+        signal_sufficiency_path=getattr(summary, "signal_sufficiency_path", ""),
     )

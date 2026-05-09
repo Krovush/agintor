@@ -104,6 +104,81 @@ def test_runtime_host_run_batch_uses_effective_backend_for_dispatch(monkeypatch,
     assert all(invocation.runtime_backend == "docker" for invocation in docker.batch_requests[0][1].invocations)
     assert manifest.runtime_backend == "docker"
 
+
+def test_runtime_host_run_batch_rescores_private_tasks_before_finalization(monkeypatch, tmp_path: Path):
+    host = RuntimeHost(tmp_path / "host", runtime_backend="local")
+    monkeypatch.setattr(host.run_store, "prune_run", lambda manifest: manifest)
+    runtime_profile = _runtime_profile()
+    provider = build_provider(runtime_profile.runtime_provider.name, provider_profile=runtime_profile.runtime_provider)
+    capability_exchange = _capability_exchange()
+    monkeypatch.setattr(host, "inspect", lambda *args, **kwargs: capability_exchange)
+
+    task = BenchmarkTask(
+        task_id="batch.private.number",
+        family="tool",
+        prompt="Return the hidden number.",
+        task_type="number",
+        operations=[],
+        expected=None,
+        private_expected=7,
+        verifier_type="number_exact",
+    )
+    captured: dict[str, object] = {}
+
+    def succeed(runtime_dir, request, **kwargs):
+        invocation = request.invocations[0]
+        payload = request.model_dump(mode="json")
+        captured["invocation"] = invocation
+        captured["payload"] = payload
+        return RuntimeBatchResponse(
+            request_id=request.request_id,
+            capability_exchange=capability_exchange,
+            run_results=[
+                RunResult(
+                    request_id=invocation.request_id,
+                    plan_id="plan.batch.private",
+                    run_id=invocation.run_id,
+                    run_root=invocation.run_root,
+                    attempt_id=invocation.attempt_id,
+                    runtime_hash="runtime-hash",
+                    runtime_backend=invocation.runtime_backend,
+                    task_id=invocation.task.task_id,
+                    seed=invocation.seed,
+                    artifact=7,
+                    verifier_score=0.0,
+                    cost=0.0,
+                    latency=0.1,
+                    faults=0,
+                    run_lifecycle_state="completed",
+                    lifecycle_state="completed",
+                )
+            ],
+            provider_usage={},
+        )
+
+    monkeypatch.setattr(host, "_run_local_batch", succeed)
+
+    response = host.run_batch(
+        "dummy-runtime",
+        [(task, 0)],
+        provider=provider,
+        runtime_profile=runtime_profile,
+    )
+    run = response.run_results[0]
+    invocation = captured["invocation"]
+    payload = captured["payload"]
+    manifest = host.run_store.load_run_manifest(run.run_id)
+
+    assert run.verifier_score == 1.0
+    assert run.run_lifecycle_state == "completed"
+    assert manifest.lifecycle_state == "completed"
+    assert invocation.task.private_expected is None
+    assert invocation.task.verifier_type == "none"
+    assert invocation.authoritative_task.private_expected == 7
+    assert "authoritative_task" not in payload["invocations"][0]
+    assert "private_expected" not in json.dumps(payload, sort_keys=True)
+
+
 def test_runtime_host_run_batch_rejects_mixed_backends_before_launch(monkeypatch, tmp_path: Path):
     host = RuntimeHost(tmp_path / "host", runtime_backend="local")
     runtime_profile = _runtime_profile()

@@ -9,6 +9,7 @@ import typer
 
 from .storage.artifacts import ArtifactAllocator, ArtifactMode, WorkspaceLease
 from .evaluation.benchmarks import load_suite
+from .contracts.verifiers import rescore_private_solve_response
 from .core.exceptions import AgintorError
 from .evaluation.evaluator import RuntimeEvaluator
 from .search.engine import EvolutionEngine
@@ -61,6 +62,10 @@ def _supported_kwargs(callable_obj: object, **kwargs: object) -> dict[str, objec
     except (TypeError, ValueError):
         return {}
     return {key: value for key, value in kwargs.items() if key in params}
+
+
+def _rescore_private_benchmark_response(response, task):
+    return rescore_private_solve_response(response, task)
 
 
 def _build_provider(
@@ -304,6 +309,8 @@ def solve_cmd(
                 provider=provider_impl,
                 runtime_profile=runtime_profile,
             )
+            if task_id:
+                response = _rescore_private_benchmark_response(response, task)
         except Exception:
             if session_store is not None and session_message is not None:
                 _record_failed_session_message(

@@ -26,9 +26,9 @@ from .....contracts import (
     RuntimeResumeRequest,
     RuntimeSolveRequest,
     RuntimeSolveResponse,
-    RuntimeTaskInvocation,
 )
-from ....api import normalize_benchmark_request_id
+from .....contracts.verifiers import rescore_private_run_results
+from ....api import runtime_batch_request_for_tasks
 from .....utils import ensure_directory, stable_hash
 
 from .checkpoint_rewrite import DockerCheckpointRewriteMixin
@@ -157,24 +157,22 @@ class DockerRuntimeExecutor(
             {"task_id": task.task_id, "seed": int(seed)}
             for task, seed in task_runs
         ]
+        request = runtime_batch_request_for_tasks(
+            request_id=f"docker.{stable_hash(runtime_dir, request_id_rows)[:12]}",
+            runtime_backend="docker",
+            task_runs=task_runs,
+        )
         response = self.run_batch_protocol(
             runtime_dir,
-            RuntimeBatchRequest(
-                request_id=f"docker.{stable_hash(runtime_dir, request_id_rows)[:12]}",
-                runtime_backend="docker",
-                invocations=[
-                    RuntimeTaskInvocation(
-                        request_id=normalize_benchmark_request_id(task.task_id, int(seed)),
-                        seed=int(seed),
-                        task=task,
-                    )
-                    for task, seed in task_runs
-                ],
-            ),
+            request,
             provider=provider,
             runtime_profile=runtime_profile,
         )
-        return response.run_results
+        authoritative_tasks = [
+            getattr(invocation, "authoritative_task", None) or invocation.task
+            for invocation in request.invocations
+        ]
+        return rescore_private_run_results(response.run_results, authoritative_tasks)
 
     def inspect(self, runtime_dir: str | Path, request: InspectRequest) -> CapabilityExchange:
         runtime_path = Path(runtime_dir).resolve()

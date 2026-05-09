@@ -5,7 +5,8 @@ from collections import defaultdict
 from typing import Dict, Iterable, List, Mapping, Sequence
 
 from ..contracts import RunResult, SuiteEvaluation, TaskScore
-from ..utils import EPS, lower_cvar, mean, median, safe_log1p_ratio, std_error, variance
+from ..utils import EPS, lower_cvar, mean, median, safe_log1p_ratio, variance
+from .progress_oracle import paired_mean_effect
 
 
 DEFAULT_LAMBDAS = {
@@ -23,6 +24,8 @@ DEFAULT_ROBUSTNESS = {
 
 
 class ScoreCalculator:
+    """Exploratory utility scorer; promotion decisions use the Progress Oracle."""
+
     def __init__(
         self,
         baseline_costs: Mapping[str, float] | None = None,
@@ -83,7 +86,14 @@ class ScoreCalculator:
             faults=[run.faults for run in runs],
         )
 
-    def suite_score(self, runtime_hash: str, task_family_map: Mapping[str, str], runs: Sequence[RunResult]) -> SuiteEvaluation:
+    def suite_score(
+        self,
+        runtime_hash: str,
+        task_family_map: Mapping[str, str],
+        runs: Sequence[RunResult],
+        *,
+        task_metadata: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> SuiteEvaluation:
         grouped: Dict[str, List[RunResult]] = defaultdict(list)
         for run in runs:
             grouped[run.task_id].append(run)
@@ -116,6 +126,7 @@ class ScoreCalculator:
             task_scores=task_scores,
             family_scores=dict(family_scores),
             run_results=list(runs),
+            task_metadata={str(task_id): dict(metadata) for task_id, metadata in dict(task_metadata or {}).items()},
             invalid=invalid,
         )
 
@@ -135,10 +146,6 @@ def estimate_reference_scales(runs: Sequence[RunResult]) -> tuple[Dict[str, floa
 
 
 def mean_improvement(child_scores: Sequence[float], parent_scores: Sequence[float]) -> tuple[float, float, float]:
-    if len(child_scores) != len(parent_scores):
-        raise ValueError("score lengths mismatch")
-    deltas = [c - p for c, p in zip(child_scores, parent_scores)]
-    avg = mean(deltas)
-    se = std_error(deltas)
-    lcb = avg - 1.0 * se
-    return avg, se, lcb
+    effect = paired_mean_effect(child_scores, parent_scores, confidence_z=1.0, singleton_margin=0.0)
+    se = max(0.0, effect.estimate - effect.lower)
+    return effect.estimate, se, effect.lower

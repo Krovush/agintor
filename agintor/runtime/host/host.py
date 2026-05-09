@@ -40,7 +40,9 @@ from ...contracts import (
     RuntimeResumeRequest,
     RuntimeSolveRequest,
     RuntimeSolveResponse,
+    runtime_visible_benchmark_task,
 )
+from ...contracts.verifiers import rescore_private_run_results, rescore_private_solve_response
 from ...utils import ensure_directory, stable_hash
 from ...core.versioning import RUNTIME_CONTRACT_VERSION
 
@@ -72,6 +74,14 @@ class RuntimeHost(FinalizationMixin, LocalProcessMixin, ValidationMixin, ResumeR
         self.sandbox_root = self.artifact_policy.sandbox_root
         self.run_store = RunStore(self.workspace)
         self.container_executor: DockerRuntimeExecutor | None = None
+
+    @staticmethod
+    def _rescore_private_batch_runs(runs: Sequence[RunResult], invocations: Sequence[Any]) -> list[RunResult]:
+        authoritative_tasks = [
+            getattr(invocation, "authoritative_task", None) or invocation.task
+            for invocation in invocations
+        ]
+        return rescore_private_run_results(runs, authoritative_tasks)
 
     def inspect(self, runtime_dir: str | Path, requested_backend: str | None = None) -> CapabilityExchange:
         selected_backend = self._normalize_backend(requested_backend, fallback=self.runtime_backend)
@@ -185,6 +195,7 @@ class RuntimeHost(FinalizationMixin, LocalProcessMixin, ValidationMixin, ResumeR
             raise
 
         validation_errors: list[str] = []
+        rescored_runs_by_key: dict[tuple[str, str], RunResult] = {}
         for evaluation_unit_id, (manifest, attempt, invocations) in grouped_runs.items():
             try:
                 ordered_runs = self._validated_group_run_results(manifest, invocations, response)
@@ -192,10 +203,22 @@ class RuntimeHost(FinalizationMixin, LocalProcessMixin, ValidationMixin, ResumeR
                 self._finalize_execution_unit(manifest, attempt, failure_kind=exc.failure_kind)
                 validation_errors.append(str(exc))
                 continue
+            ordered_runs = self._rescore_private_batch_runs(ordered_runs, invocations)
             self._finalize_execution_unit(manifest, attempt, run_results=ordered_runs)
+            for run in ordered_runs:
+                rescored_runs_by_key[(str(run.run_id), str(run.request_id))] = run
 
         if validation_errors:
             raise RuntimeLoadError("; ".join(validation_errors))
+        if rescored_runs_by_key:
+            response = response.model_copy(
+                update={
+                    "run_results": [
+                        rescored_runs_by_key.get((str(run.run_id), str(run.request_id)), run)
+                        for run in response.run_results
+                    ]
+                }
+            )
         return response
 
     def solve(
@@ -207,6 +230,9 @@ class RuntimeHost(FinalizationMixin, LocalProcessMixin, ValidationMixin, ResumeR
         runtime_profile: object | None = None,
     ) -> RuntimeSolveResponse:
         selected_backend = self._selected_solve_backend(request)
+        authoritative_task = request.authoritative_task or request.task
+        if request.task is not None:
+            request = request.model_copy(update={"task": runtime_visible_benchmark_task(request.task)}, deep=True)
         capability_exchange = self.inspect(runtime_dir, requested_backend=selected_backend)
         evaluation_unit_id = str(request.evaluation_unit_id or request.request_id).strip() or request.request_id
         preflight_request = request.model_copy(
@@ -272,6 +298,8 @@ class RuntimeHost(FinalizationMixin, LocalProcessMixin, ValidationMixin, ResumeR
                     runtime_backend=selected_backend,
                 )
             self._validate_solve_response_contract(request, response, capability_exchange, action="solve")
+            if authoritative_task is not None:
+                response = rescore_private_solve_response(response, authoritative_task)
         except _HostPostLaunchValidationError as exc:
             self._finalize_execution_unit(manifest, attempt, failure_kind=exc.failure_kind)
             raise RuntimeLoadError(str(exc)) from exc

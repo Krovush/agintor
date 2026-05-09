@@ -80,6 +80,7 @@ class RuntimeSolveRequest(BaseModel):
     mode: Literal["benchmark", "user_request"]
     seed: int = 0
     task: Optional["BenchmarkTask"] = None
+    authoritative_task: Optional["BenchmarkTask"] = Field(default=None, exclude=True)
     solve_request: Optional[SolveRequest] = None
     session_seed: Optional[RuntimeSessionSeed] = None
     budget_overrides: Dict[str, Any] = Field(default_factory=dict)
@@ -264,6 +265,7 @@ class RuntimeTaskInvocation(BaseModel):
     runtime_backend: str = ""
     seed: int
     task: BenchmarkTask
+    authoritative_task: Optional[BenchmarkTask] = Field(default=None, exclude=True)
     trace_context: Optional[OpenAITraceContext] = None
 
     @field_validator("episode_kind", mode="before")

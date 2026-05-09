@@ -91,6 +91,12 @@ class BuildSummary(BaseModel):
     archive_index_path: str = ""
     validation_history_path: str = ""
     stage_failures_path: str = ""
+    evidence_ledger_path: str = ""
+    paired_comparisons_path: str = ""
+    promotion_ledger_path: str = ""
+    signal_sufficiency_path: str = ""
+    promotion_counts: Dict[str, int] = Field(default_factory=dict)
+    decision_counts: Dict[str, int] = Field(default_factory=dict)
     leaderboard_path: str = ""
     leader_runtime_hash: str = ""
     leader_runtime_dir: str = ""
@@ -156,3 +162,4 @@ class FactoryMessage(BaseModel):
     deployment_contract_path: str = ""
     export_summary_path: str = ""
     build_summary_path: str = ""
+    signal_sufficiency_path: str = ""

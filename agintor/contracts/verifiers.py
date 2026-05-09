@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+import json
+from pathlib import Path
+from typing import Any, Sequence
 
-from ..contracts import BenchmarkTask
+from .benchmarks import BenchmarkTask
+from .protocol import RunResult, RuntimeSolveResponse
 
 
 def _json_equal(actual: Any, expected: Any) -> bool:
@@ -96,6 +99,136 @@ def verify_task_with_evidence(task: BenchmarkTask, artifact: Any, trace: list[di
 def verify_task(task: BenchmarkTask, artifact: Any, trace: list[dict[str, Any]]) -> float:
     score, _ = verify_task_with_evidence(task, artifact, trace)
     return score
+
+
+def private_verifier_task(task: BenchmarkTask) -> BenchmarkTask | None:
+    if getattr(task, "private_expected", None) is None:
+        return None
+    return task.model_copy(
+        update={"expected": task.private_expected, "private_expected": None},
+        deep=True,
+    )
+
+
+def _trace_rows_from_ref(trace_ref: str | None) -> list[dict[str, Any]]:
+    if not trace_ref:
+        return []
+    inline_rows = RunResult.decode_trace_ref(str(trace_ref))
+    if inline_rows:
+        return inline_rows
+    try:
+        payload = json.loads(Path(str(trace_ref)).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _solve_result_is_failed(response: RuntimeSolveResponse) -> bool:
+    result = response.solve_result
+    status = str(result.status or "").lower()
+    verification_status = str(result.verification_status or "").lower()
+    lifecycle_state = str(result.run_lifecycle_state or "").lower()
+    faults = dict(result.faults or {})
+    if bool(faults.get("hard_invalid", False)):
+        return True
+    if status in {"failed", "cancelled", "controlled_failure"}:
+        return True
+    if verification_status == "failed":
+        return True
+    return lifecycle_state in {"failed", "cancelled", "pruned"}
+
+
+_HOST_SEALED_CHECKERS = {"sealed_private", "sealed_private_evidence"}
+
+
+def _runtime_supplied_checks(checks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(check)
+        for check in checks
+        if str(check.get("checker", "")) not in _HOST_SEALED_CHECKERS
+    ]
+
+
+def rescore_private_solve_response(response: RuntimeSolveResponse, task: BenchmarkTask) -> RuntimeSolveResponse:
+    verifier_task = private_verifier_task(task)
+    if verifier_task is None or _solve_result_is_failed(response):
+        return response
+    trace = _trace_rows_from_ref(response.solve_result.trace_ref)
+    try:
+        score, evidence = verify_task_with_evidence(verifier_task, response.solve_result.artifact, trace)
+    except Exception as exc:
+        score = 0.0
+        evidence = {"reason": f"private verifier failed: {exc}", "verifier_type": verifier_task.verifier_type}
+    check = {
+        "checker": "sealed_private",
+        "passed": score >= 1.0,
+        "verifier_type": verifier_task.verifier_type,
+        "authority": "host",
+    }
+    checks = [*_runtime_supplied_checks(response.solve_result.checks), check]
+    if score >= 1.0:
+        solve_result = response.solve_result.model_copy(
+            update={
+                "status": "verified",
+                "verification_status": "verified",
+                "summary": "The runtime produced a host-verified artifact.",
+                "verified": True,
+                "best_effort": False,
+                "checks": checks,
+            }
+        )
+    else:
+        solve_result = response.solve_result.model_copy(
+            update={
+                "status": "unverified",
+                "verification_status": "exact_verifier_failed",
+                "summary": "The runtime produced an artifact, but the sealed host verifier rejected it.",
+                "verified": False,
+                "best_effort": False,
+                "checks": [
+                    *checks,
+                    {
+                        "checker": "sealed_private_evidence",
+                        "passed": False,
+                        "reason": str(evidence.get("reason", "")),
+                    },
+                ],
+            }
+        )
+    return response.model_copy(update={"solve_result": solve_result})
+
+
+def rescore_private_run_results(runs: Sequence[RunResult], tasks: Sequence[BenchmarkTask]) -> list[RunResult]:
+    private_tasks = {
+        task.task_id: task
+        for task in tasks
+        if private_verifier_task(task) is not None
+    }
+    if not private_tasks:
+        return list(runs)
+    rescored: list[RunResult] = []
+    for run in runs:
+        task = private_tasks.get(run.task_id)
+        verifier_task = private_verifier_task(task) if task is not None else None
+        if verifier_task is None or run.hard_invalid:
+            rescored.append(run)
+            continue
+        try:
+            score, _ = verify_task_with_evidence(verifier_task, run.artifact, run.trace_rows())
+        except Exception as exc:
+            rescored.append(
+                run.model_copy(
+                    update={
+                        "verifier_score": 0.0,
+                        "hard_invalid": True,
+                        "invalid_reason": f"private verifier failed: {exc}",
+                        "failure_kind": run.failure_kind or "private_verifier_failed",
+                    }
+                )
+            )
+            continue
+        rescored.append(run.model_copy(update={"verifier_score": score}))
+    return rescored
 
 
 def run_checker(task: BenchmarkTask, artifact: Any, trace: list[dict[str, Any]], checker: str) -> dict[str, Any]:

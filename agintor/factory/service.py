@@ -100,6 +100,7 @@ class BuiltRuntimeResult:
     export_bundle_file: str
     export_summary_path: str
     summary_path: str
+    signal_sufficiency_path: str = ""
 
 
 def build_runtime_from_goal(

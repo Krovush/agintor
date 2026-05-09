@@ -6,9 +6,11 @@ import pytest
 
 from agintor.core.exceptions import RuntimeLoadError
 from agintor.providers import build_provider
-from agintor.runtime.api import load_solve_request, runtime_solve_request_for_user_request
+from agintor.runtime.api import load_solve_request, runtime_solve_request_for_task, runtime_solve_request_for_user_request
 from agintor.runtime.host import RuntimeHost
 from agintor.contracts import (
+    BenchmarkTask,
+    RunResult,
     RuntimeIsolationPolicy,
     RuntimeSolveRequest,
     RuntimeSolveResponse,
@@ -91,6 +93,58 @@ def test_solve_preflight_allows_builtin_prompt_plan_without_runtime_credentials(
     solved = host.solve("dummy-runtime", request, provider=provider, runtime_profile=runtime_profile)
     assert called["solve"] is True
     assert solved.solve_result.artifact == {"sum": 10, "product": 30}
+
+
+def test_host_solve_rescores_private_benchmark_with_recorded_trace(monkeypatch, tmp_path: Path):
+    host = RuntimeHost(tmp_path / "host", runtime_backend="local")
+    _clear_runtime_provider_env(monkeypatch)
+    runtime_profile = _runtime_profile()
+    provider = build_provider(runtime_profile.runtime_provider.name, provider_profile=runtime_profile.runtime_provider)
+    task = BenchmarkTask(
+        task_id="tool.sealed.trace",
+        family="tool",
+        prompt="Emit the sealed trace event.",
+        task_type="trace",
+        expected=None,
+        private_expected="sealed_trace_event",
+        verifier_type="trace_event",
+    )
+    request = runtime_solve_request_for_task(runtime_backend="local", seed=0, task=task)
+    capability_exchange = _capability_exchange()
+    monkeypatch.setattr(host, "inspect", lambda *args, **kwargs: capability_exchange)
+
+    def local_solve(_runtime_dir, runtime_request, **kwargs):
+        assert runtime_request.task is not None
+        assert runtime_request.task.expected is None
+        assert runtime_request.task.private_expected is None
+        assert runtime_request.task.verifier_type == "none"
+        return RuntimeSolveResponse(
+            request_id=runtime_request.request_id,
+            capability_exchange=capability_exchange,
+            solve_result=SolveResult(
+                request_id=runtime_request.request_id,
+                runtime_hash="hash",
+                mode="benchmark",
+                artifact={"ok": True},
+                status="best_effort",
+                verification_status="best_effort",
+                summary="runtime-visible task had no exact verifier",
+                checks=[],
+                budget={},
+                provider_usage={},
+                faults={"hard_invalid": False},
+                trace_ref=RunResult.encode_trace_ref([{"event": "sealed_trace_event"}]),
+                verified=False,
+                best_effort=True,
+            ),
+        )
+
+    monkeypatch.setattr(host, "_run_local_solve", local_solve)
+
+    solved = host.solve("dummy-runtime", request, provider=provider, runtime_profile=runtime_profile)
+
+    assert solved.solve_result.status == "verified"
+    assert solved.solve_result.verified is True
 
 def test_solve_preflight_allows_local_only_symbol_lookup_with_context_items_without_runtime_credentials(
     monkeypatch,

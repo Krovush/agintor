@@ -53,6 +53,7 @@ from ...contracts import (
     plan_node_allowed_in_prompt_mode_local_only,
     plan_node_requires_default_provider,
     service_action_transport_compatibility,
+    runtime_visible_benchmark_task,
 )
 from ...utils import now_ts, stable_hash
 
@@ -130,6 +131,7 @@ def runtime_solve_request_for_task(
     request_id: str | None = None,
     trace_context: OpenAITraceContext | None = None,
 ) -> RuntimeSolveRequest:
+    runtime_task = runtime_visible_benchmark_task(task)
     normalized_request_id = request_id or normalize_benchmark_request_id(task.task_id, seed)
     if benchmark_task_episode_kind(task) == "transfer_episode":
         episode_kind = trace_context_field(trace_context, "episode_kind") or "transfer_episode"
@@ -149,7 +151,8 @@ def runtime_solve_request_for_task(
         runtime_backend=runtime_backend,
         mode="benchmark",
         seed=int(seed),
-        task=task,
+        task=runtime_task,
+        authoritative_task=task,
         budget_overrides=dict(budget_overrides or {}),
         trace_context=runtime_trace_context(
             trace_context,
@@ -227,6 +230,7 @@ def runtime_batch_request_for_tasks(
     invocations: list[RuntimeTaskInvocation] = []
     for task, raw_seed in task_runs:
         seed = int(raw_seed)
+        runtime_task = runtime_visible_benchmark_task(task)
         duplicate_key = (task.task_id, seed)
         episode_id = str(task.episode_id or "").strip()
         if task.transfer_scored and episode_id:
@@ -257,7 +261,8 @@ def runtime_batch_request_for_tasks(
                 episode_step_index=episode_step_index,
                 runtime_backend=runtime_backend,
                 seed=seed,
-                task=task,
+                task=runtime_task,
+                authoritative_task=task,
                 trace_context=runtime_trace_context(
                     trace_context,
                     request_id=request_key,
