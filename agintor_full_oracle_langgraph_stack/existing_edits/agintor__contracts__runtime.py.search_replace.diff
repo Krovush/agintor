@@ -1,0 +1,30 @@
+*** FILE: agintor/contracts/runtime.py
+*** SEARCH
+class RuntimeManifest(BaseModel):
+    runtime_id: str
+    version: str
+    policy_modules: Dict[str, str]
+    mutable_files: List[str]
+    immutable_manifest: List[str]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+*** REPLACE
+class RuntimeManifest(BaseModel):
+    runtime_id: str
+    version: str
+    policy_modules: Dict[str, str]
+    mutable_files: List[str]
+    immutable_manifest: List[str]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    runtime_kind: Literal["policy_file_v1", "langgraph_spec_v2", "tradingagents_langgraph_v1"] = "policy_file_v1"
+    runtime_spec_ref: str = ""
+    runtime_spec_digest: str = ""
+
+    @model_validator(mode="after")
+    def normalize_runtime_kind(self) -> "RuntimeManifest":
+        metadata = dict(self.metadata or {})
+        runtime_kind = str(metadata.get("runtime_kind") or self.runtime_kind or "policy_file_v1")
+        if runtime_kind in {"langgraph_spec_v2", "tradingagents_langgraph_v1"}:
+            self.runtime_kind = runtime_kind
+            self.runtime_spec_ref = str(metadata.get("runtime_spec_ref") or self.runtime_spec_ref or "runtime_spec.json")
+            self.runtime_spec_digest = str(metadata.get("runtime_spec_digest") or self.runtime_spec_digest or "")
+        return self

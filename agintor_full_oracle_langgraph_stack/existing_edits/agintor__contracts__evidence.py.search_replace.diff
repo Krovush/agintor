@@ -1,0 +1,64 @@
+*** FILE: agintor/contracts/evidence.py
+*** SEARCH
+class DomainKind(str, Enum):
+    GENERATED_TOOL_WORKFLOW = "generated_tool_workflow"
+    STRUCTURED_MEMORY_RETRIEVAL = "structured_memory_retrieval"
+    STATEFUL_SERVICE = "stateful_service"
+    REPO_PATCH = "repo_patch"
+    PREFERENCE = "preference"
+*** REPLACE
+class DomainKind(str, Enum):
+    GENERATED_TOOL_WORKFLOW = "generated_tool_workflow"
+    STRUCTURED_MEMORY_RETRIEVAL = "structured_memory_retrieval"
+    STATEFUL_SERVICE = "stateful_service"
+    REPO_PATCH = "repo_patch"
+    PREFERENCE = "preference"
+    VALIDATION_BACKED_RUNTIME = "validation_backed_runtime"
+    ORACLE_PACKAGE = "oracle_package"
+*** SEARCH
+class EvidenceRecord(EvidenceModel):
+    record_id: str
+    contract_id: str
+    challenge_id: str
+    candidate_runtime_hash: str
+*** REPLACE
+class EvidenceRecord(EvidenceModel):
+    record_id: str
+    contract_id: str
+    challenge_id: str
+    candidate_runtime_hash: str
+    oracle_package_hash: str = ""
+    runtime_spec_digest: str = ""
+    validator_results: list[dict[str, Any]] = Field(default_factory=list)
+    claim_results: list[dict[str, Any]] = Field(default_factory=list)
+*** SEARCH
+class PairedComparison(EvidenceModel):
+    comparison_id: str
+    parent_runtime_hash: str
+    child_runtime_hash: str
+    contract_id: str = ""
+*** REPLACE
+class PairedComparison(EvidenceModel):
+    comparison_id: str
+    parent_runtime_hash: str
+    child_runtime_hash: str
+    contract_id: str = ""
+    oracle_package_hash: str = ""
+    parent_spec_digest: str = ""
+    child_spec_digest: str = ""
+    public_view_hash: str = ""
+    sealed_view_hash: str = ""
+    evaluator_policy_hash: str = ""
+    claim_results: list[dict[str, Any]] = Field(default_factory=list)
+*** SEARCH
+class PromotionDecision(EvidenceModel):
+    decision_id: str
+    decision_type: PromotionDecisionType | str
+    contract_id: str = ""
+*** REPLACE
+class PromotionDecision(EvidenceModel):
+    decision_id: str
+    decision_type: PromotionDecisionType | str
+    contract_id: str = ""
+    oracle_package_hash: str = ""
+    runtime_spec_digest: str = ""

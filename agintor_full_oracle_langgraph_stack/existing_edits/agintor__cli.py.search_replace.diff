@@ -1,0 +1,64 @@
+*** FILE: agintor/cli.py
+*** SEARCH
+from .contracts import RuntimeSessionMessage
+*** REPLACE
+from .contracts import RuntimeSessionMessage
+from .oracle.package_io import load_oracle_package
+from .oracle.qa import qa_oracle_package
+from .runtime.langgraph.compiler import RuntimeSpecCompiler
+from .contracts import baseline_langgraph_runtime_spec
+*** SEARCH
+@app.command("init-runtime")
+def init_runtime_cmd(destination: str, force: bool = typer.Option(False, "--force"), write_suite: Optional[str] = typer.Option(None, "--write-demo-suite")) -> None:
+    path = init_runtime_dir(destination, force=force)
+*** REPLACE
+@app.command("init-runtime")
+def init_runtime_cmd(
+    destination: str,
+    force: bool = typer.Option(False, "--force"),
+    write_suite: Optional[str] = typer.Option(None, "--write-demo-suite"),
+    runtime_kind: str = typer.Option("policy_file_v1", "--runtime-kind"),
+) -> None:
+    if runtime_kind in {"langgraph_spec_v2", "tradingagents_langgraph_v1"}:
+        spec = baseline_langgraph_runtime_spec(runtime_id=f"runtime.{Path(destination).name}")
+        path = RuntimeSpecCompiler().compile_to_directory(spec, destination, force=force)
+        payload = {"runtime_dir": str(path), "runtime_kind": runtime_kind, "runtime_spec_digest": spec.spec_digest}
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    path = init_runtime_dir(destination, force=force)
+*** SEARCH
+@app.command("eval")
+def eval_cmd(
+*** REPLACE
+@app.command("oracle-qa")
+def oracle_qa_cmd(package_dir: str) -> None:
+    package = load_oracle_package(package_dir)
+    report = qa_oracle_package(package)
+    typer.echo(json.dumps(report.model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True))
+
+
+@app.command("inspect-oracle")
+def inspect_oracle_cmd(package_dir: str, public: bool = typer.Option(False, "--public")) -> None:
+    package = load_oracle_package(package_dir)
+    payload = package.model_dump(mode="json", exclude_none=True)
+    if public:
+        from .contracts import oracle_public_projection
+        payload = oracle_public_projection(package)
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("eval")
+def eval_cmd(
+*** SEARCH
+    runtime_backend: str = typer.Option("local", "--runtime-backend"),
+) -> None:
+*** REPLACE
+    runtime_backend: str = typer.Option("local", "--runtime-backend"),
+    oracle_package: Optional[str] = typer.Option(None, "--oracle-package"),
+) -> None:
+*** SEARCH
+            **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
+        )
+*** REPLACE
+            **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile, oracle_package=oracle_package),
+        )

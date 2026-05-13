@@ -1,0 +1,202 @@
+*** FILE: agintor/evaluation/evaluator.py
+*** SEARCH
+from ..contracts import (
+    BenchmarkTask,
+    DomainEvidenceContract,
+    EvaluationStageResult,
+    EvidenceRecord,
+*** REPLACE
+from ..contracts import (
+    BenchmarkTask,
+    DomainEvidenceContract,
+    EvaluationStageResult,
+    EvidenceRecord,
+    OraclePackage,
+    ValidatorResult,
+    ClaimResult,
+    oracle_tasks_by_partition,
+    oracle_runtime_visible_tasks_by_partition,
+*** SEARCH
+from ..utils import ensure_directory, stable_hash
+*** REPLACE
+from ..utils import ensure_directory, stable_hash
+from ..oracle.qa import OracleQARunner
+from ..oracle.package_io import load_oracle_package
+*** SEARCH
+        evidence_contract: DomainEvidenceContract | None = None,
+    ) -> None:
+*** REPLACE
+        evidence_contract: DomainEvidenceContract | None = None,
+        oracle_package: OraclePackage | str | Path | None = None,
+    ) -> None:
+*** SEARCH
+        self.evidence_contract = evidence_contract or getattr(suite, "evidence_contract", None)
+*** REPLACE
+        self.oracle_package = load_oracle_package(oracle_package) if isinstance(oracle_package, (str, Path)) else oracle_package
+        self.evidence_contract = (
+            evidence_contract
+            or (self.oracle_package.evidence_contract if self.oracle_package is not None else None)
+            or getattr(suite, "evidence_contract", None)
+        )
+        self.oracle_qa_runner = OracleQARunner()
+*** SEARCH
+    def _stage4_ledger_paths(self) -> dict[str, str]:
+        return {
+*** REPLACE
+    def _oracle_identity_payload(self) -> dict[str, str]:
+        if self.oracle_package is None:
+            return {}
+        return {
+            "oracle_package_hash": self.oracle_package.package_hash,
+            "oracle_public_view_hash": self.oracle_package.public_view_hash,
+            "oracle_sealed_view_hash": self.oracle_package.sealed_view_hash,
+            "runtime_spec_digest": self.oracle_package.runtime_spec_digest,
+        }
+
+    def _stage4_ledger_paths(self) -> dict[str, str]:
+        return {
+*** SEARCH
+        if not suite_tasks and not required and not self.evidence_contract.leakage_policy:
+            return {}, None
+*** REPLACE
+        if self.oracle_package is not None:
+            qa = self.oracle_qa_runner.run(self.oracle_package)
+            status["oracle_package_qa"] = "pass" if qa.passed else "fail"
+            if not qa.passed:
+                return status, "unknown"
+        if not suite_tasks and not required and not self.evidence_contract.leakage_policy:
+            return status, None
+*** SEARCH
+            digest_payload = {
+                "role": role,
+                "runtime_hash": evaluation.runtime_hash,
+*** REPLACE
+            digest_payload = {
+                "role": role,
+                "runtime_hash": evaluation.runtime_hash,
+                **self._oracle_identity_payload(),
+*** SEARCH
+                candidate_runtime_hash=evaluation.runtime_hash,
+                parent_runtime_hash=decision.parent_runtime_hash,
+*** REPLACE
+                candidate_runtime_hash=evaluation.runtime_hash,
+                oracle_package_hash=self._oracle_identity_payload().get("oracle_package_hash", ""),
+                runtime_spec_digest=self._oracle_identity_payload().get("runtime_spec_digest", ""),
+                parent_runtime_hash=decision.parent_runtime_hash,
+*** SEARCH
+                    }
+                ],
+                authority_level="A4" if not run.hard_invalid else "A0",
+*** REPLACE
+                    }
+                ],
+                validator_results=[
+                    {
+                        "validator_id": validator.validator_id,
+                        "family_id": validator.family_id,
+                        "claim_ids": list(validator.claim_ids),
+                        "authority_ceiling": validator.authority_ceiling,
+                    }
+                    for validator in (self.oracle_package.validator_specs if self.oracle_package is not None else [])
+                ],
+                claim_results=[
+                    {
+                        "claim_id": claim.claim_id,
+                        "minimum_authority": claim.minimum_authority,
+                        "criticality": claim.criticality,
+                    }
+                    for claim in (self.oracle_package.claim_graph.claims if self.oracle_package is not None else [])
+                ],
+                authority_level="A4" if not run.hard_invalid else "A0",
+*** SEARCH
+            decision_id = stable_hash(
+                "promotion-decision",
+                comparison.comparison_id,
+*** REPLACE
+            oracle_identity = self._oracle_identity_payload()
+            if oracle_identity:
+                comparison = comparison.model_copy(update=oracle_identity, deep=True)
+            decision_id = stable_hash(
+                "promotion-decision",
+                comparison.comparison_id,
+*** SEARCH
+            task_key = tuple(
+                stable_hash(sealed_benchmark_task_payload(task) if isinstance(task, BenchmarkTask) else (task).model_dump())
+                for task in tasks_override
+            )
+*** REPLACE
+            task_key = tuple(
+                stable_hash(sealed_benchmark_task_payload(task) if isinstance(task, BenchmarkTask) else (task).model_dump())
+                for task in tasks_override
+            )
+        if self.oracle_package is not None and tasks_override is None:
+            tasks_override = oracle_tasks_by_partition(self.oracle_package, partition)
+            task_key = tuple(stable_hash(sealed_benchmark_task_payload(task)) for task in tasks_override)
+*** SEARCH
+    def _stage4_result_from_decision(
+        self,
+        decision: PromotionDecision,
+*** REPLACE
+    def staged_evaluate_runtime_pair(
+        self,
+        parent_dir: str | Path,
+        child_dir: str | Path,
+        objective: ObjectiveSpec,
+        *,
+        mutation_action_ids: Sequence[str] = (),
+    ) -> list[EvaluationStageResult]:
+        parent_eval = self.evaluate_runtime(parent_dir, partition="train", seeds=self.reference_profile.evaluation.full_train_seeds, use_cache=False)
+        child_eval = self.evaluate_runtime(child_dir, partition="train", seeds=self.reference_profile.evaluation.full_train_seeds, use_cache=False)
+        decision = self._stage4_decision(parent_eval, child_eval)
+        if mutation_action_ids and decision.progress_signal is not None:
+            decision = decision.model_copy(update={"reason_codes": [*decision.reason_codes, *[f"mutation_action:{action_id}" for action_id in mutation_action_ids]]}, deep=True)
+        decision = self._write_stage4_ledgers(parent_eval, child_eval, decision)
+        return [self._stage4_result_from_decision(decision, epsilon_full=self.epsilon_full, child_eval=child_eval, reason_prefix="spec runtime pair progress decision")]
+
+    def _stage4_result_from_decision(
+        self,
+        decision: PromotionDecision,
+*** SEARCH
+from ..oracle.qa import OracleQARunner
+from ..oracle.package_io import load_oracle_package
+*** REPLACE
+from ..oracle.qa import OracleQARunner
+from ..oracle.package_io import load_oracle_package
+from .oracle_runner import OracleEvaluationRunner
+*** SEARCH
+        self.oracle_qa_runner = OracleQARunner()
+*** REPLACE
+        self.oracle_qa_runner = OracleQARunner()
+        self.oracle_evaluation_runner = OracleEvaluationRunner()
+*** SEARCH
+            record = EvidenceRecord(
+*** REPLACE
+            oracle_validator_results = []
+            oracle_claim_results = []
+            if self.oracle_package is not None:
+                try:
+                    oracle_validator_results, oracle_claim_results = self.oracle_evaluation_runner.evaluate_run(self.oracle_package, run)
+                except Exception:
+                    oracle_validator_results, oracle_claim_results = [], []
+            record = EvidenceRecord(
+*** SEARCH
+                validator_results=[
+                    {
+                        "validator_id": validator.validator_id,
+                        "family_id": validator.family_id,
+                        "claim_ids": list(validator.claim_ids),
+                        "authority_ceiling": validator.authority_ceiling,
+                    }
+                    for validator in (self.oracle_package.validator_specs if self.oracle_package is not None else [])
+                ],
+                claim_results=[
+                    {
+                        "claim_id": claim.claim_id,
+                        "minimum_authority": claim.minimum_authority,
+                        "criticality": claim.criticality,
+                    }
+                    for claim in (self.oracle_package.claim_graph.claims if self.oracle_package is not None else [])
+                ],
+*** REPLACE
+                validator_results=[result.model_dump(mode="json", exclude_none=True) for result in oracle_validator_results],
+                claim_results=[result.model_dump(mode="json", exclude_none=True) for result in oracle_claim_results],

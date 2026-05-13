@@ -1,0 +1,625 @@
+{
+  "bundle": "agintor_full_oracle_langgraph_stack",
+  "created_for": "Implement original LangGraph and Oracle Refactor Plan pass 1 plus optimized consent/evidence take",
+  "existing_edit_count": 13,
+  "file_count": 123,
+  "files": [
+    {
+      "bytes": 2737,
+      "path": "README.md",
+      "sha256": "4de08e2cd840f767ca7216e09b992bae6cdabff2edc92c72f2373ad13e91eb6a"
+    },
+    {
+      "bytes": 5614,
+      "path": "__pycache__/apply_search_replace.cpython-313.pyc",
+      "sha256": "dbd5e57bbbb0913379ab5dcfd981b7ebc29863ee14e8f0cf61b8a63cb8b8491b"
+    },
+    {
+      "bytes": 3311,
+      "path": "apply_search_replace.py",
+      "sha256": "2d0f34c4eb2b59fda88517d59ea736479bd3808a35e9fe707a1b288d45e37e18"
+    },
+    {
+      "bytes": 2729,
+      "path": "existing_edits/agintor__cli.py.search_replace.diff",
+      "sha256": "64885b4f06546758a65e94842cfbdf3dbcd4d97a2359274a44cf50cc82b46297"
+    },
+    {
+      "bytes": 627,
+      "path": "existing_edits/agintor__contracts____init__.py.search_replace.diff",
+      "sha256": "6443f3bf8097d43b1d96de4e1cd2446665afd895f05aea0860ca2db01138ebdf"
+    },
+    {
+      "bytes": 2099,
+      "path": "existing_edits/agintor__contracts__evidence.py.search_replace.diff",
+      "sha256": "d2f3809999aa698bdf6e891dd22eb6cf0fc6258420ddc25bd81261436dd056e0"
+    },
+    {
+      "bytes": 1316,
+      "path": "existing_edits/agintor__contracts__runtime.py.search_replace.diff",
+      "sha256": "00f9ea6f1fc6fb9efe34b88da383ebe5a7ed295e8af050213cfd6407c0e1f193"
+    },
+    {
+      "bytes": 1001,
+      "path": "existing_edits/agintor__contracts__search.py.search_replace.diff",
+      "sha256": "962134ab1db291098198919d3d7c6f28f70f8c8e4b35d535f93952033d105d60"
+    },
+    {
+      "bytes": 9009,
+      "path": "existing_edits/agintor__evaluation__evaluator.py.search_replace.diff",
+      "sha256": "85b4beef8cbda96c4ec39305576b712a6163630e62e5f49d048cd20e6eec6b05"
+    },
+    {
+      "bytes": 1958,
+      "path": "existing_edits/agintor__evaluation__progress_oracle.py.search_replace.diff",
+      "sha256": "5ff84009a6b6a8c6a86421a2f2bf6d9d35ca7ab7a187706ce194b1b403a7fb6c"
+    },
+    {
+      "bytes": 1695,
+      "path": "existing_edits/agintor__factory__export.py.search_replace.diff",
+      "sha256": "28b7309174e2ea717d41782952176544f5788b4db239d2f1a78588a80db90935"
+    },
+    {
+      "bytes": 617,
+      "path": "existing_edits/agintor__factory__planning.py.search_replace.diff",
+      "sha256": "6d5bd66c0fc8e70f50d502327abf9a25ae73f8e74b9fcff4ed9df9acec1b8048"
+    },
+    {
+      "bytes": 2113,
+      "path": "existing_edits/agintor__runtime__loader.py.search_replace.diff",
+      "sha256": "764618939414909290f73f38884d3741f0d17a849498ce6dcd1d9ce201c18c8c"
+    },
+    {
+      "bytes": 1560,
+      "path": "existing_edits/agintor__search__archive.py.search_replace.diff",
+      "sha256": "dcb0803b4027afbdaaa2f8c2580c004ec94b2ed21252bbc0e097fb07b6e9969c"
+    },
+    {
+      "bytes": 3251,
+      "path": "existing_edits/agintor__search__engine.py.search_replace.diff",
+      "sha256": "e0940f03638b8d77ae46cf22c572bb36a241dcf9927f5ef053655f297a32849a"
+    },
+    {
+      "bytes": 505,
+      "path": "existing_edits/pyproject.toml.search_replace.diff",
+      "sha256": "5cb9a144e3d7dc1b0fcf8fd9e4f47cbdbdef06b9d55b7fd944e3fefac7cd4767"
+    },
+    {
+      "bytes": 26124,
+      "path": "new_files/agintor/contracts/__pycache__/oracle.cpython-313.pyc",
+      "sha256": "327e34f462927b6adc6560f84a9bc2505577f9f1d6ee7591ea979a4f5cee7583"
+    },
+    {
+      "bytes": 19242,
+      "path": "new_files/agintor/contracts/__pycache__/runtime_spec.cpython-313.pyc",
+      "sha256": "8e4e2fd09c32aa60ec5b57baed68551625100fc74dde740cf52b0e94e6a11b77"
+    },
+    {
+      "bytes": 21090,
+      "path": "new_files/agintor/contracts/__pycache__/spec_actions.cpython-313.pyc",
+      "sha256": "2c7495204ff48bfe66e69751d76211976045a38383618f63f4e0b2669abea581"
+    },
+    {
+      "bytes": 18776,
+      "path": "new_files/agintor/contracts/oracle.py",
+      "sha256": "3a813c9267b8113c592e2542aa4a52947ac5cf6ed024a9d02ca1c08f9a3b6d81"
+    },
+    {
+      "bytes": 13483,
+      "path": "new_files/agintor/contracts/runtime_spec.py",
+      "sha256": "32717c6aef1153091322dcb8005bec98607d1a33dfb2e91d1ebfd737f6459a5d"
+    },
+    {
+      "bytes": 14038,
+      "path": "new_files/agintor/contracts/spec_actions.py",
+      "sha256": "0fdf87b53e511e44445e1391a4308da57fae17f385290544bb0708d929a00b42"
+    },
+    {
+      "bytes": 5613,
+      "path": "new_files/agintor/evaluation/__pycache__/oracle_runner.cpython-313.pyc",
+      "sha256": "cba722cce78f5fd02dd08746ea1bc248d123b790c0a6d7973c7abbcfdf3f9df3"
+    },
+    {
+      "bytes": 4209,
+      "path": "new_files/agintor/evaluation/oracle_runner.py",
+      "sha256": "a8e34f5cba74874f3bb7d645f423f1a82738406d95399e94b2471572687523cb"
+    },
+    {
+      "bytes": 344,
+      "path": "new_files/agintor/integrations/tradingagents/__init__.py",
+      "sha256": "0f62cf77e50dfba1172a8586c3b7caf4f5d9c9e9627e4d3201626de3ff31a17e"
+    },
+    {
+      "bytes": 426,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/__init__.cpython-313.pyc",
+      "sha256": "c947db562358afd5d2480090008a5978b2c77645fa48e8f48bfe18c94e8550a6"
+    },
+    {
+      "bytes": 2480,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/action_mapper.cpython-313.pyc",
+      "sha256": "71f666ebe6f38b0de0a79d3f85b6831bae5d332d667264ee111c7b97ffde91a6"
+    },
+    {
+      "bytes": 4191,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/adapter.cpython-313.pyc",
+      "sha256": "1e55d27b46e1c37e4da25e2d79c9e7da300c295e2c4ab692a30636bdb84e7693"
+    },
+    {
+      "bytes": 1171,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/compiler.cpython-313.pyc",
+      "sha256": "c6fc01bfeaaa426becb84dc606d9207f6b6b12e03aff1e9c35ffb5d19ddae832"
+    },
+    {
+      "bytes": 2766,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/data_snapshots.cpython-313.pyc",
+      "sha256": "cd3544c3ec1c33dac40e2ad42a4923ee195aa786ebc6bfe6770f7ad464936e45"
+    },
+    {
+      "bytes": 3095,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/ledgers.cpython-313.pyc",
+      "sha256": "329f0a76349fbb41acbefc11a5008e3cceb6f27b6039b20fad91f7efceee2cfd"
+    },
+    {
+      "bytes": 356,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/outcome_oracle_family.cpython-313.pyc",
+      "sha256": "dadd8992bb9994a66e4f67eee65b42c0f4c38961391d8c856e5c59f9b202a8de"
+    },
+    {
+      "bytes": 1528,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/spec.cpython-313.pyc",
+      "sha256": "da8af37fa8039af8ebecccbfb2a18ee2759724736cac59c2c90c5c9f2896c013"
+    },
+    {
+      "bytes": 1775,
+      "path": "new_files/agintor/integrations/tradingagents/__pycache__/validators.cpython-313.pyc",
+      "sha256": "9c998de7a7a5f978be2432ff7c4e5262d93c5cca1e15f343913fbf85d2896e8c"
+    },
+    {
+      "bytes": 1470,
+      "path": "new_files/agintor/integrations/tradingagents/action_mapper.py",
+      "sha256": "29324977c6796848b1d00fd4b71dc4d830a87eef25358071bc9fb6c72bbc77a3"
+    },
+    {
+      "bytes": 3817,
+      "path": "new_files/agintor/integrations/tradingagents/adapter.py",
+      "sha256": "0d712868add5ef435d6a7a6a82247f7d35b3e2dcd90dcc49496eb8f65102e862"
+    },
+    {
+      "bytes": 579,
+      "path": "new_files/agintor/integrations/tradingagents/compiler.py",
+      "sha256": "6a1f259b3fa7554d3ed4fcf92a72c45a9dd0a04e0803130c7535f196b66f6078"
+    },
+    {
+      "bytes": 1379,
+      "path": "new_files/agintor/integrations/tradingagents/data_snapshots.py",
+      "sha256": "663a2d2613bb0bbc17cea3e966ff8e6d2a053d847d07f5c0456bee0c021a6cb3"
+    },
+    {
+      "bytes": 1726,
+      "path": "new_files/agintor/integrations/tradingagents/ledgers.py",
+      "sha256": "32a4797af37e109068581384705cc4684b3288ed2d6af89ca50bdf6db607aa09"
+    },
+    {
+      "bytes": 112,
+      "path": "new_files/agintor/integrations/tradingagents/outcome_oracle_family.py",
+      "sha256": "cb6f782a02b8d7b2c5d8bebaf3ae0ef601ac1898f1c98f9b13884550a0dfb7cc"
+    },
+    {
+      "bytes": 754,
+      "path": "new_files/agintor/integrations/tradingagents/spec.py",
+      "sha256": "904498f9bbe4eaeaa8056904a7a47165e5980d7d45e20fa9be0b33caa49e79ed"
+    },
+    {
+      "bytes": 1002,
+      "path": "new_files/agintor/integrations/tradingagents/validators.py",
+      "sha256": "24c6d556cb703a29781b0f5ed819ab53c04db419ab67e618aedd4189aaa41b47"
+    },
+    {
+      "bytes": 260,
+      "path": "new_files/agintor/oracle/__init__.py",
+      "sha256": "e06375f45fbbe4d0f40ebd4aebc2623aff988228f20263c894918cd20c8bcd27"
+    },
+    {
+      "bytes": 362,
+      "path": "new_files/agintor/oracle/__pycache__/__init__.cpython-313.pyc",
+      "sha256": "4288ed8a310708737999e66bbea2cdf4541584e82900cf27a901e9bc00299066"
+    },
+    {
+      "bytes": 22190,
+      "path": "new_files/agintor/oracle/__pycache__/compiler.cpython-313.pyc",
+      "sha256": "c663770576cdffeb8af870c058e40f5c39a604ec88125cb838a10baff30a793c"
+    },
+    {
+      "bytes": 6599,
+      "path": "new_files/agintor/oracle/__pycache__/compiler_graph.cpython-313.pyc",
+      "sha256": "19841ad82a1008389f376447b81b23921b41397e43017b8ef3d88e3ce50bc59e"
+    },
+    {
+      "bytes": 3572,
+      "path": "new_files/agintor/oracle/__pycache__/package_io.cpython-313.pyc",
+      "sha256": "503971f2a24fe3123ab8e9c4942062e7ea4946b3583f7686df6d6f935bc2c96b"
+    },
+    {
+      "bytes": 2590,
+      "path": "new_files/agintor/oracle/__pycache__/projections.cpython-313.pyc",
+      "sha256": "ae787676efe1c433badc85a7406a8e1d7061fc4448276d0205d24330bdcc9a26"
+    },
+    {
+      "bytes": 9684,
+      "path": "new_files/agintor/oracle/__pycache__/qa.cpython-313.pyc",
+      "sha256": "451700110f4fe678759b0dff56973bc9d27b1789c533969eb70b729d41ad1f02"
+    },
+    {
+      "bytes": 3187,
+      "path": "new_files/agintor/oracle/__pycache__/subagents.cpython-313.pyc",
+      "sha256": "763a1f6b2c17495c4b5ef4d1ad4ee98ec30622566eef44f6686419e7dd89e7ba"
+    },
+    {
+      "bytes": 6400,
+      "path": "new_files/agintor/oracle/__pycache__/validator_registry.cpython-313.pyc",
+      "sha256": "f1b3c3fb3f72c75519bbc1273cfed95ae72097cbe1870cd40a8be6e76b358af2"
+    },
+    {
+      "bytes": 17152,
+      "path": "new_files/agintor/oracle/compiler.py",
+      "sha256": "5e8af55bfae22ff078f2b66c7b31f9bdc9924df2c98bec8f550ace31ee657219"
+    },
+    {
+      "bytes": 3796,
+      "path": "new_files/agintor/oracle/compiler_graph.py",
+      "sha256": "194bce7b24551b8a725037722bdcebcbc0a3860de81680ee04997ee58b7c45a1"
+    },
+    {
+      "bytes": 1268,
+      "path": "new_files/agintor/oracle/families/__init__.py",
+      "sha256": "5b6c41cdb42a0a730b9d0885b506de890218483f23c511dc04509dba2b350b26"
+    },
+    {
+      "bytes": 1424,
+      "path": "new_files/agintor/oracle/families/__pycache__/__init__.cpython-313.pyc",
+      "sha256": "ad8b59fa80de440bed091dd334f8447198624f715344cac739c83ecc6566a680"
+    },
+    {
+      "bytes": 3547,
+      "path": "new_files/agintor/oracle/families/__pycache__/consent_proof.cpython-313.pyc",
+      "sha256": "4b12b6dcde6753f675e555c9e66d37aaafc4204d8570db474232b83483d8939a"
+    },
+    {
+      "bytes": 2183,
+      "path": "new_files/agintor/oracle/families/__pycache__/exact_private_answer.cpython-313.pyc",
+      "sha256": "7989edf6600afb123d49ebdfe406099d11f091f846cfc4c462042e57d551892f"
+    },
+    {
+      "bytes": 2893,
+      "path": "new_files/agintor/oracle/families/__pycache__/factual_grounded.cpython-313.pyc",
+      "sha256": "5b9b59d4d18d880a3119b3e33d15c1421c7a3e0d2e58baf685412776e0624247"
+    },
+    {
+      "bytes": 2155,
+      "path": "new_files/agintor/oracle/families/__pycache__/human_audit.cpython-313.pyc",
+      "sha256": "f495863fd704a44592b65b7b2b2799fb2f4bf97d978b5d64c23d9c313f744891"
+    },
+    {
+      "bytes": 2454,
+      "path": "new_files/agintor/oracle/families/__pycache__/inspect_runner.cpython-313.pyc",
+      "sha256": "faebab7999b3b8177d62d0a1adff5d3862896de35398f8574fc2595866f60ad8"
+    },
+    {
+      "bytes": 2259,
+      "path": "new_files/agintor/oracle/families/__pycache__/openai_eval_runner.cpython-313.pyc",
+      "sha256": "d6e468e6f6f23311b68fa35e6b01209821de75d914496fa88a366e49d3df692f"
+    },
+    {
+      "bytes": 2700,
+      "path": "new_files/agintor/oracle/families/__pycache__/pairwise_preference.cpython-313.pyc",
+      "sha256": "ed291ab870e807af058fe6e13874aaffb37b2c7e3e85a59734a3ae6458ef2af8"
+    },
+    {
+      "bytes": 3026,
+      "path": "new_files/agintor/oracle/families/__pycache__/repo_patch.cpython-313.pyc",
+      "sha256": "3ce9c0ee1b4189a00db70dede8638dad1b9603425103f04d64d9be77011ce2bc"
+    },
+    {
+      "bytes": 3838,
+      "path": "new_files/agintor/oracle/families/__pycache__/schema_artifact.cpython-313.pyc",
+      "sha256": "9cfb1b81a043a0b11f949d88e38b2f1187d5ee42a06ad42e5107f09a708bddfb"
+    },
+    {
+      "bytes": 3081,
+      "path": "new_files/agintor/oracle/families/__pycache__/stateful_service.cpython-313.pyc",
+      "sha256": "6420a71f9f181639b99001c9831575c1da7b451ecd1a60bb69ab62df6a5bd1ee"
+    },
+    {
+      "bytes": 2732,
+      "path": "new_files/agintor/oracle/families/__pycache__/trace_state.cpython-313.pyc",
+      "sha256": "274767c1d4e795b841add35f315733fb23d68b1648109647f33ed4749a83519f"
+    },
+    {
+      "bytes": 3349,
+      "path": "new_files/agintor/oracle/families/__pycache__/trading_outcome.cpython-313.pyc",
+      "sha256": "c752d82de2bdca2f8f07afbbb9b7c0ba4227d29ea044af639b8a9ebfa53b37f0"
+    },
+    {
+      "bytes": 2027,
+      "path": "new_files/agintor/oracle/families/consent_proof.py",
+      "sha256": "bad97ad26c9c7e3d86571a2d952f918c0f7c64d3d04ed9147626406fa1f3f2d8"
+    },
+    {
+      "bytes": 1525,
+      "path": "new_files/agintor/oracle/families/exact_private_answer.py",
+      "sha256": "14b0002601a3fd7ffd79d918348062aa7e63c9824b53139832a7d9449c7b9f1f"
+    },
+    {
+      "bytes": 1845,
+      "path": "new_files/agintor/oracle/families/factual_grounded.py",
+      "sha256": "9f0710de96d56abc3010444cec4350973ff6c324db57463472a720c57e225dd8"
+    },
+    {
+      "bytes": 1442,
+      "path": "new_files/agintor/oracle/families/human_audit.py",
+      "sha256": "9c753075e8424c7ca1e5dc26fa1f829588f3da5f1a6eff416c3f0b692a18cee1"
+    },
+    {
+      "bytes": 1543,
+      "path": "new_files/agintor/oracle/families/inspect_runner.py",
+      "sha256": "e312c2c28a623c5c54f84aef79ad636c2dde5958deaae8aaa45b407f9c6f9cb3"
+    },
+    {
+      "bytes": 1506,
+      "path": "new_files/agintor/oracle/families/openai_eval_runner.py",
+      "sha256": "9e0cbf21e3440714ada70c734b7ec85432f8b4832ca0e36fbd18b2a3908deff3"
+    },
+    {
+      "bytes": 1741,
+      "path": "new_files/agintor/oracle/families/pairwise_preference.py",
+      "sha256": "16e84b1f38383e99d479d497e2d35a8fb3aadeaea4110d15122afada0f7841fc"
+    },
+    {
+      "bytes": 2073,
+      "path": "new_files/agintor/oracle/families/repo_patch.py",
+      "sha256": "76dd9d7ed0936d46dc45d6d156812c157d6465d44815f1d32a3fbcdc9d777409"
+    },
+    {
+      "bytes": 2452,
+      "path": "new_files/agintor/oracle/families/schema_artifact.py",
+      "sha256": "7b6ee2950ca7132538e531d9d01e928fa5f8758f0849d22fbac22529ad3c2ab9"
+    },
+    {
+      "bytes": 2025,
+      "path": "new_files/agintor/oracle/families/stateful_service.py",
+      "sha256": "38b1d181c40d93a44dd885f8a702aafe073836c531c1263b8ca62cda06bad89b"
+    },
+    {
+      "bytes": 1783,
+      "path": "new_files/agintor/oracle/families/trace_state.py",
+      "sha256": "0c22041c81fc2a0520e7b96928dc498024a6e9f58dfe7d52a06979687601b715"
+    },
+    {
+      "bytes": 2365,
+      "path": "new_files/agintor/oracle/families/trading_outcome.py",
+      "sha256": "16fb4bd5deac8655f7bc59d72083d92b0860e785eaeabef75e625fc03c3bb3d4"
+    },
+    {
+      "bytes": 2292,
+      "path": "new_files/agintor/oracle/package_io.py",
+      "sha256": "9c4adcdc31d90b9a7e95ebeee6d82ce6e8484a0f487162a17128410bc80f2984"
+    },
+    {
+      "bytes": 1787,
+      "path": "new_files/agintor/oracle/projections.py",
+      "sha256": "461577f7a0f7a6a03e64425388512e4994e1f127ce6c652d217cba8dc69f2336"
+    },
+    {
+      "bytes": 5629,
+      "path": "new_files/agintor/oracle/qa.py",
+      "sha256": "8271aa31505bbe932d8a345e19514465f143a051025e79ab1af9fb2840d5f8d1"
+    },
+    {
+      "bytes": 2130,
+      "path": "new_files/agintor/oracle/subagents.py",
+      "sha256": "91223738bb2634262afce764afdb7833f24dc3fb8e413052d5f8c8b5ad874729"
+    },
+    {
+      "bytes": 3892,
+      "path": "new_files/agintor/oracle/validator_registry.py",
+      "sha256": "824f13ab9290300169b1167a1e489b28c07d3ef7868a61f2896ede9cff305764"
+    },
+    {
+      "bytes": 262,
+      "path": "new_files/agintor/runtime/langgraph/__init__.py",
+      "sha256": "8a7ccc09dc3adcd94d745eb3fafc4ff9a8802709085e38ae49fe25fa6e434284"
+    },
+    {
+      "bytes": 375,
+      "path": "new_files/agintor/runtime/langgraph/__pycache__/__init__.cpython-313.pyc",
+      "sha256": "e662edbf78d2083932bf65a737ed8acbd3e282f83ab376022620878b0b6da8c2"
+    },
+    {
+      "bytes": 4303,
+      "path": "new_files/agintor/runtime/langgraph/__pycache__/adapters.cpython-313.pyc",
+      "sha256": "d0168e57921d4c623eff7bc2fd398c824a082e03c3af6013b8f9a54e502b4041"
+    },
+    {
+      "bytes": 1591,
+      "path": "new_files/agintor/runtime/langgraph/__pycache__/checkpointing.cpython-313.pyc",
+      "sha256": "f2a1a023d3eb4742adb6dd533bc4544f31b5b9151208dbc259d150a01cfa7f86"
+    },
+    {
+      "bytes": 9655,
+      "path": "new_files/agintor/runtime/langgraph/__pycache__/compiler.cpython-313.pyc",
+      "sha256": "de63bc57bcf232b51459a95c8941faa6d80a35b7ad65562739aab65d905794af"
+    },
+    {
+      "bytes": 1791,
+      "path": "new_files/agintor/runtime/langgraph/__pycache__/entrypoint.cpython-313.pyc",
+      "sha256": "03781c44e24d40958c2b804f85f57a4441123db3acd88b87ac6c38fda27e38c6"
+    },
+    {
+      "bytes": 8814,
+      "path": "new_files/agintor/runtime/langgraph/__pycache__/operation_service.cpython-313.pyc",
+      "sha256": "3a47c57a813081f563b7a9cb4817e3233f231f957923aa8536bdd4d9e3961863"
+    },
+    {
+      "bytes": 1905,
+      "path": "new_files/agintor/runtime/langgraph/__pycache__/state.cpython-313.pyc",
+      "sha256": "ad408515c35d9615e8ea766b6a758f4217bd1ead916fc76dc20c83d501642a5a"
+    },
+    {
+      "bytes": 2550,
+      "path": "new_files/agintor/runtime/langgraph/adapters.py",
+      "sha256": "9c6358c233bc2cf350c618985f6e77a97d6baff3d0b51e87e1df01007f8ca573"
+    },
+    {
+      "bytes": 984,
+      "path": "new_files/agintor/runtime/langgraph/checkpointing.py",
+      "sha256": "674d12087ab548ddfde1218ce3a5cef0bd0b54e3638327cdd40ae92968488f02"
+    },
+    {
+      "bytes": 6935,
+      "path": "new_files/agintor/runtime/langgraph/compiler.py",
+      "sha256": "2a593fdb19b797c9a50c4d2fc844c515e5e3d3bd24a73224c5ce71bc4881344d"
+    },
+    {
+      "bytes": 907,
+      "path": "new_files/agintor/runtime/langgraph/entrypoint.py",
+      "sha256": "2330a8c2376dadc914a09b1a825e45934fc6aa9618ec2d3265d353086f467fad"
+    },
+    {
+      "bytes": 5682,
+      "path": "new_files/agintor/runtime/langgraph/operation_service.py",
+      "sha256": "770415748c4dd02a1e9cd9753becc118af93d7a14ebec7593a32875161e6e36d"
+    },
+    {
+      "bytes": 1032,
+      "path": "new_files/agintor/runtime/langgraph/state.py",
+      "sha256": "bf13818c6bc751086b5d816edca09124ea107626827021bf54171f5c8ef1b194"
+    },
+    {
+      "bytes": 7731,
+      "path": "new_files/agintor/search/__pycache__/spec_mutator.cpython-313.pyc",
+      "sha256": "b4d6b60da893154ed0b2c99e3e02264411a20acbd3ffdc9913752a60d09712d0"
+    },
+    {
+      "bytes": 5968,
+      "path": "new_files/agintor/search/spec_mutator.py",
+      "sha256": "7a27bc951b890bc0daa70c5e8223a6cf7aea127ba6f081ef5d38879fd86c782a"
+    },
+    {
+      "bytes": 523,
+      "path": "new_files/agintor/templates/baseline_runtime_v2/README.md",
+      "sha256": "f6045a2631f2cc3284785b000baecc63908a07bfc31bb027ba45493d2c806382"
+    },
+    {
+      "bytes": 1735,
+      "path": "new_files/tests/__pycache__/test_langgraph_runtime_compiler.cpython-313.pyc",
+      "sha256": "486d5e98675f1dc84e36ed6aa4cda9e4c753677273cd6bad1141f1f3a2e968f9"
+    },
+    {
+      "bytes": 1448,
+      "path": "new_files/tests/__pycache__/test_oracle_evaluation_runner.cpython-313.pyc",
+      "sha256": "70af04db318c1d6a3f60fee6864c72cd257f729f11cf4389638a351de37d3319"
+    },
+    {
+      "bytes": 1262,
+      "path": "new_files/tests/__pycache__/test_oracle_package.cpython-313.pyc",
+      "sha256": "a90a1cb48b8dd15da5fffc2e017321081d9b7afae681e03523220232288e40e6"
+    },
+    {
+      "bytes": 1188,
+      "path": "new_files/tests/__pycache__/test_oracle_public_projection.cpython-313.pyc",
+      "sha256": "c4768525a00313e69f379342d8fa377c3f441e66272469549f025c186b56867b"
+    },
+    {
+      "bytes": 1211,
+      "path": "new_files/tests/__pycache__/test_oracle_sealed_eval.cpython-313.pyc",
+      "sha256": "442f9e037bf4cecd687148fec5d48ffdbf103103eb5fd15b757ad4235b13378f"
+    },
+    {
+      "bytes": 1337,
+      "path": "new_files/tests/__pycache__/test_runtime_spec.cpython-313.pyc",
+      "sha256": "395273f991b1cdb4478c00df5ed47b4595c68749faafd407475b505c9b23c82a"
+    },
+    {
+      "bytes": 1299,
+      "path": "new_files/tests/__pycache__/test_spec_actions.cpython-313.pyc",
+      "sha256": "adab6142e90bd88c195d4fa6eb272f6da4a0882f384b9bcbb3f4758cda197d05"
+    },
+    {
+      "bytes": 1510,
+      "path": "new_files/tests/__pycache__/test_spec_mutator.cpython-313.pyc",
+      "sha256": "f431bbf63e01858dc307e84f79ad00bddea5dea20381f9d29059ae519e6df423"
+    },
+    {
+      "bytes": 1575,
+      "path": "new_files/tests/__pycache__/test_trading_oracle_package.cpython-313.pyc",
+      "sha256": "868dce22f8be208ba7520898083e954dc3214cbf40fb8bddf979a9616ad1b802"
+    },
+    {
+      "bytes": 1189,
+      "path": "new_files/tests/__pycache__/test_tradingagents_adapter.cpython-313.pyc",
+      "sha256": "3e6a1bb6b6714af3f9a18c41619de4be820df00089925ace9501f7f69bc5d3b2"
+    },
+    {
+      "bytes": 873,
+      "path": "new_files/tests/__pycache__/test_validator_registry.cpython-313.pyc",
+      "sha256": "a132355c6a0ccb14331b2185153185a7abc8615ec6bd5b42d925697e4dd28c85"
+    },
+    {
+      "bytes": 987,
+      "path": "new_files/tests/test_langgraph_runtime_compiler.py",
+      "sha256": "f8b6e6b06a611e717f2e31d52edf5ab1c1b470f59c73d85f58b1162b5e8200e1"
+    },
+    {
+      "bytes": 782,
+      "path": "new_files/tests/test_oracle_evaluation_runner.py",
+      "sha256": "c8b88971d10dc0dcdafab3cbf04762529119d06f497c64a4f0473372e2dc6fb7"
+    },
+    {
+      "bytes": 719,
+      "path": "new_files/tests/test_oracle_package.py",
+      "sha256": "be2a7b771b9f5bbf140330b6185fa92294d576ad5144cf493aecbaeeeadadb65"
+    },
+    {
+      "bytes": 747,
+      "path": "new_files/tests/test_oracle_public_projection.py",
+      "sha256": "cb07084aa3f4c7acc52d79af9a33b0e22d53d4d320adf36ae5bfb11d6b6b147b"
+    },
+    {
+      "bytes": 753,
+      "path": "new_files/tests/test_oracle_sealed_eval.py",
+      "sha256": "32ab1134edf0c6504aed5865daf3bb6764da3f961c543f8a0989c51a70a5d46e"
+    },
+    {
+      "bytes": 660,
+      "path": "new_files/tests/test_runtime_spec.py",
+      "sha256": "67ffadc1b82f24f23d8cef2aff4b87359e5846a15e4f693e66534bd32da2bd95"
+    },
+    {
+      "bytes": 767,
+      "path": "new_files/tests/test_spec_actions.py",
+      "sha256": "16e913148e45df6565483f54b78a062f976d6de3582fd9f8dfc18223d1e6f241"
+    },
+    {
+      "bytes": 890,
+      "path": "new_files/tests/test_spec_mutator.py",
+      "sha256": "15d711066ca187b9f8a227c22bf849f1549e034d355cb0b29c304bdc0be8dc32"
+    },
+    {
+      "bytes": 612,
+      "path": "new_files/tests/test_trading_oracle_package.py",
+      "sha256": "e64e4417f47df4588f27036ddd1d66fa0b3978537d0f888356f13d40bf029bb1"
+    },
+    {
+      "bytes": 625,
+      "path": "new_files/tests/test_tradingagents_adapter.py",
+      "sha256": "37a894246767b188e8e206baf2772736744947e0b1fef4a6b729ce7de7018eb4"
+    },
+    {
+      "bytes": 408,
+      "path": "new_files/tests/test_validator_registry.py",
+      "sha256": "91b71e878d25d328dd5460b74b637933ac235380fc40b0a9a4b701428a1bb7db"
+    }
+  ],
+  "new_file_count": 107,
+  "purpose": "Full RuntimeSpec / OraclePackage / LangGraph / evaluator / search patch bundle for Krovush/agintor"
+}

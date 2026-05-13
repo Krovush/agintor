@@ -1,0 +1,54 @@
+*** FILE: agintor/search/engine.py
+*** SEARCH
+from ..search.mutators import HeuristicPatchMutator, MutationContext, ProviderPatchMutator
+*** REPLACE
+from ..search.mutators import HeuristicPatchMutator, MutationContext, ProviderPatchMutator
+from ..search.spec_mutator import HeuristicSpecActionMutator, ProviderSpecActionMutator, SpecMutationContext
+*** SEARCH
+        if normalized_mutator == "heuristic":
+            self.mutator = HeuristicPatchMutator()
+        elif normalized_mutator in {"provider", "openai"}:
+*** REPLACE
+        self.spec_mutator = HeuristicSpecActionMutator()
+        self.provider_spec_mutator = None
+        if normalized_mutator in {"spec", "spec-heuristic", "heuristic-spec"}:
+            self.mutator = HeuristicPatchMutator()
+            self.spec_mutator = HeuristicSpecActionMutator()
+        elif normalized_mutator == "heuristic":
+            self.mutator = HeuristicPatchMutator()
+        elif normalized_mutator in {"provider", "openai"}:
+*** SEARCH
+            self.mutator = ProviderPatchMutator(provider)
+*** REPLACE
+            self.mutator = ProviderPatchMutator(provider)
+            self.provider_spec_mutator = ProviderSpecActionMutator(provider)
+*** SEARCH
+            candidate = self.mutator.mutate(context)
+            stage_results, child_dir = self.evaluator.staged_evaluate(parent_dir, candidate, objective)
+*** REPLACE
+            parent_loaded_runtime = self._load_runtime(parent_dir)
+            if str(getattr(parent_loaded_runtime.manifest, "runtime_kind", "policy_file_v1")) in {"langgraph_spec_v2", "tradingagents_langgraph_v1"}:
+                spec_candidate = (self.provider_spec_mutator or self.spec_mutator).mutate(
+                    SpecMutationContext(
+                        objective=objective.name,
+                        touched_scope=scope,
+                        runtime_dir=parent_dir,
+                        workspace=self.workspace / "spec_candidates",
+                        seed=step,
+                        predictor_summaries=self._predictor_summaries(),
+                        failing_train_traces=self._failing_train_traces(parent_eval),
+                        exemplars=self._exemplars(objective.name),
+                        oracle_package_hash=str(getattr(self.evaluator.oracle_package, "package_hash", "") or ""),
+                    )
+                )
+                candidate = None
+                stage_results = self.evaluator.staged_evaluate_runtime_pair(parent_dir, spec_candidate.child_runtime_dir, objective, mutation_action_ids=[action.action_id for action in spec_candidate.actions])
+                child_dir = spec_candidate.child_runtime_dir
+            else:
+                candidate = self.mutator.mutate(context)
+                stage_results, child_dir = self.evaluator.staged_evaluate(parent_dir, candidate, objective)
+*** SEARCH
+                evidence_digest=str(decision_attr(promotion_decision, "evidence_digest", "") or ""),
+*** REPLACE
+                evidence_digest=str(decision_attr(promotion_decision, "evidence_digest", "") or ""),
+                oracle_package_hash=str(decision_attr(promotion_decision, "oracle_package_hash", "") or getattr(getattr(self.evaluator, "oracle_package", None), "package_hash", "") or ""),

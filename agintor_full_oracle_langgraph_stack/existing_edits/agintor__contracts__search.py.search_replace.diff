@@ -1,0 +1,37 @@
+*** FILE: agintor/contracts/search.py
+*** SEARCH
+class EvolutionHistoryRow(BaseModel):
+    step: int
+    objective: str
+*** REPLACE
+class EvolutionHistoryRow(BaseModel):
+    step: int
+    objective: str
+    oracle_package_hash: str = ""
+    parent_spec_digest: str = ""
+    child_spec_digest: str = ""
+    mutation_action_ids: list[str] = Field(default_factory=list)
+*** SEARCH
+class ArchiveEntry(SearchContractModel):
+    code_hash: str
+    runtime_hash: str
+    scores: Dict[str, float]
+*** REPLACE
+class ArchiveEntry(SearchContractModel):
+    code_hash: str
+    runtime_hash: str
+    spec_digest: str = ""
+    parent_spec_digest: str = ""
+    oracle_package_hash: str = ""
+    mutation_action_ids: List[str] = Field(default_factory=list)
+    scores: Dict[str, float]
+*** SEARCH
+class ArchiveRecord(SearchContractModel):
+    objective: str
+    key: str
+*** REPLACE
+class ArchiveRecord(SearchContractModel):
+    objective: str
+    key: str
+    oracle_package_hash: str = ""
+    spec_digest: str = ""

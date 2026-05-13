@@ -1,0 +1,15 @@
+*** FILE: pyproject.toml
+*** SEARCH
+[project.optional-dependencies]
+hosted = ["openai>=2,<3", "anthropic>=0.84.0"]
+openai = ["openai>=2,<3"]
+minimax = ["anthropic>=0.84.0"]
+dev = ["pytest>=8", "pytest-cov>=4"]
+*** REPLACE
+[project.optional-dependencies]
+hosted = ["openai>=2,<3", "anthropic>=0.84.0"]
+openai = ["openai>=2,<3"]
+minimax = ["anthropic>=0.84.0"]
+langgraph = ["langgraph>=0.2,<1", "langchain>=0.3,<1", "langsmith>=0.1,<1"]
+inspect = ["inspect-ai>=0.3,<1"]
+dev = ["pytest>=8", "pytest-cov>=4"]

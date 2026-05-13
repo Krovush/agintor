@@ -1,0 +1,23 @@
+*** FILE: agintor/contracts/__init__.py
+*** SEARCH
+from .runtime import *  # noqa: F401,F403
+from .branches import *  # noqa: F401,F403
+from .side_effects import *  # noqa: F401,F403
+*** REPLACE
+from .runtime import *  # noqa: F401,F403
+from .runtime_spec import *  # noqa: F401,F403
+from .spec_actions import *  # noqa: F401,F403
+from .oracle import *  # noqa: F401,F403
+from .branches import *  # noqa: F401,F403
+from .side_effects import *  # noqa: F401,F403
+*** SEARCH
+    PromotionDecision,
+):
+*** REPLACE
+    PromotionDecision,
+    RuntimeSpec,
+    SpecAction,
+    OraclePackage,
+    ValidatorResult,
+    ClaimResult,
+):
