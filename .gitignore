@@ -17,6 +17,7 @@ __pycache__/
 OpenAI API Key.txt
 MiniMax API Key.txt
 /openai_api_traces/
+/TradingAgents/
 /agintor/templates/baseline_runtime/
 /Dev Docs/
 /implementation_workstreams/
