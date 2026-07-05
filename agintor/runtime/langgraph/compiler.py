@@ -10,14 +10,14 @@ from ...contracts import DeploymentContract, RuntimeIsolationPolicy, RuntimeMani
 from ...core.versioning import RUNTIME_CONTRACT_VERSION
 from ...runtime.sdk import bundle_runtime_kernel
 from ...utils import ensure_directory
-from .executor import GENERATED_APP_FILE, RUNTIME_SPEC_FILE, runtime_spec_code_hash
+from .executor import GENERATED_APP_FILE, RUNTIME_SPEC_FILE, runtime_spec_code_hash, validate_pass1_supported_subset
 
 
 class RuntimeSpecCompiler:
     """Factory/export compiler for spec-backed runtimes."""
 
     def compile_to_directory(self, runtime_spec: RuntimeSpec | dict[str, Any], destination: str | Path, *, force: bool = False) -> Path:
-        spec = validate_runtime_spec_payload(runtime_spec)
+        spec = validate_pass1_supported_subset(validate_runtime_spec_payload(runtime_spec))
         destination = Path(destination)
         if destination.exists():
             if force:
