@@ -76,6 +76,7 @@ class FactoryChatStore:
         runtime_provider: str,
         agintor_provider: str,
         runtime_backend: str,
+        runtime_kind: str = "policy_modules",
         runtime_profile_hash: str = "",
         chat_id: str | None = None,
     ) -> FactoryChatIdentity:
@@ -95,6 +96,7 @@ class FactoryChatStore:
             runtime_provider=str(runtime_provider or "").strip(),
             agintor_provider=str(agintor_provider or "").strip(),
             runtime_backend=str(runtime_backend or "local").strip(),
+            runtime_kind=str(runtime_kind or "policy_modules").strip(),
             runtime_profile_hash=str(runtime_profile_hash or "").strip(),
             created_at=now_ts(),
             message_count=0,

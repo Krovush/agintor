@@ -258,6 +258,20 @@ def _is_frontier_source(source: Any) -> bool:
     return "frontier" in str(source)
 
 
+def _oracle_hash_mismatch(comparison: PairedComparison) -> bool:
+    common_hash = str(comparison.oracle_package_hash or "").strip()
+    parent_hash = str(comparison.parent_oracle_package_hash or "").strip() or common_hash
+    child_hash = str(comparison.child_oracle_package_hash or "").strip() or common_hash
+    return bool(parent_hash or child_hash) and parent_hash != child_hash
+
+
+def _evaluation_identity(evaluation: SuiteEvaluation) -> Mapping[str, Any]:
+    identity = dict(getattr(evaluation, "evaluation_identity", {}) or {})
+    if identity:
+        return identity
+    return dict(evaluation.task_metadata.get("__agintor_evaluation_identity__", {}) or {})
+
+
 class ProgressOracle:
     def __init__(self, config: ProgressOracleConfig | None = None) -> None:
         self.config = config or ProgressOracleConfig()
@@ -351,18 +365,30 @@ class ProgressOracle:
             health_floor_status = {"verifier": "pass", "leakage": "pass"} if contract is None else {}
         if leakage_status is None:
             leakage_status = "clean" if contract is None else "unknown"
+        parent_identity = _evaluation_identity(parent)
+        child_identity = _evaluation_identity(child)
+        parent_oracle_hash = str(parent_identity.get("oracle_package_hash", "") or "")
+        child_oracle_hash = str(child_identity.get("oracle_package_hash", "") or "")
+        common_oracle_hash = parent_oracle_hash if parent_oracle_hash == child_oracle_hash else ""
         evidence_digest = stable_hash(
             parent.runtime_hash,
             child.runtime_hash,
             list(challenge_ids),
             [axis.model_dump(mode="json") for axis in axis_deltas.values()],
             efficiency_deltas,
+            parent_identity,
+            child_identity,
         )
         return PairedComparison(
             comparison_id=stable_hash("paired-comparison", parent.runtime_hash, child.runtime_hash, challenge_ids, evidence_digest)[:24],
             parent_runtime_hash=parent.runtime_hash,
             child_runtime_hash=child.runtime_hash,
             contract_id=contract.contract_id if contract is not None else "implicit_suite_progress_contract",
+            oracle_package_hash=common_oracle_hash,
+            parent_oracle_package_hash=parent_oracle_hash,
+            child_oracle_package_hash=child_oracle_hash,
+            parent_runtime_spec_digest=str(parent_identity.get("runtime_spec_digest", "") or ""),
+            child_runtime_spec_digest=str(child_identity.get("runtime_spec_digest", "") or ""),
             challenge_ids=challenge_ids,
             axis_deltas={axis.axis_id: axis for axis in axis_deltas.values()},
             protected_axis_bounds={axis.axis_id: axis.lower for axis in axis_deltas.values()},
@@ -388,6 +414,13 @@ class ProgressOracle:
         frontier_evidence_available: bool = True,
     ) -> PromotionDecision:
         reason_codes: list[str] = []
+        if _oracle_hash_mismatch(comparison):
+            return self._decision(
+                comparison,
+                "quarantine",
+                contract=contract,
+                reason_codes=["oracle_package_hash_mismatch"],
+            )
         if contract is None:
             return self._decision(comparison, "abstain", reason_codes=["missing_domain_evidence_contract"])
         unsupported_comparators = _unsupported_quality_comparators(contract)
@@ -735,6 +768,11 @@ class ProgressOracle:
             parent_runtime_hash=comparison.parent_runtime_hash,
             child_runtime_hash=comparison.child_runtime_hash,
             contract_id=contract.contract_id if contract is not None else comparison.contract_id,
+            oracle_package_hash=comparison.oracle_package_hash,
+            parent_oracle_package_hash=comparison.parent_oracle_package_hash,
+            child_oracle_package_hash=comparison.child_oracle_package_hash,
+            parent_runtime_spec_digest=comparison.parent_runtime_spec_digest,
+            child_runtime_spec_digest=comparison.child_runtime_spec_digest,
             decision_type=decision_type,
             capability_signal=CapabilitySignal(
                 quality_delta_estimate=quality.estimate,
@@ -790,6 +828,11 @@ class ProgressOracle:
             winning_runtime_hash=winning_runtime_hash,
             parent_runtime_hash=comparison.parent_runtime_hash,
             child_runtime_hash=comparison.child_runtime_hash,
+            oracle_package_hash=comparison.oracle_package_hash,
+            parent_oracle_package_hash=comparison.parent_oracle_package_hash,
+            child_oracle_package_hash=comparison.child_oracle_package_hash,
+            parent_runtime_spec_digest=comparison.parent_runtime_spec_digest,
+            child_runtime_spec_digest=comparison.child_runtime_spec_digest,
             comparison_ref=comparison.comparison_id,
             progress_signal_ref=progress_signal.signal_id,
             progress_signal=progress_signal,
@@ -813,6 +856,11 @@ class ProgressOracle:
             parent_runtime_hash=comparison.parent_runtime_hash,
             child_runtime_hash=comparison.child_runtime_hash,
             contract_id=decision.contract_id,
+            oracle_package_hash=comparison.oracle_package_hash,
+            parent_oracle_package_hash=comparison.parent_oracle_package_hash,
+            child_oracle_package_hash=comparison.child_oracle_package_hash,
+            parent_runtime_spec_digest=comparison.parent_runtime_spec_digest,
+            child_runtime_spec_digest=comparison.child_runtime_spec_digest,
             decision_type=decision.decision_type,
             quality_delta_estimate=decision.quality_delta_estimate or 0.0,
             quality_delta_lower=decision.quality_delta_lower or 0.0,

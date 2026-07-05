@@ -262,7 +262,11 @@ class RuntimeSessionStore:
                 or result.post_message_predictor_snapshot is not None
             )
         )
-        if message.lifecycle_state == "completed" and not (
+        requires_carryover_artifacts = True
+        if response is not None:
+            exchange = response.capability_exchange
+            requires_carryover_artifacts = bool(exchange.resume_support or exchange.checkpoint_support)
+        if message.lifecycle_state == "completed" and requires_carryover_artifacts and not (
             result_has_carryover_artifacts
             or message.boundary_state_path
             or message.long_term_graph_path

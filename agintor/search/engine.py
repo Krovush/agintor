@@ -13,6 +13,7 @@ from ..evaluation.benchmarks import BenchmarkSuite
 from ..search.crossover import crossover_runtime
 from ..evaluation.evaluator import RuntimeEvaluator
 from ..search.mutators import HeuristicPatchMutator, MutationContext, ProviderPatchMutator
+from ..search.spec_mutator import HeuristicSpecActionMutator, ProviderSpecActionMutator, SpecMutationContext
 from ..learning.predictors import DecisionFamilyModelBank
 from ..providers import ModelProvider
 from ..factory.prompt_builder import METHOD_CONTRACTS
@@ -142,6 +143,7 @@ class EvolutionEngine:
         artifact_mode: str | ArtifactMode | None = None,
         sandbox_root: Path | None = None,
         trace_context: OpenAITraceContext | None = None,
+        oracle_package: Any | None = None,
     ) -> None:
         self.suite = suite
         self.workspace = Path(workspace)
@@ -158,6 +160,17 @@ class EvolutionEngine:
         self.predictors = DecisionFamilyModelBank()
         self.archive = QualityDiversityArchive()
         self.scheduler = ScopeScheduler()
+        baseline_runtime = self._load_runtime(self.baseline_runtime_dir)
+        self._baseline_manifest = baseline_runtime.manifest
+        runtime_kind = str(getattr(self._baseline_manifest, "runtime_kind", "policy_modules") or "policy_modules")
+        self.spec_backed = runtime_kind in {
+            "langgraph_spec",
+            "tradingagents_langgraph",
+        }
+        if oracle_package is not None and not self.spec_backed:
+            raise ValueError(
+                f"oracle package scoring requires a spec-backed runtime; runtime_kind={runtime_kind!r} is not supported"
+            )
         self.evaluator = RuntimeEvaluator(
             suite,
             self.workspace / "evaluator",
@@ -171,11 +184,18 @@ class EvolutionEngine:
             artifact_mode=self.artifact_policy.mode,
             sandbox_root=self.artifact_policy.sandbox_root,
             trace_context=trace_context,
+            oracle_package=oracle_package,
         )
         self.objectives = objective_specs_from_suite(suite, partition="train")
         self.history: list[EvolutionHistoryRow] = []
         normalized_mutator = mutator_type.strip().lower()
-        if normalized_mutator == "heuristic":
+        if normalized_mutator in {"heuristic-spec", "spec", "heuristic"} and self.spec_backed:
+            self.mutator = HeuristicSpecActionMutator()
+        elif normalized_mutator in {"provider-spec", "openai-spec", "provider"} and self.spec_backed:
+            if getattr(provider, "provider_name", "local") == "local":
+                raise ValueError("provider spec mutator requires a hosted provider, not the local deterministic provider")
+            self.mutator = ProviderSpecActionMutator(provider)
+        elif normalized_mutator == "heuristic":
             self.mutator = HeuristicPatchMutator()
         elif normalized_mutator in {"provider", "openai"}:
             if getattr(provider, "provider_name", "local") == "local":
@@ -185,7 +205,6 @@ class EvolutionEngine:
             raise ValueError(f"unknown mutator_type {mutator_type}")
         self.best_val_score = float("-inf")
         self.validation_history: list[dict[str, Any]] = []
-        self._baseline_manifest = self._load_runtime(self.baseline_runtime_dir).manifest
         self.phase_remaining = dict(self.runtime_profile.evolution.phase_budgets)
         self.pass_rate_caps = dict(self.runtime_profile.evaluation.pass_rate_caps)
         self.stage_counters = {
@@ -216,6 +235,13 @@ class EvolutionEngine:
 
     def _interface_diff_mask(self, runtime_dir: Path) -> str:
         runtime = self._load_runtime(runtime_dir)
+        runtime_kind = str(getattr(runtime.manifest, "runtime_kind", "policy_modules") or "policy_modules")
+        if runtime_kind in {"langgraph_spec", "tradingagents_langgraph"}:
+            baseline_spec = getattr(self._load_runtime(self.baseline_runtime_dir), "runtime_spec", None)
+            runtime_spec = getattr(runtime, "runtime_spec", None)
+            if baseline_spec is None or runtime_spec is None:
+                return "0000"
+            return "0000" if baseline_spec.spec_digest == runtime_spec.spec_digest else "1111"
         bits: list[str] = []
         for interface in ["top", "mem", "tool", "ctl"]:
             baseline_rel = self._baseline_manifest.policy_modules[interface].split(":", 1)[0]
@@ -299,6 +325,8 @@ class EvolutionEngine:
             scope=[],
             mutable_ast_nodes=baseline_runtime.mutable_ast_nodes,
             interface_diff_mask=self._interface_diff_mask(self.baseline_runtime_dir),
+            oracle_package_hash=str(getattr(baseline_runtime.manifest, "oracle_package_hash", "") or ""),
+            runtime_spec_digest=str(getattr(baseline_runtime.manifest, "runtime_spec_digest", "") or ""),
         )
 
     def _objective_by_name(self, name: str) -> ObjectiveSpec:
@@ -486,6 +514,8 @@ class EvolutionEngine:
                 self.evaluator.tighten_thresholds(stage_name)
 
     def _maybe_crossover(self, parent_record, objective_name: str, scope: Sequence[str], seed: int) -> Path:
+        if getattr(self, "spec_backed", False):
+            return Path(parent_record.runtime_dir)
         donor_pool = [record for record in self._progress_island(objective_name) if record.entry.runtime_hash != parent_record.entry.runtime_hash]
         if not donor_pool:
             return Path(parent_record.runtime_dir)
@@ -573,20 +603,44 @@ class EvolutionEngine:
                     seeds=self.runtime_profile.evaluation.full_train_seeds,
                     use_cache=False,
                 )
-            context = MutationContext(
-                objective=objective.name,
-                touched_scope=scope,
-                runtime_dir=parent_dir,
-                workspace=self.workspace / "candidates",
-                runtime_profile=self.runtime_profile,
-                predictor_summaries=self._predictor_summaries(),
-                failing_train_traces=self._failing_train_traces(parent_eval),
-                exemplars=self._exemplars(objective.name),
-                seed=step,
-                trace_context=self.trace_context,
-            )
-            candidate = self.mutator.mutate(context)
-            stage_results, child_dir = self.evaluator.staged_evaluate(parent_dir, candidate, objective)
+            mutation_action_ids: list[str] = []
+            if getattr(self, "spec_backed", False):
+                spec_context = SpecMutationContext(
+                    objective=objective.name,
+                    touched_scope=scope,
+                    runtime_dir=parent_dir,
+                    workspace=self.workspace / "candidates",
+                    seed=step,
+                    predictor_summaries=self._predictor_summaries(),
+                    failing_train_traces=self._failing_train_traces(parent_eval),
+                    exemplars=self._exemplars(objective.name),
+                    oracle_package_hash=str(parent_record.entry.oracle_package_hash or ""),
+                    evidence_digest=str(parent_record.entry.evidence_digest or ""),
+                )
+                spec_candidate = self.mutator.mutate(spec_context)
+                mutation_action_ids = [action.action_id for action in spec_candidate.actions]
+                stage_results, child_dir = self.evaluator.staged_evaluate_runtime_pair(
+                    parent_dir,
+                    spec_candidate.child_runtime_dir,
+                    objective,
+                    scope=scope,
+                    mutation_action_ids=mutation_action_ids,
+                )
+            else:
+                context = MutationContext(
+                    objective=objective.name,
+                    touched_scope=scope,
+                    runtime_dir=parent_dir,
+                    workspace=self.workspace / "candidates",
+                    runtime_profile=self.runtime_profile,
+                    predictor_summaries=self._predictor_summaries(),
+                    failing_train_traces=self._failing_train_traces(parent_eval),
+                    exemplars=self._exemplars(objective.name),
+                    seed=step,
+                    trace_context=self.trace_context,
+                )
+                candidate = self.mutator.mutate(context)
+                stage_results, child_dir = self.evaluator.staged_evaluate(parent_dir, candidate, objective)
             self._record_stage_pass_rates(stage_results)
             inserted_keys: list[str] = []
             child_hash = None
@@ -623,13 +677,16 @@ class EvolutionEngine:
                         archive_kind=route.archive_name,
                         promotion_decision=promotion_decision,
                         objectives=self._archive_objectives_for_promotion(stage4.suite_evaluation, promotion_decision, objective),
+                        oracle_package_hash=str(decision_attr(promotion_decision, "oracle_package_hash", "") or ""),
+                        runtime_spec_digest=str(decision_attr(promotion_decision, "child_runtime_spec_digest", "") or ""),
+                        mutation_action_ids=mutation_action_ids,
                     )
                     accepted_flag = bool(inserted_keys)
                 if decision_type in {"reject", "quarantine"}:
                     self.scheduler.note_hard_failure(scope)
                 if accepted_flag:
                     accepted += 1
-                    if decision_type in PROGRESS_COUNTERFACTUAL_DECISIONS:
+                    if decision_type in PROGRESS_COUNTERFACTUAL_DECISIONS and not getattr(self, "spec_backed", False):
                         singleton, pairwise = self._counterfactual_contributions(parent_dir, child_dir, scope)
                         self.scheduler.update_counterfactuals(scope, singleton, pairwise)
                 else:
@@ -668,6 +725,9 @@ class EvolutionEngine:
                 progress_signal_ref=decision_attr(promotion_decision, "progress_signal_ref"),
                 evidence_contract_id=str(decision_attr(promotion_decision, "contract_id", "") or ""),
                 evidence_digest=str(decision_attr(promotion_decision, "evidence_digest", "") or ""),
+                oracle_package_hash=str(decision_attr(promotion_decision, "oracle_package_hash", "") or ""),
+                runtime_spec_digest=str(decision_attr(promotion_decision, "child_runtime_spec_digest", "") or ""),
+                mutation_action_ids=mutation_action_ids,
                 allowed_optimizer_updates=list(decision_attr(promotion_decision, "allowed_optimizer_updates", []) or []),
                 forbidden_optimizer_updates=list(decision_attr(promotion_decision, "forbidden_optimizer_updates", []) or []),
                 improved_axes=list(decision_attr(progress_signal, "improved_axes", []) or []),

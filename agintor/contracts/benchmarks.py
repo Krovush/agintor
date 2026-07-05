@@ -121,6 +121,7 @@ class SuiteEvaluation(BaseModel):
     family_scores: Dict[str, Dict[str, float]]
     run_results: List[RunResult]
     task_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    evaluation_identity: Dict[str, Any] = Field(default_factory=dict)
     invalid: bool = False
 
 

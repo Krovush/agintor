@@ -24,10 +24,18 @@ from .runtime.api import (
 from .factory.service import apply_factory_message
 from .runtime.host import RuntimeHost
 from .runtime.loader import load_runtime
-from .runtime.profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile
+from .runtime.profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, runtime_profile_payload
 from .storage.runtime_session_store import RuntimeSessionStore
 from .contracts import RuntimeSessionMessage
-from .utils import now_ts
+from .contracts import GoalSpec
+from .factory.goals import canonical_goal_prompt
+from .factory.runtime_specs import normalize_runtime_kind, runtime_spec_for_kind
+from .oracle.compiler import OracleCompiler
+from .oracle.package_io import load_oracle_package, write_oracle_package
+from .oracle.projections import public_oracle_projection
+from .oracle.qa import OracleQARunner
+from .runtime.langgraph.compiler import RuntimeSpecCompiler
+from .utils import now_ts, stable_hash
 
 
 app = typer.Typer(add_completion=False, help="Agintor CLI MVP")
@@ -181,8 +189,33 @@ def _resolve_benchmark_task(benchmark, task_id: str) -> tuple[object, str]:
 
 
 @app.command("init-runtime")
-def init_runtime_cmd(destination: str, force: bool = typer.Option(False, "--force"), write_suite: Optional[str] = typer.Option(None, "--write-demo-suite")) -> None:
-    path = init_runtime_dir(destination, force=force)
+def init_runtime_cmd(
+    destination: str,
+    force: bool = typer.Option(False, "--force"),
+    write_suite: Optional[str] = typer.Option(None, "--write-demo-suite"),
+    runtime_kind: str = typer.Option("policy_modules", "--runtime-kind"),
+) -> None:
+    try:
+        normalized_kind = normalize_runtime_kind(runtime_kind)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if normalized_kind == "tradingagents_langgraph":
+        raise typer.BadParameter(
+            "tradingagents_langgraph init requires a goal-scoped spec; use build-runtime or compile-oracle with a goal"
+        )
+    if normalized_kind == "langgraph_spec":
+        spec = runtime_spec_for_kind(normalized_kind, runtime_id=f"runtime.{Path(destination).name or 'langgraph'}")
+        if spec is None:
+            raise RuntimeError("spec-backed runtime kind did not produce a runtime spec")
+        path = RuntimeSpecCompiler().compile_to_directory(spec, destination, force=force)
+        profile_path = path / RUNTIME_PROFILE_FILE
+        if not profile_path.exists():
+            profile_path.write_text(
+                json.dumps(runtime_profile_payload(load_runtime_profile()), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+    elif normalized_kind == "policy_modules":
+        path = init_runtime_dir(destination, force=force)
     payload = {"runtime_dir": str(path), "profile_path": str(path / RUNTIME_PROFILE_FILE)}
     if write_suite is not None:
         suite_path = write_demo_suite(write_suite)
@@ -374,6 +407,7 @@ def eval_cmd(
     workspace: Optional[str] = typer.Option(None, "--workspace"),
     artifact_mode: ArtifactMode = typer.Option(ArtifactMode.ON_FAILURE, "--artifact-mode"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
+    oracle_package: Optional[str] = typer.Option(None, "--oracle-package"),
 ) -> None:
     benchmark = load_suite(suite)
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
@@ -390,6 +424,7 @@ def eval_cmd(
             baseline_runtime_dir=_reference_runtime_dir(effective_provider, runtime_dir),
             runtime_backend=runtime_backend,
             artifact_mode=artifact_mode,
+            oracle_package=load_oracle_package(oracle_package) if oracle_package else None,
             **_supported_kwargs(RuntimeEvaluator, runtime_profile=runtime_profile, profile_path=profile),
         )
         evaluation = evaluator.evaluate_runtime(runtime_dir, partition=partition, seeds=_parse_seeds(seeds), use_cache=False)
@@ -411,6 +446,7 @@ def evolve_cmd(
     workspace: Optional[str] = typer.Option(None, "--workspace"),
     artifact_mode: ArtifactMode = typer.Option(ArtifactMode.ALWAYS, "--artifact-mode"),
     runtime_backend: str = typer.Option("local", "--runtime-backend"),
+    oracle_package: Optional[str] = typer.Option(None, "--oracle-package"),
 ) -> None:
     benchmark = load_suite(suite)
     runtime_profile = load_runtime_profile(runtime_dir, profile_path=profile)
@@ -428,6 +464,7 @@ def evolve_cmd(
             reference_runtime_dir=_reference_runtime_dir(provider, runtime_dir),
             runtime_backend=runtime_backend,
             artifact_mode=artifact_mode,
+            oracle_package=oracle_package,
             **_supported_kwargs(EvolutionEngine, runtime_profile=runtime_profile, profile_path=profile),
         )
         usage_before = provider_impl.usage_summary()
@@ -436,6 +473,70 @@ def evolve_cmd(
         failed = False
     finally:
         workspace_lease.release(failed=failed)
+
+
+@app.command("compile-oracle")
+def compile_oracle_cmd(
+    goal: str,
+    destination: str,
+    runtime_kind: str = typer.Option("langgraph_spec", "--runtime-kind"),
+) -> None:
+    clean_goal = canonical_goal_prompt(goal)
+    if not clean_goal:
+        raise typer.BadParameter("goal may not be empty")
+    try:
+        normalized_kind = normalize_runtime_kind(runtime_kind)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    goal_spec = GoalSpec(
+        goal_id=f"goal.{stable_hash(clean_goal)[:12]}",
+        raw_prompt=goal,
+        normalized_goal=clean_goal,
+        constraints={"runtime_kind": normalized_kind},
+    )
+    try:
+        runtime_spec = runtime_spec_for_kind(normalized_kind, goal_spec=goal_spec, runtime_id="runtime.preview")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    package = OracleCompiler().compile(goal_spec, runtime_spec)
+    frozen = write_oracle_package(package, destination)
+    typer.echo(
+        json.dumps(
+            {
+                "package_id": frozen.package_id,
+                "package_hash": frozen.package_hash,
+                "destination": destination,
+                "runtime_kind": normalized_kind,
+                "runtime_spec_digest": frozen.runtime_spec_digest,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("oracle-qa")
+def oracle_qa_cmd(package_dir: str) -> None:
+    package = load_oracle_package(package_dir)
+    report = OracleQARunner().run(package)
+    typer.echo(json.dumps(report.model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True))
+    if not report.passed:
+        raise typer.Exit(code=1)
+
+
+@app.command("inspect-oracle")
+def inspect_oracle_cmd(
+    package_dir: str,
+    public: bool = typer.Option(False, "--public"),
+    sealed: bool = typer.Option(False, "--sealed"),
+) -> None:
+    if public and sealed:
+        raise typer.BadParameter("--public and --sealed are mutually exclusive")
+    if sealed:
+        raise typer.BadParameter("sealed oracle projection is evaluator-only and cannot be printed to stdout")
+    package = load_oracle_package(package_dir)
+    payload = public_oracle_projection(package)
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @app.command("build-runtime")
@@ -463,6 +564,7 @@ def build_runtime_cmd(
     workspace: Optional[str] = typer.Option(None, "--workspace"),
     artifact_mode: ArtifactMode = typer.Option(ArtifactMode.ALWAYS, "--artifact-mode"),
     runtime_backend: Optional[str] = typer.Option(None, "--runtime-backend"),
+    runtime_kind: str = typer.Option("policy_modules", "--runtime-kind"),
 ) -> None:
     """Drive the factory chat for a project.
 
@@ -482,6 +584,10 @@ def build_runtime_cmd(
             raise typer.BadParameter("provide <project_dir> or use --destination <project_dir>")
         project_dir = project_dir_or_prompt
         prompt_text = _load_prompt_input(prompt, prompt_file)
+    try:
+        runtime_kind = normalize_runtime_kind(runtime_kind)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     existing_chat = None
     chat_store = FactoryChatStore(project_dir)
     if chat_store.has_chat():
@@ -490,6 +596,12 @@ def build_runtime_cmd(
         provider = existing_chat.agintor_provider
     if runtime_backend is None and existing_chat is not None:
         runtime_backend = existing_chat.runtime_backend
+    if existing_chat is not None:
+        pinned_kind = str(getattr(existing_chat, "runtime_kind", "policy_modules") or "policy_modules")
+        if runtime_kind != "policy_modules" and runtime_kind != pinned_kind:
+            raise typer.BadParameter(
+                f"factory chat is pinned to runtime kind {pinned_kind!r}; start a new factory chat to use {runtime_kind!r}"
+            )
     if profile is not None and existing_chat is not None:
         raise typer.BadParameter(
             "factory follow-ups use the runtime profile pinned in the project; "
@@ -513,6 +625,7 @@ def build_runtime_cmd(
             mutator_type=mutator,
             profile_path=profile,
             runtime_backend=runtime_backend,
+            runtime_kind=runtime_kind,
             artifact_mode=artifact_mode,
         )
         failed = False

@@ -1,0 +1,62 @@
+{
+  "runtime_id": "baseline.langgraph",
+  "runtime_kind": "langgraph_spec",
+  "name": "Baseline LangGraph Runtime",
+  "description": "Baseline spec-backed runtime; one direct-response agent terminating immediately.",
+  "agents": [
+    {
+      "agent_id": "agent.default",
+      "role": "worker",
+      "prompt": {
+        "task_template": "{prompt}"
+      },
+      "model_policy_id": "default",
+      "scope": ["top"]
+    }
+  ],
+  "graph": {
+    "graph_id": "runtime_graph",
+    "entry_node": "node.default",
+    "terminal_nodes": ["node.terminal"],
+    "nodes": [
+      {
+        "node_id": "node.default",
+        "node_type": "direct_response",
+        "agent_id": "agent.default",
+        "output_key": "answer"
+      },
+      {
+        "node_id": "node.terminal",
+        "node_type": "verify",
+        "input_keys": ["answer"]
+      }
+    ],
+    "edges": [
+      {
+        "source": "node.default",
+        "target": "node.terminal"
+      }
+    ]
+  },
+  "tools": [],
+  "models": [
+    {
+      "model_policy_id": "default",
+      "provider_name": "runtime_default",
+      "model_class": "small"
+    }
+  ],
+  "memory": {
+    "memory_policy_id": "default",
+    "mode": "none"
+  },
+  "execution": {
+    "max_steps": 32,
+    "side_effect_policy": "receipt_required"
+  },
+  "tracing": {},
+  "mutation_history": [],
+  "metadata": {
+    "template": "baseline_runtime_langgraph"
+  }
+}

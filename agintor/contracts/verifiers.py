@@ -61,6 +61,10 @@ def verify_task_with_evidence(task: BenchmarkTask, artifact: Any, trace: list[di
         evidence["matched"] = None
         evidence["reason"] = "no exact verifier available"
         return 0.0, evidence
+    if task.verifier_type == "oracle_package":
+        evidence["matched"] = None
+        evidence["reason"] = "oracle_package verifier requires evaluator-side sealed package dispatch"
+        return 0.0, evidence
     if task.verifier_type == "trace_event":
         matched = _trace_has_events(trace, task.expected)
         evidence["matched"] = matched

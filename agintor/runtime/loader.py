@@ -12,6 +12,7 @@ from typing import Any, Dict
 
 from ..core.exceptions import RuntimeLoadError
 from ..contracts import CapabilityExchange, DeploymentContract, KernelManifest, RuntimeIsolationPolicy, RuntimeManifest
+from .langgraph.adapters import build_spec_policy_objects, load_runtime_spec
 from .profile import RUNTIME_PROFILE_FILE, RuntimeProfile, load_runtime_profile, profile_to_json
 try:
     from .sdk import (
@@ -57,6 +58,7 @@ class LoadedRuntime:
     runtime_hash: str
     mutable_ast_nodes: int
     mutable_loc: int
+    runtime_spec: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -359,11 +361,16 @@ def runtime_identity_inputs(
     manifest = _load_manifest(runtime_path)
     kernel_manifest = _load_kernel_manifest(runtime_path)
     mutable_fingerprints: dict[str, str] = {}
-    for module_ref in manifest.policy_modules.values():
-        rel_path, _ = module_ref.split(":", 1)
-        module_path = _resolve_runtime_owned_path(runtime_path, rel_path, label="policy module")
-        source = module_path.read_text(encoding="utf-8")
-        mutable_fingerprints[rel_path] = stable_hash(source)
+    runtime_kind = str(getattr(manifest, "runtime_kind", "policy_modules") or "policy_modules")
+    if runtime_kind in {"langgraph_spec", "tradingagents_langgraph"}:
+        spec_path = str(manifest.runtime_spec_path or "runtime_spec.json")
+        mutable_fingerprints[spec_path] = file_digest(_resolve_runtime_owned_path(runtime_path, spec_path, label="runtime spec"))
+    else:
+        for module_ref in manifest.policy_modules.values():
+            rel_path, _ = module_ref.split(":", 1)
+            module_path = _resolve_runtime_owned_path(runtime_path, rel_path, label="policy module")
+            source = module_path.read_text(encoding="utf-8")
+            mutable_fingerprints[rel_path] = stable_hash(source)
     immutable_fingerprints = _verified_kernel_bundle_fingerprints(runtime_path, kernel_manifest)
     for rel_path in manifest.immutable_manifest:
         if Path(rel_path).name == RUNTIME_PROFILE_FILE:
@@ -401,17 +408,25 @@ def load_runtime(
     policy_objects: Dict[str, Any] = {}
     ast_count = 0
     mutable_loc = 0
+    runtime_spec: Any | None = None
+    runtime_kind = str(getattr(manifest, "runtime_kind", "policy_modules") or "policy_modules")
     with _runtime_sdk_import_path(runtime_path):
-        for key, module_ref in manifest.policy_modules.items():
-            rel_path, class_name = module_ref.split(":", 1)
-            module_path = _resolve_runtime_owned_path(runtime_path, rel_path, label="policy module")
-            module = _load_module(f"agintor_runtime_{runtime_path.name}_{key}", module_path)
-            if not hasattr(module, class_name):
-                raise RuntimeLoadError(f"module {module_path} missing class {class_name}")
-            policy_objects[key] = getattr(module, class_name)()
-            source = module_path.read_text(encoding="utf-8")
-            ast_count += ast_node_count(source)
-            mutable_loc += len(source.splitlines())
+        if runtime_kind in {"langgraph_spec", "tradingagents_langgraph"}:
+            runtime_spec = load_runtime_spec(runtime_path)
+            policy_objects = build_spec_policy_objects(runtime_path)
+            source = (runtime_path / (manifest.runtime_spec_path or "runtime_spec.json")).read_text(encoding="utf-8")
+            mutable_loc = len(source.splitlines())
+        else:
+            for key, module_ref in manifest.policy_modules.items():
+                rel_path, class_name = module_ref.split(":", 1)
+                module_path = _resolve_runtime_owned_path(runtime_path, rel_path, label="policy module")
+                module = _load_module(f"agintor_runtime_{runtime_path.name}_{key}", module_path)
+                if not hasattr(module, class_name):
+                    raise RuntimeLoadError(f"module {module_path} missing class {class_name}")
+                policy_objects[key] = getattr(module, class_name)()
+                source = module_path.read_text(encoding="utf-8")
+                ast_count += ast_node_count(source)
+                mutable_loc += len(source.splitlines())
     identity_inputs = runtime_identity_inputs(
         runtime_path,
         runtime_profile=runtime_profile,
@@ -419,14 +434,16 @@ def load_runtime(
     )
     code_hash = stable_hash(identity_inputs, kernel_manifest.runtime_contract_version)
     runtime_hash = stable_hash((manifest).model_dump(), (kernel_manifest).model_dump(), code_hash)
+    spec_backed = runtime_kind in {"langgraph_spec", "tradingagents_langgraph"}
+    runtime_asset_capabilities = {"traces": True, "checkpoints": not spec_backed, "runtime_sdk": True}
     capability_exchange = CapabilityExchange(
         runtime_contract_version=kernel_manifest.runtime_contract_version,
         supported_backends=list(deployment_contract.supported_backends),
         tool_runtimes=["python"],
-        checkpoint_support=True,
-        runtime_asset_capabilities={"traces": True, "checkpoints": True, "runtime_sdk": True},
+        checkpoint_support=not spec_backed,
+        runtime_asset_capabilities=runtime_asset_capabilities,
         side_effect_receipts=True,
-        resume_support=True,
+        resume_support=not spec_backed,
         runtime_isolation_policy=runtime_isolation_policy,
         supported_guarantees=[
             "timeout_enforcement",
@@ -454,6 +471,7 @@ def load_runtime(
         runtime_hash=runtime_hash,
         mutable_ast_nodes=ast_count,
         mutable_loc=mutable_loc,
+        runtime_spec=runtime_spec,
     )
 
 

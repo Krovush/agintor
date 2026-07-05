@@ -101,6 +101,11 @@ class BuiltRuntimeResult:
     export_summary_path: str
     summary_path: str
     signal_sufficiency_path: str = ""
+    runtime_kind: str = "policy_modules"
+    runtime_spec_digest: str = ""
+    oracle_package_hash: str = ""
+    oracle_package_ref: str = ""
+    oracle_public_ref: str = ""
 
 
 def build_runtime_from_goal(
@@ -117,6 +122,7 @@ def build_runtime_from_goal(
     artifact_mode: str | ArtifactMode | None = None,
     force: bool = False,
     trace_context: OpenAITraceContext | None = None,
+    runtime_kind: str = "policy_modules",
 ) -> BuiltRuntimeResult:
     return _run_factory_pipeline(
         goal_input=goal_prompt,
@@ -132,6 +138,7 @@ def build_runtime_from_goal(
         force=force,
         seed_runtime_source=None,
         trace_context=trace_context,
+        runtime_kind=runtime_kind,
     )
 
 
@@ -151,6 +158,7 @@ def build_runtime_from_followup(
     seed_runtime_source: Path | None = None,
     runtime_provider_name: str | None = None,
     trace_context: OpenAITraceContext | None = None,
+    runtime_kind: str = "policy_modules",
 ) -> BuiltRuntimeResult:
     """Run the factory pipeline against an amended goal spec.
 
@@ -171,6 +179,7 @@ def build_runtime_from_followup(
         runtime_provider_name=runtime_provider_name,
         default_runtime_backend=runtime_backend,
     )
+    amended = amended.model_copy(update={"constraints": {**dict(amended.constraints), "runtime_kind": runtime_kind}})
     return _run_factory_pipeline(
         goal_input=amended,
         destination=destination,
@@ -185,4 +194,5 @@ def build_runtime_from_followup(
         force=True,
         seed_runtime_source=seed_runtime_source,
         trace_context=trace_context,
+        runtime_kind=runtime_kind,
     )

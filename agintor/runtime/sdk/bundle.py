@@ -32,11 +32,15 @@ from .execution import *  # noqa: F401,F403
 from .state import *  # noqa: F401,F403
 from .sessions import *  # noqa: F401,F403
 from .runtime import *  # noqa: F401,F403
+from .runtime_spec import *  # noqa: F401,F403
 from .branches import *  # noqa: F401,F403
 from .side_effects import *  # noqa: F401,F403
 from .checkpoints import *  # noqa: F401,F403
 from .benchmarks import *  # noqa: F401,F403
 from .protocol import *  # noqa: F401,F403
+from .verifiers import *  # noqa: F401,F403
+from .runtime_spec import ToolSpec as RuntimeToolSpec  # noqa: F401
+from .state import ToolSpec as ToolSpec  # noqa: F401
 
 _FORWARD_REF_NAMESPACE = dict(globals())
 for _model in (RuntimeStateSnapshot, BranchResumeSnapshot, BranchResult, CheckpointEnvelope, SuiteEvaluation):
@@ -57,6 +61,7 @@ _KERNEL_SOURCE_ROOTS = (
     "providers",
     "runtime/api",
     "runtime/kernel",
+    "runtime/langgraph",
     "runtime/tools",
     "storage/state_store",
     "tracing",
@@ -71,10 +76,12 @@ _KERNEL_SOURCE_FILES = (
     "contracts/providers.py",
     "contracts/protocol.py",
     "contracts/runtime.py",
+    "contracts/runtime_spec.py",
     "contracts/sessions.py",
     "contracts/side_effects.py",
     "contracts/state.py",
     "contracts/tracing.py",
+    "contracts/verifiers.py",
     "core/__init__.py",
     "core/exceptions.py",
     "core/versioning.py",
@@ -171,6 +178,8 @@ def _iter_kernel_resource_files(source_root: Path) -> list[tuple[Path, str]]:
     files: list[tuple[Path, str]] = []
     for source_rel, bundle_rel in _KERNEL_RESOURCE_FILES:
         source_path = source_root / source_rel
+        if source_rel == "templates/baseline_runtime/runtime_profile.json" and not source_path.is_file():
+            source_path = source_root / "runtime/sdk/defaults/runtime_profile.json"
         if not source_path.is_file():
             raise FileNotFoundError(f"kernel bundle resource is missing: {source_rel}")
         files.append((source_path, bundle_rel))

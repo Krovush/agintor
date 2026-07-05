@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from typing import Any, Mapping, Sequence
 from ...providers import (
@@ -177,6 +178,71 @@ class TaskRuntime(ProgressMixin, RootFrameMixin, RuntimeLoopMixin, Checkpointing
             trace_context=trace_context,
             budget_overrides=self.budget_overrides,
         )
+        if getattr(self.runtime, "runtime_spec", None) is not None:
+            from ...contracts.verifiers import verify_task_with_evidence
+            from ..langgraph.adapters import run_spec_task
+
+            before_usage = self._provider_usage_snapshot(self.provider)
+            start = time.perf_counter()
+            payload = run_spec_task(
+                self.runtime.runtime_dir,
+                task,
+                request_id=normalized_request_id,
+                seed=seed,
+                provider=self.provider,
+                runtime_hash=self.runtime.runtime_hash,
+                trace_context=trace_context,
+            )
+            latency = time.perf_counter() - start
+            trace = [dict(row) for row in payload.get("trace", [])]
+            artifact = payload.get("artifact")
+            try:
+                verifier_score, _ = verify_task_with_evidence(task, artifact, trace)
+            except Exception as exc:
+                verifier_score = 0.0
+                trace.append(
+                    {
+                        "event": "verifier_failed",
+                        "request_id": normalized_request_id,
+                        "error": str(exc),
+                        "created_at": now_ts(),
+                    }
+                )
+            provider_usage = self._provider_usage_delta(before_usage, self._provider_usage_snapshot(self.provider))
+            status = str(payload.get("status") or "completed")
+            failed = status == "failed"
+            return RunResult(
+                request_id=normalized_request_id,
+                plan_id=compiled_plan.plan_id,
+                run_id=self.shell.run_id,
+                run_root=str(self.shell.run_root),
+                attempt_id=self.shell.attempt_id,
+                runtime_hash=self.runtime.runtime_hash,
+                runtime_backend=self.runtime_backend,
+                latest_checkpoint_ref=None,
+                run_lifecycle_state="failed" if failed else "completed",
+                run_resumable=False,
+                run_prune_eligible=True,
+                task_id=task.task_id,
+                seed=seed,
+                artifact=artifact,
+                verifier_score=verifier_score,
+                cost=float(provider_usage.get("dollar_cost", 0.0) or 0.0),
+                latency=latency,
+                faults=1 if failed else 0,
+                trace=trace,
+                trace_context=trace_context,
+                hard_invalid=failed,
+                invalid_reason=str(payload.get("error", "")) if failed else None,
+                failure_kind="langgraph_spec_failed" if failed else None,
+                mode="benchmark",
+                lifecycle_state="failed" if failed else "completed",
+                model_calls=int(provider_usage.get("calls", 0) or 0),
+                tokens_used=int(provider_usage.get("total_tokens", 0) or 0),
+                input_tokens=int(provider_usage.get("input_tokens", 0) or 0),
+                output_tokens=int(provider_usage.get("output_tokens", 0) or 0),
+                provider_usage=provider_usage,
+            )
         return self._run_execution_plan(task, compiled_plan, seed, session_seed=session_seed)
 
     def resume_from_checkpoint(

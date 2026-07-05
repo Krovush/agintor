@@ -256,6 +256,12 @@ class EvidenceRecord(EvidenceModel):
     contract_id: str
     challenge_id: str
     candidate_runtime_hash: str
+    oracle_package_hash: str = ""
+    runtime_spec_digest: str = ""
+    oracle_public_view_hash: str = ""
+    oracle_sealed_view_hash: str = ""
+    validator_results: list[dict[str, Any]] = Field(default_factory=list)
+    claim_results: list[dict[str, Any]] = Field(default_factory=list)
     parent_runtime_hash: str = ""
     run_ref: str = ""
     attempt_ref: str = ""
@@ -312,6 +318,11 @@ class PairedComparison(EvidenceModel):
     parent_runtime_hash: str
     child_runtime_hash: str
     contract_id: str = ""
+    oracle_package_hash: str = ""
+    parent_oracle_package_hash: str = ""
+    child_oracle_package_hash: str = ""
+    parent_runtime_spec_digest: str = ""
+    child_runtime_spec_digest: str = ""
     challenge_ids: list[str] = Field(default_factory=list)
     axis_deltas: dict[str, AxisDelta | dict[str, Any]] = Field(default_factory=dict)
     axis_task_ids: dict[str, list[str]] = Field(default_factory=dict)
@@ -374,6 +385,11 @@ class ProgressSignal(EvidenceModel):
     parent_runtime_hash: str
     child_runtime_hash: str
     contract_id: str = ""
+    oracle_package_hash: str = ""
+    parent_oracle_package_hash: str = ""
+    child_oracle_package_hash: str = ""
+    parent_runtime_spec_digest: str = ""
+    child_runtime_spec_digest: str = ""
     decision_type: PromotionDecisionType | str
     capability_signal: CapabilitySignal | None = None
     efficiency_signal: EfficiencySignal | None = None
@@ -424,6 +440,11 @@ class PromotionDecision(EvidenceModel):
     winning_runtime_hash: str = ""
     parent_runtime_hash: str = ""
     child_runtime_hash: str = ""
+    oracle_package_hash: str = ""
+    parent_oracle_package_hash: str = ""
+    child_oracle_package_hash: str = ""
+    parent_runtime_spec_digest: str = ""
+    child_runtime_spec_digest: str = ""
     comparison_ref: str = ""
     progress_signal_ref: str = ""
     progress_signal: ProgressSignal | None = None

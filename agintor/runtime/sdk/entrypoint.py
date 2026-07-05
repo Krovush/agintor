@@ -307,7 +307,11 @@ def _solve(args: argparse.Namespace) -> int:
             mode=request.mode,
             provider_usage=run_result.provider_usage,
         )
-        if request.mode == "user_request" and str(run_result.run_lifecycle_state or run_result.lifecycle_state or "").lower() == "completed":
+        if (
+            request.mode == "user_request"
+            and str(run_result.run_lifecycle_state or run_result.lifecycle_state or "").lower() == "completed"
+            and getattr(runtime, "runtime_spec", None) is None
+        ):
             long_term, predictor, short_term_export = runner._export_post_message_state(run_result=run_result)
             solve_result.post_message_long_term_graph = long_term
             solve_result.post_message_predictor_snapshot = predictor

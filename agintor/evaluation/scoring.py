@@ -93,6 +93,7 @@ class ScoreCalculator:
         runs: Sequence[RunResult],
         *,
         task_metadata: Mapping[str, Mapping[str, object]] | None = None,
+        evaluation_identity: Mapping[str, object] | None = None,
     ) -> SuiteEvaluation:
         grouped: Dict[str, List[RunResult]] = defaultdict(list)
         for run in runs:
@@ -127,6 +128,7 @@ class ScoreCalculator:
             family_scores=dict(family_scores),
             run_results=list(runs),
             task_metadata={str(task_id): dict(metadata) for task_id, metadata in dict(task_metadata or {}).items()},
+            evaluation_identity=dict(evaluation_identity or {}),
             invalid=invalid,
         )
 

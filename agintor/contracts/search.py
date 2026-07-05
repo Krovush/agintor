@@ -34,6 +34,9 @@ class ArchiveEntry(SearchContractModel):
     progress_signal_ref: Optional[str] = None
     evidence_contract_id: str = ""
     evidence_digest: str = ""
+    oracle_package_hash: str = ""
+    runtime_spec_digest: str = ""
+    mutation_action_ids: List[str] = Field(default_factory=list)
     promotion_score: Optional[float] = None
     improved_axes: List[str] = Field(default_factory=list)
     regressed_axes: List[str] = Field(default_factory=list)
@@ -71,6 +74,9 @@ class EvaluationStageResult(SearchContractModel):
     promotion_decision_ref: Optional[str] = None
     progress_signal_ref: Optional[str] = None
     evidence_contract_id: str = ""
+    oracle_package_hash: str = ""
+    runtime_spec_digest: str = ""
+    mutation_action_ids: List[str] = Field(default_factory=list)
 
 
 class ArchiveRecord(SearchContractModel):
@@ -82,6 +88,8 @@ class ArchiveRecord(SearchContractModel):
     promotion_type: Optional[PromotionDecisionType] = None
     promotion_decision_ref: Optional[str] = None
     evidence_contract_id: str = ""
+    oracle_package_hash: str = ""
+    runtime_spec_digest: str = ""
 
 
 class EvolutionHistoryRow(SearchContractModel):
@@ -98,6 +106,9 @@ class EvolutionHistoryRow(SearchContractModel):
     progress_signal_ref: Optional[str] = None
     evidence_contract_id: str = ""
     evidence_digest: str = ""
+    oracle_package_hash: str = ""
+    runtime_spec_digest: str = ""
+    mutation_action_ids: List[str] = Field(default_factory=list)
     allowed_optimizer_updates: List[OptimizerUpdate] = Field(default_factory=list)
     forbidden_optimizer_updates: List[OptimizerUpdate] = Field(default_factory=list)
     improved_axes: List[str] = Field(default_factory=list)

@@ -20,6 +20,22 @@ class RuntimeManifest(BaseModel):
     mutable_files: List[str]
     immutable_manifest: List[str]
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    runtime_kind: str = "policy_modules"
+    runtime_spec_path: str = ""
+    runtime_spec_digest: str = ""
+    oracle_package_hash: str = ""
+
+    @model_validator(mode="after")
+    def normalize_runtime_identity(self) -> "RuntimeManifest":
+        runtime_kind = str(self.runtime_kind or self.metadata.get("runtime_kind", "") or "").strip() or "policy_modules"
+        self.runtime_kind = runtime_kind
+        if runtime_kind in {"langgraph_spec", "tradingagents_langgraph"} and not self.runtime_spec_path:
+            self.runtime_spec_path = str(self.metadata.get("runtime_spec_ref", "") or "runtime_spec.json")
+        if not self.runtime_spec_digest:
+            self.runtime_spec_digest = str(self.metadata.get("runtime_spec_digest", "") or "")
+        if not self.oracle_package_hash:
+            self.oracle_package_hash = str(self.metadata.get("oracle_package_hash", "") or "")
+        return self
 
 
 class RunManifest(BaseModel):

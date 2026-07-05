@@ -468,6 +468,7 @@ def _build_runtime_plan(
         plan_id=f"runtime.{stable_hash(goal_spec.goal_id, benchmark_plan.plan_id)[:12]}",
         goal_id=goal_spec.goal_id,
         runtime_contract_version=RUNTIME_CONTRACT_VERSION,
+        runtime_kind=str(goal_spec.constraints.get("runtime_kind", "policy_modules") or "policy_modules"),
         seed_template=str(baseline_template_dir()),
         mutable_files=list(manifest.mutable_files),
         immutable_manifest=list(manifest.immutable_manifest),

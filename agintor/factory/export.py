@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..storage.artifacts import ArtifactMode
-from ..contracts import DomainEvidenceContract, sealed_benchmark_task_payload
+from ..contracts import DomainEvidenceContract, GoalSpec, sealed_benchmark_task_payload
+from ..oracle.projections import public_oracle_projection
+from ..runtime.langgraph.compiler import RuntimeSpecCompiler
+from .runtime_specs import is_spec_backed_runtime_kind, runtime_spec_for_plan
 from ..evaluation.benchmarks import BenchmarkSuite, build_demo_suite
 from ..search.engine import EvolutionEngine
 from ..storage.factory_chat_store import CHAT_DIR_NAME, FactoryChatError, FactoryChatStore
@@ -125,12 +128,34 @@ def _validate_exported_runtime(
     export_dir: Path,
 ) -> None:
     """Validate the exported runtime boundary."""
+    loaded_runtime = load_runtime(
+        destination_path,
+        runtime_backend=runtime_backend,
+        runtime_profile=runtime_profile,
+    )
     export_host = RuntimeHost(
         export_dir / ".runtime_host",
         runtime_backend=runtime_backend,
         artifact_mode=ArtifactMode.NONE,
     )
     export_host.inspect(destination_path)
+    if getattr(loaded_runtime, "runtime_spec", None) is not None:
+        validation_request = runtime_solve_request_for_user_request(
+            runtime_backend=runtime_backend,
+            seed=0,
+            solve_request=load_solve_request(prompt="spec runtime smoke"),
+        )
+        validation_response = export_host.solve(
+            destination_path,
+            validation_request,
+            provider=LocalDeterministicProvider(),
+            runtime_profile=runtime_profile,
+        )
+        solve_result = validation_response.solve_result
+        lifecycle = str(solve_result.run_lifecycle_state or solve_result.lifecycle_state or "").lower()
+        if lifecycle != "completed" or solve_result.artifact != "spec runtime smoke":
+            raise RuntimeError("exported spec-backed runtime failed deterministic prompt-mode solve validation")
+        return
     validation_request = runtime_solve_request_for_user_request(
         runtime_backend=runtime_backend,
         seed=0,
@@ -190,11 +215,43 @@ def _write_seed_runtime(
     seed_runtime_dir: Path,
     runtime_plan: RuntimePlan,
     *,
+    goal_spec: GoalSpec | None = None,
     seed_source: Path | None = None,
     runtime_profile: RuntimeProfile | None = None,
     runtime_backend: str | None = None,
 ) -> None:
-    if seed_source is not None and seed_source.exists() and seed_source.is_dir():
+    runtime_kind = str(getattr(runtime_plan, "runtime_kind", "policy_modules") or "policy_modules")
+    spec_backed = is_spec_backed_runtime_kind(runtime_kind)
+    if spec_backed:
+        if goal_spec is None:
+            raise ValueError(f"{runtime_kind} seed runtime generation requires a GoalSpec")
+        spec = runtime_spec_for_plan(runtime_plan, goal_spec)
+        if spec is None:
+            raise ValueError(f"{runtime_kind} seed runtime generation did not produce a runtime spec")
+        RuntimeSpecCompiler().compile_to_directory(spec, seed_runtime_dir, force=True)
+        manifest_path = seed_runtime_dir / "runtime_manifest.json"
+        manifest = RuntimeManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
+        manifest = manifest.model_copy(
+            update={
+                "oracle_package_hash": str(getattr(runtime_plan, "oracle_package_hash", "") or ""),
+                "metadata": {
+                    **dict(manifest.metadata or {}),
+                    "oracle_package_hash": str(getattr(runtime_plan, "oracle_package_hash", "") or ""),
+                    "oracle_public_view_hash": str(getattr(runtime_plan, "oracle_public_view_hash", "") or ""),
+                },
+            },
+            deep=True,
+        )
+        _write_json(manifest_path, manifest)
+        oracle_hash = str(getattr(runtime_plan, "oracle_package_hash", "") or "")
+        oracle_public_ref = str(getattr(runtime_plan, "oracle_public_ref", "") or "")
+        if oracle_hash and oracle_public_ref:
+            public_path = Path(oracle_public_ref)
+            if public_path.is_file():
+                target = seed_runtime_dir / "oracle" / "public.json"
+                ensure_directory(target.parent)
+                shutil.copy2(public_path, target)
+    elif seed_source is not None and seed_source.exists() and seed_source.is_dir():
         if seed_runtime_dir.exists():
             shutil.rmtree(seed_runtime_dir)
         shutil.copytree(
@@ -205,7 +262,8 @@ def _write_seed_runtime(
     else:
         init_runtime(seed_runtime_dir, force=True)
     _write_json(seed_runtime_dir / RUNTIME_PROFILE_FILE, runtime_plan.runtime_profile)
-    _write_json(seed_runtime_dir / DEPLOYMENT_CONTRACT_FILE, runtime_plan.deployment_contract)
+    if not spec_backed:
+        _write_json(seed_runtime_dir / DEPLOYMENT_CONTRACT_FILE, runtime_plan.deployment_contract)
     bundle_runtime_kernel(seed_runtime_dir, force=True)
     if runtime_profile is not None:
         with _without_bytecode_writes():

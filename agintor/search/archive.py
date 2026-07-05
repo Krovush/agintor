@@ -271,6 +271,9 @@ class QualityDiversityArchive:
         archive_kind: str = "capability",
         promotion_decision: PromotionDecision | Mapping[str, Any] | None = None,
         objectives: Sequence[str] | None = None,
+        oracle_package_hash: str = "",
+        runtime_spec_digest: str = "",
+        mutation_action_ids: Sequence[str] = (),
     ) -> list[str]:
         cells, by_objective = self._stores(archive_kind)
         inserted = []
@@ -301,6 +304,9 @@ class QualityDiversityArchive:
                 progress_signal_ref=decision_attr(promotion_decision, "progress_signal_ref"),
                 evidence_contract_id=decision_field_value(promotion_decision, "contract_id"),
                 evidence_digest=decision_field_value(promotion_decision, "evidence_digest"),
+                oracle_package_hash=oracle_package_hash or decision_field_value(promotion_decision, "oracle_package_hash"),
+                runtime_spec_digest=runtime_spec_digest or decision_field_value(promotion_decision, "child_runtime_spec_digest"),
+                mutation_action_ids=[str(action_id) for action_id in mutation_action_ids],
                 promotion_score=score,
                 improved_axes=list(decision_attr(decision_attr(promotion_decision, "progress_signal"), "improved_axes", []) or []),
                 regressed_axes=list(decision_attr(decision_attr(promotion_decision, "progress_signal"), "regressed_axes", []) or []),
@@ -315,6 +321,8 @@ class QualityDiversityArchive:
                 promotion_type=decision_attr(promotion_decision, "decision_type"),
                 promotion_decision_ref=decision_attr(promotion_decision, "decision_id"),
                 evidence_contract_id=decision_field_value(promotion_decision, "contract_id"),
+                oracle_package_hash=oracle_package_hash or decision_field_value(promotion_decision, "oracle_package_hash"),
+                runtime_spec_digest=runtime_spec_digest or decision_field_value(promotion_decision, "child_runtime_spec_digest"),
             )
             incumbent = cells.get((objective, cell_key))
             if incumbent is None:

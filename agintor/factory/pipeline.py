@@ -91,8 +91,11 @@ from .planning import (
     _repair_planning_artifacts,
     build_goal_conditioned_suite,
 )
+from .runtime_specs import is_spec_backed_runtime_kind, normalize_runtime_kind, runtime_spec_for_plan
 from .trace_context import _build_factory_trace_context
 from .workspace import _build_workspace_layout
+from ..oracle.compiler import OracleCompiler
+from ..oracle.package_io import write_oracle_package
 
 def _run_factory_pipeline(
     *,
@@ -109,7 +112,9 @@ def _run_factory_pipeline(
     force: bool = False,
     seed_runtime_source: Path | None = None,
     trace_context: OpenAITraceContext | None = None,
+    runtime_kind: str = "policy_modules",
 ) -> BuiltRuntimeResult:
+    runtime_kind = normalize_runtime_kind(runtime_kind)
     if isinstance(goal_input, GoalSpec):
         clean_goal = canonical_goal_prompt(goal_input.normalized_goal)
         prebuilt_goal_spec = goal_input
@@ -132,13 +137,16 @@ def _run_factory_pipeline(
     (layout.goal_dir / "raw_goal.txt").write_text(clean_goal, encoding="utf-8")
 
     if prebuilt_goal_spec is not None:
-        local_goal_spec = prebuilt_goal_spec
+        local_goal_spec = prebuilt_goal_spec.model_copy(
+            update={"constraints": {**dict(prebuilt_goal_spec.constraints), "runtime_kind": runtime_kind}}
+        )
     else:
-        local_goal_spec = build_goal_spec(
+        built_goal = build_goal_spec(
             clean_goal,
             runtime_provider_name=merged_profile.runtime_provider.name,
             default_runtime_backend=effective_runtime_backend,
         )
+        local_goal_spec = built_goal.model_copy(update={"constraints": {**dict(built_goal.constraints), "runtime_kind": runtime_kind}})
     local_success_bundle = build_success_criteria_bundle(local_goal_spec)
     local_suite = build_goal_conditioned_suite(local_goal_spec, merged_profile)
     local_benchmark_plan = _normalize_benchmark_plan_against_suite(
@@ -155,6 +163,7 @@ def _run_factory_pipeline(
         suite=local_suite,
         trace_context=factory_trace_context,
     )
+    goal_spec = goal_spec.model_copy(update={"constraints": {**dict(goal_spec.constraints), "runtime_kind": runtime_kind}})
     goal_suite = _persist_benchmark_suite(
         layout.planning_dir / "benchmark_suite.json",
         build_goal_conditioned_suite(goal_spec, merged_profile),
@@ -197,6 +206,29 @@ def _run_factory_pipeline(
             runtime_backend=effective_runtime_backend,
         ),
     )
+    if is_spec_backed_runtime_kind(runtime_plan.runtime_kind):
+        oracle_runtime_spec = runtime_spec_for_plan(runtime_plan, goal_spec)
+        if oracle_runtime_spec is None:
+            raise RuntimeError("spec-backed runtime plan did not produce a runtime spec")
+        oracle_package = write_oracle_package(
+            OracleCompiler().compile(goal_spec, oracle_runtime_spec),
+            layout.planning_dir / "oracle_package",
+        )
+        runtime_plan = _persist_model(
+            layout.planning_dir / "runtime_plan.json",
+            RuntimePlan,
+            runtime_plan.model_copy(
+                update={
+                    "runtime_spec_digest": oracle_runtime_spec.spec_digest,
+                    "oracle_package_hash": oracle_package.package_hash,
+                    "oracle_public_view_hash": oracle_package.public_view_hash,
+                    "oracle_sealed_view_hash": oracle_package.sealed_view_hash,
+                    "oracle_package_ref": str(layout.planning_dir / "oracle_package"),
+                    "oracle_public_ref": str(layout.planning_dir / "oracle_package" / "public.json"),
+                },
+                deep=True,
+            ),
+        )
     deployment_contract = _persist_model(
         layout.planning_dir / DEPLOYMENT_CONTRACT_FILE,
         DeploymentContract,
@@ -253,6 +285,7 @@ def _run_factory_pipeline(
     _write_seed_runtime(
         layout.seed_runtime_dir,
         runtime_plan,
+        goal_spec=goal_spec,
         seed_source=seed_runtime_source,
         runtime_profile=effective_runtime_profile,
         runtime_backend=effective_runtime_backend,
@@ -269,6 +302,7 @@ def _run_factory_pipeline(
         profile_path=None,
         artifact_mode=artifact_mode or ArtifactMode.ALWAYS,
         trace_context=factory_trace_context,
+        oracle_package=runtime_plan.oracle_package_ref if runtime_plan.oracle_package_ref else None,
     )
     summary = engine.run(steps=steps)
     candidates = _export_candidate_records(engine, goal_keys)
@@ -290,7 +324,8 @@ def _run_factory_pipeline(
         preserve_names=(CHAT_DIR_NAME, ".runtime_sessions"),
     )
     _write_json(destination_path / RUNTIME_PROFILE_FILE, runtime_plan.runtime_profile)
-    _write_json(destination_path / DEPLOYMENT_CONTRACT_FILE, deployment_contract)
+    if str(runtime_plan.runtime_kind) not in {"langgraph_spec", "tradingagents_langgraph"}:
+        _write_json(destination_path / DEPLOYMENT_CONTRACT_FILE, deployment_contract)
     bundle_runtime_kernel(destination_path, force=True)
     with _without_bytecode_writes():
         exported_runtime = load_runtime(
@@ -301,6 +336,13 @@ def _run_factory_pipeline(
     code_hash = exported_runtime.code_hash
     manifest_version = exported_runtime.manifest.version
     runtime_id = exported_runtime.manifest.runtime_id
+    exported_runtime_kind = str(getattr(exported_runtime.manifest, "runtime_kind", runtime_plan.runtime_kind) or runtime_plan.runtime_kind)
+    exported_runtime_spec_digest = str(
+        getattr(getattr(exported_runtime, "runtime_spec", None), "spec_digest", "")
+        or getattr(exported_runtime.manifest, "runtime_spec_digest", "")
+        or runtime_plan.runtime_spec_digest
+    )
+    runtime_plan_spec_digest = str(runtime_plan.runtime_spec_digest or "")
     _validate_exported_runtime(
         destination_path,
         build_id=build_id,
@@ -319,6 +361,11 @@ def _run_factory_pipeline(
         "code_hash": code_hash,
         "manifest_version": manifest_version,
         "runtime_id": runtime_id,
+        "runtime_kind": exported_runtime_kind,
+        "runtime_spec_digest": exported_runtime_spec_digest,
+        "runtime_plan_spec_digest": runtime_plan_spec_digest,
+        "oracle_package_hash": runtime_plan.oracle_package_hash,
+        "oracle_public_view_hash": runtime_plan.oracle_public_view_hash,
         "build_id": build_id,
         "goal_id": goal_spec.goal_id,
         "agintor_provider": agintor_provider,
@@ -344,6 +391,11 @@ def _run_factory_pipeline(
             code_hash=code_hash,
             runtime_id=runtime_id,
             runtime_contract_version=RUNTIME_CONTRACT_VERSION,
+            runtime_kind=exported_runtime_kind,
+            runtime_spec_digest=exported_runtime_spec_digest,
+            runtime_plan_spec_digest=runtime_plan_spec_digest,
+            oracle_package_hash=runtime_plan.oracle_package_hash,
+            oracle_public_view_hash=runtime_plan.oracle_public_view_hash,
             source_runtime_dir=str(leader.runtime_dir),
             source_runtime_hash=leader.entry.runtime_hash,
             runtime_profile_path=RUNTIME_PROFILE_FILE,
@@ -377,6 +429,14 @@ def _run_factory_pipeline(
             deployment_contract_path=str(layout.planning_dir / DEPLOYMENT_CONTRACT_FILE),
             workspace=str(layout.root),
             output_runtime_dir=str(destination_path),
+            runtime_kind=exported_runtime_kind,
+            runtime_spec_digest=exported_runtime_spec_digest,
+            runtime_plan_spec_digest=runtime_plan_spec_digest,
+            oracle_package_hash=runtime_plan.oracle_package_hash,
+            oracle_public_view_hash=runtime_plan.oracle_public_view_hash,
+            oracle_sealed_view_hash=runtime_plan.oracle_sealed_view_hash,
+            oracle_package_ref=runtime_plan.oracle_package_ref,
+            oracle_public_ref=runtime_plan.oracle_public_ref,
             history_path=getattr(summary, "history_path", ""),
             archive_index_path=getattr(summary, "archive_index_path", ""),
             validation_history_path=getattr(summary, "validation_history_path", ""),
@@ -418,6 +478,11 @@ def _run_factory_pipeline(
         workspace=str(layout.root),
         agintor_provider=agintor_provider,
         runtime_provider=runtime_plan.provider_plan.runtime_provider.name,
+        runtime_kind=exported_runtime_kind,
+        runtime_spec_digest=exported_runtime_spec_digest,
+        oracle_package_hash=runtime_plan.oracle_package_hash,
+        oracle_package_ref=runtime_plan.oracle_package_ref,
+        oracle_public_ref=runtime_plan.oracle_public_ref,
         mutator_type=mutator_type,
         best_train_score=summary.best_train_score,
         best_goal_score=best_goal_score,

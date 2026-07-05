@@ -146,6 +146,7 @@ def apply_factory_message(
     mutator_type: str = "heuristic",
     profile_path: str | Path | None = None,
     runtime_backend: str | None = None,
+    runtime_kind: str = "policy_modules",
     artifact_mode: str | ArtifactMode | None = None,
 ) -> FactoryMessageOutcome:
     """Top-level factory chat entry point.
@@ -178,6 +179,10 @@ def apply_factory_message(
     effective_backend = str(
         runtime_backend or (chat.runtime_backend if chat is not None else "local")
     ).strip().lower()
+    if has_existing_chat and str(runtime_kind or "policy_modules") == "policy_modules":
+        effective_runtime_kind = str(getattr(chat, "runtime_kind", "policy_modules") or "policy_modules").strip()
+    else:
+        effective_runtime_kind = str(runtime_kind or "policy_modules").strip()
     effective_profile = (
         _load_project_runtime_profile(project_path)
         if has_existing_chat
@@ -191,6 +196,7 @@ def apply_factory_message(
         stored_backend = str(chat.runtime_backend or "").strip().lower()
         stored_runtime_provider = str(chat.runtime_provider or "").strip().lower()
         stored_agintor_provider = str(chat.agintor_provider or "").strip().lower()
+        stored_runtime_kind = str(getattr(chat, "runtime_kind", "policy_modules") or "policy_modules").strip()
         stored_runtime_profile_hash = str(chat.runtime_profile_hash or "").strip()
         current_runtime_profile_hash = _runtime_profile_hash(effective_profile)
         if not stored_runtime_profile_hash:
@@ -208,6 +214,11 @@ def apply_factory_message(
             raise FactoryChatError(
                 f"factory chat {chat.chat_id!r} is pinned to runtime backend {stored_backend!r}; "
                 f"got {effective_backend!r}"
+            )
+        if effective_runtime_kind != stored_runtime_kind:
+            raise FactoryChatError(
+                f"factory chat {chat.chat_id!r} is pinned to runtime kind {stored_runtime_kind!r}; "
+                f"start a new factory chat to use {effective_runtime_kind!r}"
             )
         if effective_runtime_provider != stored_runtime_provider:
             raise FactoryChatError(
@@ -272,6 +283,7 @@ def apply_factory_message(
                 seed_runtime_source=seed_runtime_source,
                 runtime_provider_name=stored_runtime_provider,
                 trace_context=trace_context,
+                runtime_kind=stored_runtime_kind,
             )
             artifacts = _factory_message_artifacts(result)
             _validate_factory_planning_artifacts(artifacts)
@@ -323,6 +335,9 @@ def apply_factory_message(
             build_id=result.build_id,
             leader_runtime_hash=post_runtime_hash,
             leader_runtime_dir=result.output_runtime_dir,
+            runtime_kind=result.runtime_kind,
+            runtime_spec_digest=result.runtime_spec_digest,
+            oracle_package_hash=result.oracle_package_hash,
         )
     else:
         initial_goal_spec = build_goal_spec(
@@ -350,6 +365,7 @@ def apply_factory_message(
             artifact_mode=artifact_mode,
             force=True,
             trace_context=trace_context,
+            runtime_kind=effective_runtime_kind,
         )
         artifacts = _factory_message_artifacts(result)
         _validate_factory_planning_artifacts(artifacts)
@@ -365,6 +381,7 @@ def apply_factory_message(
             runtime_provider=result.runtime_provider,
             agintor_provider=result.agintor_provider,
             runtime_backend=effective_backend,
+            runtime_kind=result.runtime_kind,
             runtime_profile_hash=exported_profile_hash,
             chat_id=chat_id,
         )
@@ -378,6 +395,9 @@ def apply_factory_message(
             build_id=result.build_id,
             leader_runtime_hash=exported_runtime_hash,
             leader_runtime_dir=result.output_runtime_dir,
+            runtime_kind=result.runtime_kind,
+            runtime_spec_digest=result.runtime_spec_digest,
+            oracle_package_hash=result.oracle_package_hash,
         )
 
     recorded = chat_store.record_message(

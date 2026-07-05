@@ -65,6 +65,13 @@ class RuntimePlan(BaseModel):
     plan_id: str
     goal_id: str
     runtime_contract_version: str
+    runtime_kind: str = "policy_modules"
+    runtime_spec_digest: str = ""
+    oracle_package_hash: str = ""
+    oracle_public_view_hash: str = ""
+    oracle_sealed_view_hash: str = ""
+    oracle_package_ref: str = ""
+    oracle_public_ref: str = ""
     seed_template: str
     mutable_files: List[str] = Field(default_factory=list)
     immutable_manifest: List[str] = Field(default_factory=list)
@@ -87,6 +94,14 @@ class BuildSummary(BaseModel):
     deployment_contract_path: str = ""
     workspace: str
     output_runtime_dir: str
+    runtime_kind: str = "policy_modules"
+    runtime_spec_digest: str = ""
+    runtime_plan_spec_digest: str = ""
+    oracle_package_hash: str = ""
+    oracle_public_view_hash: str = ""
+    oracle_sealed_view_hash: str = ""
+    oracle_package_ref: str = ""
+    oracle_public_ref: str = ""
     history_path: str = ""
     archive_index_path: str = ""
     validation_history_path: str = ""
@@ -122,6 +137,11 @@ class ExportSummary(BaseModel):
     code_hash: str
     runtime_id: str
     runtime_contract_version: str
+    runtime_kind: str = "policy_modules"
+    runtime_spec_digest: str = ""
+    runtime_plan_spec_digest: str = ""
+    oracle_package_hash: str = ""
+    oracle_public_view_hash: str = ""
     source_runtime_dir: str
     source_runtime_hash: str
     runtime_profile_path: str
@@ -138,6 +158,7 @@ class FactoryChatIdentity(BaseModel):
     runtime_provider: str
     agintor_provider: str
     runtime_backend: str
+    runtime_kind: str = "policy_modules"
     runtime_profile_hash: str = ""
     created_at: float = 0.0
     message_count: int = 0
@@ -154,6 +175,9 @@ class FactoryMessage(BaseModel):
     build_id: str
     leader_runtime_hash: str
     leader_runtime_dir: str = ""
+    runtime_kind: str = "policy_modules"
+    runtime_spec_digest: str = ""
+    oracle_package_hash: str = ""
     goal_spec_path: str = ""
     success_criteria_path: str = ""
     benchmark_plan_path: str = ""
