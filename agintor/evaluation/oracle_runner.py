@@ -16,6 +16,7 @@ from ..contracts import (
     ValidatorResult,
     ValidatorSpec,
 )
+from ..contracts.evidence import RuntimeEvidenceManifest
 from ..oracle.validator_registry import ValidatorRegistry, default_validator_registry
 from ..utils import stable_hash
 
@@ -34,6 +35,7 @@ def _run_payload(run: RunResult | Mapping[str, Any]) -> dict[str, Any]:
         return {
             "artifact": run.artifact,
             "trace": run.trace_rows(),
+            "runtime_evidence_manifest": dict(run.runtime_evidence_manifest or {}),
             "task_id": run.task_id,
             "runtime_hash": run.runtime_hash,
             "run_id": run.run_id,
@@ -169,7 +171,7 @@ class OracleEvaluationRunner:
                 continue
             results = by_claim.get(claim.claim_id, [])
             passed = [result for result in results if result.status == "pass"]
-            failed = [result for result in results if result.status in {"fail", "error"}]
+            failed = [result for result in results if result.status in {"fail", "error", "quarantine"}]
             authority_mass: dict[str, float] = defaultdict(float)
             for result in results:
                 authority_mass[str(result.authority_used)] += 1.0
@@ -398,6 +400,13 @@ class OracleEvaluationRunner:
             leakage_flags.extend(str(flag) for flag in report.leakage_flags)
         for posterior in claim_posteriors:
             coverage[str(posterior.claim_id)] = float(posterior.coverage)
+        manifest_digest = ""
+        raw_manifest = run_payload.get("runtime_evidence_manifest")
+        if isinstance(raw_manifest, Mapping) and raw_manifest:
+            try:
+                manifest_digest = RuntimeEvidenceManifest.model_validate(raw_manifest).evidence_digest
+            except Exception:
+                manifest_digest = ""
         return EvidenceLedger(
             oracle_package_hash=str(getattr(package, "package_hash", "") or ""),
             validation_plan_hash=str(getattr(package, "validation_plan_hash", "") or ""),
@@ -407,6 +416,7 @@ class OracleEvaluationRunner:
             task_id=str(run_payload.get("task_id", "") or ""),
             run_id=str(run_payload.get("run_id", "") or run_payload.get("request_id", "") or ""),
             seed=int(run_payload["seed"]) if run_payload.get("seed") is not None else None,
+            claim_manifest_digest=manifest_digest,
             validator_reports=list(validator_reports),
             claim_posteriors=list(claim_posteriors),
             authority_mass=OracleEvaluationRunner._authority_mass_for_reports(validator_reports),

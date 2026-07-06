@@ -7,6 +7,18 @@ from ...utils import now_ts, stable_hash
 from .state import LangGraphNodeResult, LangGraphRuntimeState
 
 
+def _digest_safe(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, Mapping):
+        return {str(key): _digest_safe(item) for key, item in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, list | tuple):
+        return [_digest_safe(item) for item in value]
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    return str(value)
+
+
 class RuntimeOperationService:
     """Shared operation service for spec-backed graph nodes.
 
@@ -42,7 +54,28 @@ class RuntimeOperationService:
             key = node.output_key or node.node_id
             state.node_results[node.node_id] = output
             state.artifacts[key] = output
-            self._record(state, "langgraph_node_completed", node_id=node.node_id, node_type=node.node_type, output_key=key)
+            output_digest = stable_hash("langgraph.node_output", node.node_id, _digest_safe(output))
+            input_refs = self._input_refs(state, node)
+            if node.node_type == "tool":
+                self._record(
+                    state,
+                    "langgraph_tool_action",
+                    node_id=node.node_id,
+                    node_type=node.node_type,
+                    tool_id=str(node.tool_id or ""),
+                    args_digest=stable_hash("langgraph.tool_args", _digest_safe(node.static_args)),
+                    output_digest=output_digest,
+                    status="completed",
+                )
+            self._record(
+                state,
+                "langgraph_node_completed",
+                node_id=node.node_id,
+                node_type=node.node_type,
+                output_key=key,
+                input_refs=input_refs,
+                output_digest=output_digest,
+            )
             return LangGraphNodeResult(node_id=node.node_id, output_key=key, output=output, status="completed")
         except Exception as exc:
             state.status = "failed"
@@ -97,7 +130,7 @@ class RuntimeOperationService:
 
     def _record_side_effect_intent(self, state: LangGraphRuntimeState, node: GraphNodeSpec) -> dict[str, Any]:
         payload = {"node_id": node.node_id, "node_type": node.node_type, "static_args": dict(node.static_args)}
-        digest = stable_hash(state.request_id, node.node_id, node.node_type, payload)
+        digest = stable_hash(state.request_id, node.node_id, node.node_type, _digest_safe(payload))
         receipt = {
             "side_effect_id": f"langgraph.{node.node_type}.{digest[:12]}",
             "action_fingerprint": digest,
@@ -114,6 +147,20 @@ class RuntimeOperationService:
         }
         state.side_effect_receipts.append(receipt)
         return {"side_effect_receipt": receipt, "host_execution_required": True}
+
+    @staticmethod
+    def _input_refs(state: LangGraphRuntimeState, node: GraphNodeSpec) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        for key in node.input_keys:
+            value = state.artifacts.get(key, state.node_results.get(key))
+            refs.append(
+                {
+                    "key": str(key),
+                    "digest": stable_hash("langgraph.node_input", node.node_id, key, _digest_safe(value)),
+                    "present": key in state.artifacts or key in state.node_results,
+                }
+            )
+        return refs
 
     @staticmethod
     def _product(numbers: list[float]) -> float:

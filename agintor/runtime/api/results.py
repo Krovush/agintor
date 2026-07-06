@@ -203,6 +203,7 @@ def solve_result_from_run_result_with_context(
         checks=checks,
         trace_ref=run.trace_ref(),
         checkpoint_ref=latest_checkpoint_ref,
+        runtime_evidence_manifest=dict(run.runtime_evidence_manifest or {}),
         budget={
             "cost": run.cost,
             "latency": run.latency,

@@ -18,6 +18,7 @@ from agintor.contracts import (
     OracleTask,
     OracleTaskSet,
     RunResult,
+    RuntimeEvidenceManifest,
     ScoringProjection,
     SuiteEvaluation,
     TaskScore,
@@ -705,6 +706,21 @@ def test_repo_patch_validator_ignores_runtime_artifact_evaluator_receipt() -> No
         "public_test_command_digest": "other-public",
         "hidden_tests_digest": "other-hidden",
     }
+    manifest = RuntimeEvidenceManifest(
+        request_id="req.repo-patch",
+        task_id=task.task_id,
+        runtime_hash="runtime",
+        runtime_spec_digest="runtime-spec",
+        trace_events=[{"event": "langgraph_node_completed", "node_id": "patch", "node_type": "repo_patch"}],
+        side_effect_receipts=[
+            {
+                "side_effect_id": "repo-patch.intent",
+                "action_kind": "filesystem_write",
+                "node_id": "patch",
+                "status": "completed",
+            }
+        ],
+    ).model_dump(mode="json", exclude_none=True)
 
     spoofed_results, spoofed_claims = OracleEvaluationRunner().evaluate_run(
         package,
@@ -721,6 +737,7 @@ def test_repo_patch_validator_ignores_runtime_artifact_evaluator_receipt() -> No
             "runtime_hash": "runtime",
             "artifact": {"patch": "runtime-controlled"},
             "repo_patch_result": receipt,
+            "runtime_evidence_manifest": manifest,
         },
     )
     stale_results, stale_claims = OracleEvaluationRunner().evaluate_run(
@@ -730,6 +747,7 @@ def test_repo_patch_validator_ignores_runtime_artifact_evaluator_receipt() -> No
             "runtime_hash": "runtime",
             "artifact": {"patch": "runtime-controlled"},
             "repo_patch_result": stale_receipt,
+            "runtime_evidence_manifest": manifest,
         },
     )
 
@@ -1091,13 +1109,27 @@ def test_forbidden_only_trace_state_requires_trace_presence() -> None:
         evidence_contract=_contract(claim.claim_id, minimum_authority="A3"),
     )
 
+    empty_manifest = RuntimeEvidenceManifest(
+        request_id="req.trace-empty",
+        task_id=task.task_id,
+        runtime_hash="runtime",
+        runtime_spec_digest="runtime-spec",
+        trace_events=[],
+    ).model_dump(mode="json", exclude_none=True)
+    clean_manifest = RuntimeEvidenceManifest(
+        request_id="req.trace-clean",
+        task_id=task.task_id,
+        runtime_hash="runtime",
+        runtime_spec_digest="runtime-spec",
+        trace_events=[{"event": "langgraph_node_completed"}],
+    ).model_dump(mode="json", exclude_none=True)
     empty_results, empty_claims = OracleEvaluationRunner().evaluate_run(
         package,
-        {"task_id": task.task_id, "runtime_hash": "runtime", "trace": []},
+        {"task_id": task.task_id, "runtime_hash": "runtime", "runtime_evidence_manifest": empty_manifest},
     )
     clean_results, clean_claims = OracleEvaluationRunner().evaluate_run(
         package,
-        {"task_id": task.task_id, "runtime_hash": "runtime", "trace": [{"event": "langgraph_node_completed"}]},
+        {"task_id": task.task_id, "runtime_hash": "runtime", "runtime_evidence_manifest": clean_manifest},
     )
 
     assert OracleQARunner().run(package).passed

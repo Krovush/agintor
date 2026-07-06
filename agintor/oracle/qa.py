@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..contracts import OraclePackage, OraclePackageQAReport
+from ..contracts.evidence import RuntimeEvidenceManifest
 from ..contracts.oracle import oracle_package_hash, oracle_public_view_hash, oracle_sealed_projection, oracle_sealed_view_hash
 from ..utils import stable_hash
 from .projections import public_oracle_projection
@@ -319,9 +320,11 @@ class OracleQARunner:
         if validator.family_id == "stateful_service" and not inputs.get("expected_state"):
             missing.append("expected_state")
         if validator.family_id == "repo_patch":
-            for field in ("repo_snapshot_digest", "public_test_command_digest", "hidden_tests_digest"):
+            for field in ("repo_snapshot_digest", "public_test_command_digest"):
                 if not inputs.get(field):
                     missing.append(field)
+            if _repo_patch_declares_sealed_commands(inputs) and not inputs.get("hidden_tests_digest"):
+                missing.append("hidden_tests_digest")
         if validator.family_id == "schema_artifact" and _missing_value(inputs.get("schema")):
             missing.append("schema")
         return sorted(set(missing))
@@ -421,6 +424,38 @@ def _missing_value(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {}
 
 
+def _repo_patch_declares_fixture(inputs: dict[str, Any]) -> bool:
+    return bool(str(inputs.get("repo_snapshot_path", "") or "").strip())
+
+
+def _repo_patch_declares_sealed_commands(inputs: dict[str, Any]) -> bool:
+    for key in ("sealed_test_commands", "hidden_test_commands"):
+        value = inputs.get(key)
+        if isinstance(value, list):
+            if any(not _missing_value(item) for item in value):
+                return True
+            continue
+        if not _missing_value(value):
+            return True
+    return False
+
+
+def _repo_patch_known_good_artifact(inputs: dict[str, Any]) -> Any:
+    for key in ("qa_known_good_artifact", "known_good_artifact"):
+        if key in inputs:
+            return inputs[key]
+    return None
+
+
+def _repo_patch_tamper_artifact(inputs: dict[str, Any]) -> dict[str, Any]:
+    protected_paths = inputs.get("protected_paths", ["tests"])
+    if not isinstance(protected_paths, list):
+        protected_paths = [protected_paths]
+    protected = next((str(path).replace("\\", "/").strip("/") for path in protected_paths if str(path or "").strip()), "tests")
+    target = protected if "." in protected.rsplit("/", 1)[-1] else f"{protected}/__agintor_qa_tamper__.txt"
+    return {"files": [{"path": target, "updated_content": "agintor qa tamper\n"}]}
+
+
 def _different_control_state(expected: Any, label: str, *used: Any) -> Any:
     candidates = [
         {"__qa_control__": label},
@@ -433,6 +468,31 @@ def _different_control_state(expected: Any, label: str, *used: Any) -> Any:
         if candidate != expected and all(candidate != item for item in used):
             return candidate
     return {"__qa_control__": label, "fallback_digest": stable_hash(expected, label, used)}
+
+
+def _qa_runtime_manifest(
+    *,
+    task_id: str = "qa.control.task",
+    trace: list[dict[str, Any]] | None = None,
+    side_effect_receipts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    manifest = RuntimeEvidenceManifest(
+        request_id=f"qa.{stable_hash(task_id, trace or [], side_effect_receipts or [])[:12]}",
+        task_id=task_id,
+        runtime_hash="qa.runtime",
+        runtime_spec_digest="qa.runtime_spec",
+        trace_events=[
+            {
+                "event": str(row.get("event", "") or ""),
+                "node_id": str(row.get("node_id", "") or ""),
+                "node_type": str(row.get("node_type", "") or ""),
+                "output_key": str(row.get("output_key", "") or ""),
+            }
+            for row in trace or []
+        ],
+        side_effect_receipts=[dict(receipt) for receipt in side_effect_receipts or []],
+    )
+    return manifest.model_dump(mode="json", exclude_none=True)
 
 
 def _control_cases(validator: Any) -> list[dict[str, Any]]:
@@ -455,13 +515,13 @@ def _control_cases(validator: Any) -> list[dict[str, Any]]:
         if required:
             bad_trace = []
         return [
-            {"name": "known_good", "payload": {"trace": good_trace}, "expected_status": "pass"},
-            {"name": "known_bad", "payload": {"trace": bad_trace}, "expected_status": "fail"},
-            {"name": "empty_artifact", "payload": {"trace": []}, "expected_status": "fail"},
-            {"name": "irrelevant_artifact", "payload": {"trace": [{"event": "irrelevant"}]}, "expected_status": "fail" if required else "pass"},
+            {"name": "known_good", "payload": {"runtime_evidence_manifest": _qa_runtime_manifest(trace=good_trace)}, "expected_status": "pass"},
+            {"name": "known_bad", "payload": {"runtime_evidence_manifest": _qa_runtime_manifest(trace=bad_trace)}, "expected_status": "fail"},
+            {"name": "empty_artifact", "payload": {"runtime_evidence_manifest": _qa_runtime_manifest(trace=[])}, "expected_status": "fail"},
+            {"name": "irrelevant_artifact", "payload": {"runtime_evidence_manifest": _qa_runtime_manifest(trace=[{"event": "irrelevant"}])}, "expected_status": "fail" if required else "pass"},
             {
                 "name": "leakage_canary",
-                "payload": {"trace": ([{"event": forbidden[0]}] if forbidden else [*good_trace, {"event": "__sealed_canary__"}])},
+                "payload": {"runtime_evidence_manifest": _qa_runtime_manifest(trace=([{"event": forbidden[0]}] if forbidden else [*good_trace, {"event": "__sealed_canary__"}]))},
                 "expected_status": "fail" if forbidden else "pass",
             },
         ]
@@ -479,22 +539,37 @@ def _control_cases(validator: Any) -> list[dict[str, Any]]:
             {"name": "leakage_canary", "payload": {"final_state": expected, "duplicate_side_effects": 1}, "expected_status": "fail"},
         ]
     if validator.family_id == "repo_patch":
+        has_hidden = bool(inputs.get("hidden_tests_digest"))
+        fixture_backed = _repo_patch_declares_fixture(inputs)
         receipt = {
             "runner_digest": "runner",
             "repo_snapshot_digest": inputs.get("repo_snapshot_digest", "repo"),
             "public_test_command_digest": inputs.get("public_test_command_digest", "public"),
-            "hidden_tests_digest": inputs.get("hidden_tests_digest", "hidden"),
+            "hidden_tests_digest": inputs.get("hidden_tests_digest", ""),
             "applied": True,
             "public_tests_passed": True,
-            "hidden_tests_passed": True,
+            "hidden_tests_passed": True if has_hidden else None,
             "tampered_tests": False,
         }
+        manifest = _qa_runtime_manifest(
+            trace=[{"event": "langgraph_node_completed", "node_id": "patch", "node_type": "repo_patch"}],
+            side_effect_receipts=[{"side_effect_id": "qa.repo_patch", "action_kind": "filesystem_write", "node_id": "patch", "status": "completed"}],
+        )
+        known_good_payload = {"repo_patch_result": receipt, "runtime_evidence_manifest": manifest}
+        known_good_artifact = _repo_patch_known_good_artifact(inputs)
+        if fixture_backed or known_good_artifact is not None:
+            known_good_payload["artifact"] = known_good_artifact
+        leakage_payload = (
+            {"artifact": _repo_patch_tamper_artifact(inputs), "runtime_evidence_manifest": manifest}
+            if fixture_backed
+            else {"repo_patch_result": {**receipt, "tampered_tests": True}, "runtime_evidence_manifest": manifest}
+        )
         return [
-            {"name": "known_good", "payload": {"repo_patch_result": receipt}, "expected_status": "pass"},
+            {"name": "known_good", "payload": known_good_payload, "expected_status": "pass"},
             {"name": "known_bad", "payload": {"artifact": {"applied": True, "public_tests_passed": True, "hidden_tests_passed": True}}, "expected_status": "fail"},
-            {"name": "empty_artifact", "payload": {"artifact": {}}, "expected_status": "fail"},
-            {"name": "irrelevant_artifact", "payload": {"artifact": {"irrelevant": True}}, "expected_status": "fail"},
-            {"name": "leakage_canary", "payload": {"repo_patch_result": {**receipt, "tampered_tests": True}}, "expected_status": "fail"},
+            {"name": "empty_artifact", "payload": {"artifact": {}, "runtime_evidence_manifest": manifest}, "expected_status": "fail"},
+            {"name": "irrelevant_artifact", "payload": {"artifact": {"irrelevant": True}, "runtime_evidence_manifest": manifest}, "expected_status": "fail"},
+            {"name": "leakage_canary", "payload": leakage_payload, "expected_status": "quarantine"},
         ]
     if validator.family_id == "schema_artifact":
         schema_value = inputs.get("schema")

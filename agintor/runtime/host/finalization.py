@@ -105,6 +105,7 @@ class FinalizationMixin:
             task_id=str(manifest.task_id or ""),
             seed=int(manifest.seed or 0),
             artifact=solve_result.artifact,
+            runtime_evidence_manifest=dict(solve_result.runtime_evidence_manifest or {}),
             verifier_score=1.0 if bool(solve_result.verified) else 0.0,
             cost=float((solve_result.budget or {}).get("cost", 0.0) or 0.0),
             latency=float((solve_result.budget or {}).get("latency", 0.0) or 0.0),

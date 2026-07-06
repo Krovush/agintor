@@ -18,7 +18,7 @@ AuthorityLiteral = Literal["A0", "A1", "A2", "A3", "A4", "A5", "A6", "M0", "M1",
 ClaimCriticality = Literal["hard", "major", "minor", "diagnostic"]
 ClaimType = Literal["outcome", "state", "process", "safety", "factual", "semantic", "architecture", "cost"]
 ValidatorVisibility = Literal["public", "private", "sealed"]
-ValidatorStatus = Literal["pass", "fail", "error", "abstain"]
+ValidatorStatus = Literal["pass", "fail", "error", "abstain", "quarantine"]
 
 
 class ValidationIntent(OracleModel):

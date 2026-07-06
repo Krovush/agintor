@@ -8,6 +8,7 @@ from typing import Any
 from ...contracts import BenchmarkTask, RuntimeSpec, validate_runtime_spec_payload
 from ...utils import stable_hash
 from .executor import RUNTIME_SPEC_FILE, compile_runtime_spec
+from .state import build_runtime_evidence_manifest
 
 
 class SpecBackedPolicy:
@@ -93,16 +94,24 @@ def run_spec_task(
     app = compile_runtime_spec(spec, provider=provider)
     state = app.invoke(task.prompt, request_id=request_id, task_id=task.task_id, seed=seed, runtime_hash=runtime_hash, trace_context=trace_context)
     artifact = resolve_output_artifact(spec, state.artifacts)
+    claim_ids = []
+    if isinstance(task.expected, Mapping):
+        raw_claim_ids = task.expected.get("oracle_claim_ids", [])
+        if isinstance(raw_claim_ids, list):
+            claim_ids = [str(claim_id) for claim_id in raw_claim_ids if str(claim_id).strip()]
+    manifest = build_runtime_evidence_manifest(state, declared_claim_ids=claim_ids)
     return {
         "request_id": request_id,
         "task_id": task.task_id,
         "seed": seed,
+        "runtime_hash": runtime_hash,
         "artifact": artifact,
         "trace": state.trace,
         "side_effect_receipts": state.side_effect_receipts,
+        "runtime_evidence_manifest": manifest.model_dump(mode="json", exclude_none=True),
         "status": state.status,
         "runtime_spec_digest": spec.spec_digest,
-        "run_digest": stable_hash(request_id, task.task_id, seed, state.artifacts, state.trace),
+        "run_digest": stable_hash(request_id, task.task_id, seed, state.artifacts, state.trace, manifest.evidence_digest),
     }
 
 

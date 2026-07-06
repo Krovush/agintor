@@ -5,7 +5,7 @@ from typing import Any, Literal, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..utils import now_ts
+from ..utils import now_ts, stable_hash
 
 
 class EvidenceModel(BaseModel):
@@ -122,6 +122,169 @@ class EvidenceRef(EvidenceModel):
     visibility: Literal["public", "private", "sealed", "aggregate"] = "public"
     description: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeDeclaredClaim(EvidenceModel):
+    claim_id: str
+    status: Literal["claimed", "abstained", "residual"] = "claimed"
+    text: str = ""
+    evidence_ref_ids: list[str] = Field(default_factory=list)
+    source: str = "runtime"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeArtifactRef(EvidenceModel):
+    ref_id: str
+    key: str
+    artifact_kind: str = "json"
+    digest: str
+    uri: str = ""
+    schema_ref: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeTraceEventRef(EvidenceModel):
+    event: str
+    event_digest: str = ""
+    node_id: str = ""
+    node_type: str = ""
+    output_key: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def fill_event_digest(self) -> "RuntimeTraceEventRef":
+        self.event_digest = stable_hash(
+            "runtime.trace.event",
+            self.event,
+            self.node_id,
+            self.node_type,
+            self.output_key,
+            self.metadata,
+        )
+        return self
+
+
+class RuntimeNodeIORef(EvidenceModel):
+    node_id: str
+    node_type: str = ""
+    input_refs: list[dict[str, Any]] = Field(default_factory=list)
+    output_ref_id: str = ""
+    output_key: str = ""
+    output_digest: str = ""
+    status: Literal["completed", "failed", "skipped"] = "completed"
+
+
+class RuntimeToolAction(EvidenceModel):
+    action_id: str = ""
+    node_id: str = ""
+    tool_id: str = ""
+    args_digest: str = ""
+    output_digest: str = ""
+    status: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def fill_action_id(self) -> "RuntimeToolAction":
+        self.action_id = stable_hash(
+            "runtime.tool_action",
+            self.node_id,
+            self.tool_id,
+            self.args_digest,
+            self.output_digest,
+            self.status,
+        )[:24]
+        return self
+
+
+class RuntimeSideEffectIntent(EvidenceModel):
+    intent_id: str = ""
+    node_id: str = ""
+    intent_kind: Literal["service_action", "repo_patch", "filesystem_write", "unknown"] = "unknown"
+    args_digest: str = ""
+    receipt_ids: list[str] = Field(default_factory=list)
+    status: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def fill_intent_id(self) -> "RuntimeSideEffectIntent":
+        self.intent_id = stable_hash(
+            "runtime.side_effect_intent",
+            self.node_id,
+            self.intent_kind,
+            self.args_digest,
+            self.receipt_ids,
+            self.status,
+        )[:24]
+        return self
+
+
+class RuntimeEvidenceManifest(EvidenceModel):
+    manifest_id: str = ""
+    request_id: str
+    task_id: str
+    runtime_hash: str = ""
+    runtime_spec_digest: str
+    declared_claims: list[RuntimeDeclaredClaim | dict[str, Any]] = Field(default_factory=list)
+    artifact_refs: list[RuntimeArtifactRef | dict[str, Any]] = Field(default_factory=list)
+    node_io_refs: list[RuntimeNodeIORef | dict[str, Any]] = Field(default_factory=list)
+    trace_events: list[RuntimeTraceEventRef | dict[str, Any]] = Field(default_factory=list)
+    trace_digest: str = ""
+    tool_actions: list[RuntimeToolAction | dict[str, Any]] = Field(default_factory=list)
+    side_effect_receipts: list[dict[str, Any]] = Field(default_factory=list)
+    side_effect_receipt_digest: str = ""
+    side_effect_intents: list[RuntimeSideEffectIntent | dict[str, Any]] = Field(default_factory=list)
+    abstentions: list[dict[str, Any]] = Field(default_factory=list)
+    residuals: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    evidence_digest: str = ""
+    created_at: float = Field(default_factory=now_ts)
+
+    @model_validator(mode="after")
+    def fill_manifest_identity(self) -> "RuntimeEvidenceManifest":
+        self.declared_claims = [
+            claim if isinstance(claim, RuntimeDeclaredClaim) else RuntimeDeclaredClaim.model_validate(claim)
+            for claim in self.declared_claims
+        ]
+        self.artifact_refs = [
+            ref if isinstance(ref, RuntimeArtifactRef) else RuntimeArtifactRef.model_validate(ref)
+            for ref in self.artifact_refs
+        ]
+        self.node_io_refs = [
+            ref if isinstance(ref, RuntimeNodeIORef) else RuntimeNodeIORef.model_validate(ref)
+            for ref in self.node_io_refs
+        ]
+        self.trace_events = [
+            event if isinstance(event, RuntimeTraceEventRef) else RuntimeTraceEventRef.model_validate(event)
+            for event in self.trace_events
+        ]
+        self.tool_actions = [
+            action if isinstance(action, RuntimeToolAction) else RuntimeToolAction.model_validate(action)
+            for action in self.tool_actions
+        ]
+        self.side_effect_intents = [
+            intent if isinstance(intent, RuntimeSideEffectIntent) else RuntimeSideEffectIntent.model_validate(intent)
+            for intent in self.side_effect_intents
+        ]
+        self.trace_digest = stable_hash("runtime.trace", [event.model_dump(mode="json") for event in self.trace_events])
+        self.side_effect_receipt_digest = stable_hash("runtime.side_effect_receipts", self.side_effect_receipts)
+        self.evidence_digest = stable_hash(
+            "runtime.evidence_manifest.digest",
+            self.request_id,
+            self.task_id,
+            self.runtime_hash,
+            self.runtime_spec_digest,
+            [claim.model_dump(mode="json", exclude_none=True) for claim in self.declared_claims],
+            [ref.model_dump(mode="json", exclude_none=True) for ref in self.artifact_refs],
+            [ref.model_dump(mode="json", exclude_none=True) for ref in self.node_io_refs],
+            self.trace_digest,
+            [action.model_dump(mode="json", exclude_none=True) for action in self.tool_actions],
+            self.side_effect_receipt_digest,
+            [intent.model_dump(mode="json", exclude_none=True) for intent in self.side_effect_intents],
+            self.abstentions,
+            self.residuals,
+        )
+        self.manifest_id = stable_hash("runtime.evidence_manifest", self.evidence_digest)[:24]
+        return self
 
 
 class EvidenceScope(EvidenceModel):

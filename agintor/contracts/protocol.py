@@ -60,6 +60,7 @@ class SolveResult(BaseModel):
     checks: List[Dict[str, Any]] = Field(default_factory=list)
     trace_ref: Optional[str] = None
     checkpoint_ref: Optional[str] = None
+    runtime_evidence_manifest: Dict[str, Any] = Field(default_factory=dict)
     budget: Dict[str, Any] = Field(default_factory=dict)
     provider_usage: Dict[str, Any] = Field(default_factory=dict)
     faults: Dict[str, Any] = Field(default_factory=dict)
@@ -128,6 +129,7 @@ class RunResult(BaseModel):
     latency: float
     faults: int
     trace: List[Dict[str, Any]] = Field(default_factory=list)
+    runtime_evidence_manifest: Dict[str, Any] = Field(default_factory=dict)
     trace_context: Optional[OpenAITraceContext] = None
     trace_path: Optional[str] = None
     hard_invalid: bool = False

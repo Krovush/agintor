@@ -231,6 +231,7 @@ class TaskRuntime(ProgressMixin, RootFrameMixin, RuntimeLoopMixin, Checkpointing
                 latency=latency,
                 faults=1 if failed else 0,
                 trace=trace,
+                runtime_evidence_manifest=dict(payload.get("runtime_evidence_manifest", {}) or {}),
                 trace_context=trace_context,
                 hard_invalid=failed,
                 invalid_reason=str(payload.get("error", "")) if failed else None,
