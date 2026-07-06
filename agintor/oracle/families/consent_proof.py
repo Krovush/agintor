@@ -26,7 +26,7 @@ def _run(spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:
 
 def _applicability(context: dict[str, Any]) -> float:
     goal = str(context.get("goal_text", "")).lower()
-    return 0.9 if any(word in goal for word in ["consent", "authorization", "permission", "side effect"]) else 0.2
+    return 0.9 if any(word in goal for word in ["consent", "authorization", "permission", "side effect"]) else 0.0
 
 
 def family() -> ValidatorFamily:

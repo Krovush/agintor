@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from ..storage.artifacts import ArtifactMode, ArtifactPolicy
-from ..search.archive import PHASE_SCOPES, QualityDiversityArchive, ScopeScheduler, objective_specs_from_suite
+from ..search.archive import PHASE_SCOPES, QualityDiversityArchive, ScopeScheduler, objective_specs_from_oracle_package, objective_specs_from_suite
 from ..evaluation.benchmarks import BenchmarkSuite
 from ..search.crossover import crossover_runtime
 from ..evaluation.evaluator import RuntimeEvaluator
@@ -171,6 +171,7 @@ class EvolutionEngine:
             raise ValueError(
                 f"oracle package scoring requires a spec-backed runtime; runtime_kind={runtime_kind!r} is not supported"
             )
+        self.oracle_package = oracle_package
         self.evaluator = RuntimeEvaluator(
             suite,
             self.workspace / "evaluator",
@@ -186,7 +187,15 @@ class EvolutionEngine:
             trace_context=trace_context,
             oracle_package=oracle_package,
         )
-        self.objectives = objective_specs_from_suite(suite, partition="train")
+        self.oracle_package = self.evaluator.oracle_package
+        self.objectives = (
+            objective_specs_from_oracle_package(self.oracle_package, partition="train")
+            if self.oracle_package is not None
+            else objective_specs_from_suite(suite, partition="train")
+        )
+        if not self.objectives:
+            raise ValueError("oracle package produced no search objectives")
+        self.objective_ids = {spec.name for spec in self.objectives}
         self.history: list[EvolutionHistoryRow] = []
         normalized_mutator = mutator_type.strip().lower()
         if normalized_mutator in {"heuristic-spec", "spec", "heuristic"} and self.spec_backed:
@@ -215,6 +224,30 @@ class EvolutionEngine:
         self.fully_evaluated_since_retrain = 0
         self.accepted_since_retrain = 0
         self.crossover_probability = self.runtime_profile.evolution.crossover_probability
+
+    def _active_objective_ids(self) -> list[str]:
+        return [spec.name for spec in self.objectives]
+
+    def _validation_objective_name(self) -> str:
+        return "sbar:global" if "sbar:global" in self.objective_ids else self.objectives[0].name
+
+    def evaluate_validation_for_objective(self, runtime_dir: Path, objective_name: str | None = None):
+        objective_name = objective_name or self._validation_objective_name()
+        if getattr(self, "oracle_package", None) is None:
+            return self.evaluator.evaluate_validation(runtime_dir)
+        objective = next((spec for spec in self.objectives if spec.name == objective_name), self.objectives[0])
+        tasks = self.evaluator._objective_subset(objective)
+        return self.evaluator.evaluate_runtime(
+            runtime_dir,
+            partition="train",
+            seeds=self.runtime_profile.evaluation.validation_seeds,
+            tasks_override=tasks,
+        )
+
+    def _evaluation_objectives_aligned(self, evaluation) -> bool:
+        if getattr(self, "oracle_package", None) is None:
+            return True
+        return set(self._active_objective_ids()).issubset(set(evaluation.objective_scores))
 
     def _cleanup_path(self, path: Path | None, *, failed: bool = False) -> None:
         if path is None or not path.exists():
@@ -325,7 +358,12 @@ class EvolutionEngine:
             scope=[],
             mutable_ast_nodes=baseline_runtime.mutable_ast_nodes,
             interface_diff_mask=self._interface_diff_mask(self.baseline_runtime_dir),
-            oracle_package_hash=str(getattr(baseline_runtime.manifest, "oracle_package_hash", "") or ""),
+            objectives=self._active_objective_ids() if getattr(self, "oracle_package", None) is not None else None,
+            oracle_package_hash=str(
+                getattr(getattr(self, "oracle_package", None), "package_hash", "")
+                or getattr(baseline_runtime.manifest, "oracle_package_hash", "")
+                or ""
+            ),
             runtime_spec_digest=str(getattr(baseline_runtime.manifest, "runtime_spec_digest", "") or ""),
         )
 
@@ -339,6 +377,30 @@ class EvolutionEngine:
         objective: ObjectiveSpec,
     ) -> list[str]:
         available = set(evaluation.objective_scores)
+        if getattr(self, "oracle_package", None) is not None:
+            oracle_available = available & self.objective_ids
+            if promotion_decision is None:
+                return [name for name in self._active_objective_ids() if name in oracle_available]
+            progress_signal = decision_attr(promotion_decision, "progress_signal")
+            improved_axes = {
+                str(axis).split("task:", 1)[1] if str(axis).startswith("task:") else str(axis)
+                for axis in (decision_attr(progress_signal, "improved_axes", []) or [])
+            }
+            objectives: set[str] = set()
+            for axis in improved_axes:
+                axis_objective = f"axis:{axis}"
+                if axis_objective in oracle_available:
+                    objectives.add(axis_objective)
+            for comparison in decision_attr(progress_signal, "pairwise_comparisons", []) or []:
+                axis_task_ids = dict(decision_attr(comparison, "axis_task_ids", {}) or {})
+                for axis in improved_axes:
+                    for task_id in axis_task_ids.get(axis, []):
+                        task_objective = f"s:{task_id}"
+                        if task_objective in oracle_available:
+                            objectives.add(task_objective)
+            if objective.name in oracle_available:
+                objectives.add(objective.name)
+            return [name for name in self._active_objective_ids() if name in objectives]
         if promotion_decision is None:
             return sorted(available)
         decision_type = decision_type_value(promotion_decision)
@@ -419,21 +481,59 @@ class EvolutionEngine:
     def _validation_tick(self, iteration: int) -> None:
         if iteration % 5 != 0:
             return
-        island = self._progress_island("sbar:global")
-        if not island:
-            return
-        leader = max(island, key=lambda record: record.entry.scores.get("sbar:global", float("-inf")))
-        val_eval = self.evaluator.evaluate_validation(Path(leader.runtime_dir))
-        val_score = val_eval.objective_scores.get("sbar:global", float("-inf"))
-        self.validation_history.append(
-            {
-                "iteration": iteration,
-                "runtime_hash": leader.entry.runtime_hash,
-                "runtime_dir": leader.runtime_dir,
-                "objective_scores": val_eval.objective_scores,
-                "validation_score": val_score,
-            }
-        )
+        if getattr(self, "oracle_package", None) is not None:
+            validation_scores: dict[str, float] = {}
+            objective_scores: dict[str, float] = {}
+            leaders_by_objective: dict[str, dict[str, str]] = {}
+            first_leader = None
+            for objective_name in self._active_objective_ids():
+                island = self._progress_island(objective_name)
+                if not island:
+                    validation_scores[objective_name] = float("-inf")
+                    objective_scores[objective_name] = float("-inf")
+                    continue
+                leader = max(island, key=lambda record: record.entry.scores.get(objective_name, float("-inf")))
+                first_leader = first_leader or leader
+                val_eval = self.evaluate_validation_for_objective(Path(leader.runtime_dir), objective_name)
+                objective_scores.update(val_eval.objective_scores)
+                objective_score = val_eval.objective_scores.get(objective_name, float("-inf"))
+                validation_scores[objective_name] = objective_score
+                objective_scores[objective_name] = objective_score
+                leaders_by_objective[objective_name] = {
+                    "runtime_hash": str(leader.entry.runtime_hash),
+                    "runtime_dir": str(leader.runtime_dir),
+                }
+            if first_leader is None:
+                return
+            val_score = min(validation_scores.values()) if validation_scores else float("-inf")
+            self.validation_history.append(
+                {
+                    "iteration": iteration,
+                    "runtime_hash": first_leader.entry.runtime_hash,
+                    "runtime_dir": first_leader.runtime_dir,
+                    "objective_scores": objective_scores,
+                    "validation_score": val_score,
+                    "validation_scores_by_objective": validation_scores,
+                    "leaders_by_objective": leaders_by_objective,
+                }
+            )
+        else:
+            objective_name = self._validation_objective_name()
+            island = self._progress_island(objective_name)
+            if not island:
+                return
+            leader = max(island, key=lambda record: record.entry.scores.get(objective_name, float("-inf")))
+            val_eval = self.evaluate_validation_for_objective(Path(leader.runtime_dir), objective_name)
+            val_score = val_eval.objective_scores.get(objective_name, float("-inf"))
+            self.validation_history.append(
+                {
+                    "iteration": iteration,
+                    "runtime_hash": leader.entry.runtime_hash,
+                    "runtime_dir": leader.runtime_dir,
+                    "objective_scores": val_eval.objective_scores,
+                    "validation_score": val_score,
+                }
+            )
         improvement = val_score - self.best_val_score if self.best_val_score != float("-inf") else val_score
         self.best_val_score = max(self.best_val_score, val_score)
         accepted_scopes = [row.scope for row in self.history if row.accepted and row.promotion_type in PROGRESS_CREDIT_DECISIONS]
@@ -547,7 +647,14 @@ class EvolutionEngine:
         promotion_decision: PromotionDecision | Mapping[str, Any] | None,
         retained: bool | None = None,
     ) -> None:
-        task_family_map = {task.task_id: task.family for task in self.suite.train}
+        if getattr(self, "oracle_package", None) is not None:
+            task_family_map = {
+                oracle_task.public_task().task_id: oracle_task.public_task().family
+                for task_set in self.oracle_package.task_sets
+                for oracle_task in task_set.tasks
+            }
+        else:
+            task_family_map = {task.task_id: task.family for task in self.suite.train}
         if not _predictor_updates_allowed(promotion_decision):
             return
         for observation in extract_predictor_observations(
@@ -658,6 +765,40 @@ class EvolutionEngine:
                 and stage4.suite_evaluation is not None
                 and not stage4.suite_evaluation.invalid
             ):
+                if not self._evaluation_objectives_aligned(stage4.suite_evaluation):
+                    self.scheduler.note_hard_failure(scope)
+                    self._cleanup_path(child_dir, failed=True)
+                    accepted_flag = False
+                    if parent_dir != Path(parent_record.runtime_dir):
+                        self._cleanup_path(parent_dir)
+                    progress_signal = decision_attr(promotion_decision, "progress_signal")
+                    row = EvolutionHistoryRow(
+                        step=step,
+                        objective=objective.name,
+                        parent_runtime_hash=parent_record.entry.runtime_hash,
+                        child_runtime_hash=None,
+                        scope=scope,
+                        stage_results=stage_results,
+                        accepted=False,
+                        inserted_keys=[],
+                        promotion_type="quarantine",
+                        promotion_decision_ref=decision_attr(promotion_decision, "decision_id"),
+                        progress_signal_ref=decision_attr(promotion_decision, "progress_signal_ref"),
+                        evidence_contract_id=str(decision_attr(promotion_decision, "contract_id", "") or ""),
+                        evidence_digest=str(decision_attr(promotion_decision, "evidence_digest", "") or ""),
+                        oracle_package_hash=str(decision_attr(promotion_decision, "oracle_package_hash", "") or ""),
+                        runtime_spec_digest=str(decision_attr(promotion_decision, "child_runtime_spec_digest", "") or ""),
+                        mutation_action_ids=mutation_action_ids,
+                        allowed_optimizer_updates=[],
+                        forbidden_optimizer_updates=["capability_archive", "capability_scheduler", "capability_predictors", "capability_priors"],
+                        improved_axes=list(decision_attr(progress_signal, "improved_axes", []) or []),
+                        regressed_axes=list(decision_attr(progress_signal, "regressed_axes", []) or []),
+                        tied_axes=list(decision_attr(progress_signal, "tied_axes", []) or []),
+                    )
+                    self.history.append(row)
+                    self.scheduler.note_iteration([])
+                    self._validation_tick(step)
+                    continue
                 child_runtime = self._load_runtime(child_dir)
                 child_hash = child_runtime.runtime_hash
                 route = route_promotion_decision(promotion_decision)
@@ -786,7 +927,8 @@ class EvolutionEngine:
             ),
             encoding="utf-8",
         )
-        best_train = max((record.entry.scores.get("sbar:global", float("-inf")) for record in self._progress_island("sbar:global")), default=float("-inf"))
+        best_objective = self._validation_objective_name()
+        best_train = max((record.entry.scores.get(best_objective, float("-inf")) for record in self._progress_island(best_objective)), default=float("-inf"))
         return EvolutionSummary(
             steps=steps,
             accepted=accepted,

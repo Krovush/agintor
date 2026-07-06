@@ -19,6 +19,7 @@ from ..contracts import (
     ScoringProjection,
     ValidationIntent,
     ValidatorSpec,
+    oracle_sealed_projection,
     freeze_oracle_package,
     validate_runtime_spec_payload,
 )
@@ -26,6 +27,14 @@ from ..contracts.execution import OperationSpec
 from ..utils import stable_hash
 from .qa import OracleQARunner
 from .validator_registry import ValidatorRegistry, default_validator_registry
+
+_PHASE0_COMPILE_READY_FAMILIES = {
+    "exact_private_answer",
+    "schema_artifact",
+    "trace_state",
+    "repo_patch",
+    "stateful_service",
+}
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,26 @@ class OracleCompiler:
         goal_text = self._goal_text(goal_obj)
         context = self._context(goal_obj, spec_obj, prior_ledgers)
         proposal = self._compiler_proposal(goal_obj, spec_obj)
+        selected_families = self._select_families(context, proposal)
+        selected_family_ids = {family.family_id for family in selected_families}
+        context = {
+            **context,
+            "selected_family_ids": sorted(selected_family_ids),
+            "domain_repo": "repo_patch" in selected_family_ids,
+            "domain_service": "stateful_service" in selected_family_ids,
+            "domain_trading": "trading_outcome" in selected_family_ids,
+            "domain_consent": "consent_proof" in selected_family_ids,
+        }
+        intent = self._validation_intent(goal_text, context)
+        claims = self._claims(goal_text, context)
+        validators = self._validators_for_claims(claims, selected_families, context)
+        task_sets = self._task_sets(goal_obj, claims, validators, context)
+        fixture_capabilities = self._fixture_capabilities(task_sets)
+        context = {
+            **context,
+            **fixture_capabilities,
+            "fixture_capabilities": fixture_capabilities,
+        }
         selected_families = self._select_families(context, proposal)
         selected_family_ids = {family.family_id for family in selected_families}
         context = {
@@ -120,12 +149,16 @@ class OracleCompiler:
 
     def _context(self, goal: GoalSpec, runtime_spec: RuntimeSpec | None, prior_ledgers: Sequence[dict[str, Any]]) -> dict[str, Any]:
         text = self._goal_text(goal).lower()
+        artifact_schema = self._artifact_schema(goal, runtime_spec)
         return {
             "goal_id": goal.goal_id,
             "goal_text": self._goal_text(goal),
             "runtime_spec_digest": getattr(runtime_spec, "spec_digest", "") or "",
-            "private_expected_available": True,
+            "artifact_schema": artifact_schema,
+            "private_expected_available": False,
             "trace_available": True,
+            "repo_patch_fixture_available": False,
+            "stateful_service_fixture_available": False,
             "prior_ledger_count": len(prior_ledgers),
             "inspect_task_available": False,
             "openai_eval_available": False,
@@ -145,11 +178,37 @@ class OracleCompiler:
                 family = self.registry.get(family_id)
             except KeyError:
                 continue
+            if family.family_id not in _PHASE0_COMPILE_READY_FAMILIES:
+                continue
+            if family.family_id == "schema_artifact" and not context.get("artifact_schema"):
+                continue
             if family.score_applicability(context) > 0.0:
                 proposed.append(family)
         if proposed:
-            return proposed[:8]
-        return self.registry.select(context, minimum_score=0.1, limit=8)
+            return self._with_required_outcome_families(proposed[:8], context)
+        selected = [
+            family
+            for family in self.registry.select(context, minimum_score=0.1, limit=8)
+            if family.family_id in _PHASE0_COMPILE_READY_FAMILIES
+            and (family.family_id != "schema_artifact" or context.get("artifact_schema"))
+        ]
+        return self._with_required_outcome_families(selected, context)
+
+    def _with_required_outcome_families(self, families: Sequence[Any], context: dict[str, Any]) -> list[Any]:
+        selected = list(families)
+        selected_ids = {family.family_id for family in selected}
+        for family_id in self._required_concrete_outcome_family_ids(context):
+            if family_id in selected_ids or family_id not in _PHASE0_COMPILE_READY_FAMILIES:
+                continue
+            try:
+                family = self.registry.get(family_id)
+            except KeyError:
+                continue
+            if family.score_applicability(context) <= 0.0:
+                continue
+            selected.append(family)
+            selected_ids.add(family_id)
+        return selected
 
     def _validation_intent(self, goal_text: str, context: dict[str, Any]) -> ValidationIntent:
         task_classes = ["general_agent_task"]
@@ -182,14 +241,19 @@ class OracleCompiler:
         )
 
     def _claims(self, goal_text: str, context: dict[str, Any]) -> list[ClaimSpec]:
+        has_outcome_validator = self._has_concrete_outcome_validator(context)
+        outcome_authority = self._outcome_authority_floor(context) if has_outcome_validator else "A4"
+        outcome_criticality = "hard" if has_outcome_validator and outcome_authority == "A4" else "major" if has_outcome_validator else "diagnostic"
+        leakage_authority = self._family_authority_floor("trace_state")
         claims = [
             ClaimSpec(
                 claim_id="claim.goal_outcome",
                 text="The runtime solves the user goal on representative public tasks and sealed variants.",
                 claim_type="outcome",
-                criticality="hard",
+                criticality=outcome_criticality,
                 weight=1.0,
-                minimum_authority="A4",
+                minimum_authority=outcome_authority,
+                unverifiable_reason="" if has_outcome_validator else "missing_concrete_outcome_validator",
             ),
             ClaimSpec(
                 claim_id="claim.process_integrity",
@@ -203,9 +267,9 @@ class OracleCompiler:
                 claim_id="claim.no_leakage",
                 text="The runtime-visible view excludes private expected values, hidden fixtures, private rubrics, and promotion thresholds.",
                 claim_type="safety",
-                criticality="hard",
+                criticality="major",
                 weight=1.0,
-                minimum_authority="A4",
+                minimum_authority=leakage_authority,
             ),
         ]
         if context["domain_repo"]:
@@ -221,8 +285,12 @@ class OracleCompiler:
     def _validators_for_claims(self, claims: list[ClaimSpec], families: Sequence[Any], context: dict[str, Any]) -> list[ValidatorSpec]:
         validators: list[ValidatorSpec] = []
         all_claim_ids = [claim.claim_id for claim in claims]
+        claim_by_id = {claim.claim_id: claim for claim in claims}
         for family in families:
             if family.family_id == "pairwise_preference" and not context.get("requires_human_audit"):
+                continue
+            applicability = family.score_applicability(context)
+            if applicability <= 0.0:
                 continue
             claim_ids = all_claim_ids
             if family.family_id == "repo_patch":
@@ -235,14 +303,214 @@ class OracleCompiler:
                 claim_ids = [claim.claim_id for claim in claims if "consent" in claim.claim_id or claim.claim_id == "claim.process_integrity"]
             elif family.family_id == "trace_state":
                 claim_ids = ["claim.process_integrity", "claim.no_leakage"]
+            elif family.family_id == "schema_artifact":
+                claim_ids = ["claim.goal_outcome"] if context.get("artifact_schema") else []
             if not claim_ids:
                 continue
             validator_id = self.registry.make_validator_id(family.family_id, claim_ids, {"goal": context["goal_id"]})
-            validators.append(family.make_spec(validator_id=validator_id, claim_ids=claim_ids, inputs={"goal_id": context["goal_id"]}))
-        if not any("claim.no_leakage" in validator.claim_ids for validator in validators):
+            selection_reason = self._selection_reason(family.family_id, claim_ids, context)
+            validators.append(
+                family.make_spec(
+                    validator_id=validator_id,
+                    claim_ids=claim_ids,
+                    inputs=self._validator_inputs(family.family_id, context),
+                    metadata={
+                        "selection_reason": selection_reason,
+                        "applicability_score": applicability,
+                        "selected_for_claims": {
+                            claim_id: {
+                                "claim_text": claim_by_id[claim_id].text,
+                                "minimum_authority": claim_by_id[claim_id].minimum_authority,
+                                "criticality": claim_by_id[claim_id].criticality,
+                                "reason": selection_reason,
+                            }
+                            for claim_id in claim_ids
+                            if claim_id in claim_by_id
+                        },
+                    },
+                )
+            )
+        missing_trace_claim_ids = [
+            claim_id
+            for claim_id in ("claim.process_integrity", "claim.no_leakage")
+            if claim_id in claim_by_id and not any(claim_id in validator.claim_ids for validator in validators)
+        ]
+        if missing_trace_claim_ids:
             family = self.registry.get("trace_state")
-            validators.append(family.make_spec(validator_id=self.registry.make_validator_id("trace_state", ["claim.no_leakage"], {}), claim_ids=["claim.no_leakage"], inputs={"required_events": []}))
+            validators.append(
+                family.make_spec(
+                    validator_id=self.registry.make_validator_id("trace_state", missing_trace_claim_ids, {}),
+                    claim_ids=missing_trace_claim_ids,
+                    inputs=self._validator_inputs("trace_state", context),
+                    metadata={
+                        "selection_reason": "fallback process and leakage guard with concrete required and forbidden trace events",
+                        "applicability_score": family.score_applicability(context),
+                        "selected_for_claims": {
+                            claim_id: {
+                                "minimum_authority": claim_by_id[claim_id].minimum_authority,
+                                "criticality": claim_by_id[claim_id].criticality,
+                                "reason": "fallback process and leakage guard with concrete required and forbidden trace events",
+                            }
+                            for claim_id in missing_trace_claim_ids
+                        },
+                    },
+                )
+            )
         return validators
+
+    @staticmethod
+    def _validator_inputs(family_id: str, context: dict[str, Any]) -> dict[str, Any]:
+        if family_id == "trace_state":
+            return {
+                "goal_id": context["goal_id"],
+                "required_events": ["langgraph_node_completed"],
+                "forbidden_events": ["sealed_material_access", "private_expected_access", "validator_fixture_read"],
+            }
+        if family_id == "repo_patch":
+            return {
+                "goal_id": context["goal_id"],
+                "repo_snapshot_digest": context.get("repo_snapshot_digest", ""),
+                "public_test_command_digest": context.get("public_test_command_digest", ""),
+                "hidden_tests_digest": context.get("hidden_tests_digest", ""),
+            }
+        if family_id == "stateful_service":
+            return {
+                "goal_id": context["goal_id"],
+                "expected_state": context.get("expected_state", {}),
+            }
+        if family_id == "exact_private_answer":
+            return {
+                "goal_id": context["goal_id"],
+                "requires_private_expected": True,
+            }
+        if family_id == "schema_artifact":
+            schema = context.get("artifact_schema")
+            return {
+                "goal_id": context["goal_id"],
+                **({"schema": dict(schema)} if isinstance(schema, dict) and schema else {}),
+            }
+        return {"goal_id": context["goal_id"]}
+
+    @staticmethod
+    def _selection_reason(family_id: str, claim_ids: list[str], context: dict[str, Any]) -> str:
+        if family_id == "exact_private_answer":
+            return "selected only because an exact sealed private_expected fixture round-tripped"
+        if family_id == "trace_state":
+            return "selected for concrete required/forbidden trace event obligations"
+        if family_id == "repo_patch":
+            return "selected because repo snapshot, public command, and hidden-test fixture digests are available"
+        if family_id == "stateful_service":
+            return "selected because a sealed expected state fixture is available"
+        if family_id == "schema_artifact":
+            return "selected because an explicit artifact schema contract is available"
+        return f"selected by registry applicability for claims {', '.join(claim_ids)}"
+
+    @staticmethod
+    def _artifact_schema(goal: GoalSpec, runtime_spec: RuntimeSpec | None) -> dict[str, Any]:
+        constraints = dict(getattr(goal, "constraints", {}) or {})
+        candidates: list[Any] = [
+            constraints.get("artifact_schema"),
+            constraints.get("output_schema"),
+        ]
+        if runtime_spec is not None:
+            metadata = dict(getattr(runtime_spec, "metadata", {}) or {})
+            candidates.extend([metadata.get("artifact_schema"), metadata.get("output_schema")])
+        for candidate in candidates:
+            if isinstance(candidate, dict) and OracleCompiler._is_concrete_artifact_schema(candidate):
+                return OracleCompiler._normalize_artifact_schema(candidate)
+        return {}
+
+    @staticmethod
+    def _is_concrete_artifact_schema(schema: dict[str, Any]) -> bool:
+        if schema.get("items"):
+            return False
+        required = schema.get("required")
+        if not isinstance(required, list) or not required:
+            return False
+        schema_type = str(schema.get("type") or "object")
+        return schema_type == "object"
+
+    @staticmethod
+    def _normalize_artifact_schema(schema: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(schema)
+        if not normalized.get("type") and (normalized.get("required") or normalized.get("properties")):
+            normalized["type"] = "object"
+        if not normalized.get("type") and normalized.get("items"):
+            normalized["type"] = "array"
+        return normalized
+
+    @staticmethod
+    def _has_concrete_outcome_validator(context: dict[str, Any]) -> bool:
+        selected = {str(family_id) for family_id in context.get("selected_family_ids", [])}
+        return any(family_id in selected for family_id in OracleCompiler._required_concrete_outcome_family_ids(context))
+
+    @staticmethod
+    def _required_concrete_outcome_family_ids(context: dict[str, Any]) -> list[str]:
+        required: list[str] = []
+        if context.get("private_expected_available"):
+            required.append("exact_private_answer")
+        if context.get("repo_patch_fixture_available"):
+            required.append("repo_patch")
+        if context.get("stateful_service_fixture_available"):
+            required.append("stateful_service")
+        if context.get("artifact_schema"):
+            required.append("schema_artifact")
+        return required
+
+    def _outcome_authority_floor(self, context: dict[str, Any]) -> str:
+        if context.get("private_expected_available"):
+            return self._family_authority_floor("exact_private_answer")
+        if context.get("repo_patch_fixture_available"):
+            return self._family_authority_floor("repo_patch")
+        if context.get("stateful_service_fixture_available"):
+            return self._family_authority_floor("stateful_service")
+        if context.get("artifact_schema"):
+            return self._family_authority_floor("schema_artifact")
+        return "A4"
+
+    def _family_authority_floor(self, family_id: str) -> str:
+        try:
+            return str(self.registry.get(family_id).authority_ceiling)
+        except KeyError:
+            return "A0"
+
+    @staticmethod
+    def _fixture_capabilities(task_sets: list[OracleTaskSet]) -> dict[str, Any]:
+        probe = OraclePackage(
+            package_id="fixture-probe",
+            goal_id="fixture-probe",
+            validation_intent=ValidationIntent(),
+            claim_graph=ClaimGraph(claims=[]),
+            task_sets=task_sets,
+            evidence_contract=DomainEvidenceContract(
+                contract_id="fixture-probe",
+                domain_kind="validation_backed_runtime",
+                version="oracle.v1",
+                scope=EvidenceScope(domain="validation_backed_runtime"),
+                quality_axes=[
+                    QualityAxisSpec(
+                        axis_id="fixture_probe",
+                        promotion_kind="subskill",
+                        comparator_type="hidden_challenge",
+                    )
+                ],
+            ),
+        )
+        sealed = oracle_sealed_projection(probe)
+        round_tripped = OraclePackage.model_validate(sealed)
+        authoritative_tasks = [task for task_set in round_tripped.task_sets for task in task_set.tasks]
+        private_expected_round_trips = any(task.benchmark_task.private_expected is not None for task in authoritative_tasks)
+        exact_private_expected_round_trips = any(
+            task.benchmark_task.private_expected is not None
+            and str(task.benchmark_task.verifier_type) in {"exact", "json_exact"}
+            for task in authoritative_tasks
+        )
+        return {
+            "private_fixture_roundtrip": private_expected_round_trips,
+            "private_expected_available": exact_private_expected_round_trips,
+            "repo_patch_fixture_available": False,
+            "stateful_service_fixture_available": False,
+        }
 
     def _task_sets(self, goal: GoalSpec, claims: list[ClaimSpec], validators: list[ValidatorSpec], context: dict[str, Any]) -> list[OracleTaskSet]:
         claim_ids = [claim.claim_id for claim in claims]

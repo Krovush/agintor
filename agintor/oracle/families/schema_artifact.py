@@ -20,11 +20,30 @@ def _type_ok(value: Any, schema_type: str) -> bool:
     return True
 
 
+def _schema_type(schema: dict[str, Any]) -> str:
+    schema_type = str(schema.get("type") or "")
+    if not schema_type and (schema.get("required") or schema.get("properties")):
+        return "object"
+    if not schema_type and schema.get("items"):
+        return "array"
+    return schema_type
+
+
 def _run(spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:
     artifact = payload.get("artifact")
     schema = dict(spec.inputs.get("schema") or payload.get("schema") or {})
+    if not schema:
+        return ValidatorResult(
+            validator_id=spec.validator_id,
+            family_id=spec.family_id,
+            claim_ids=list(spec.claim_ids),
+            status="abstain",
+            authority_used="A0",
+            health_status={"schema_loaded": False},
+            observations={"reason": "missing_schema"},
+        )
     errors: list[str] = []
-    schema_type = str(schema.get("type") or "")
+    schema_type = _schema_type(schema)
     if schema_type and not _type_ok(artifact, schema_type):
         errors.append(f"expected type {schema_type}")
     required = schema.get("required", []) if isinstance(schema.get("required", []), list) else []
@@ -57,7 +76,7 @@ def family() -> ValidatorFamily:
         default_visibility="sealed",
         leakage_risk="low",
         default_failure_action="abstain",
-        input_contract={"optional": ["schema", "artifact"]},
+        input_contract={"requires": ["schema", "artifact"]},
         output_schema={"type": "object", "properties": {"errors": {"type": "array"}}},
         run=_run,
         applicability=_applicability,

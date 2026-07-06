@@ -41,6 +41,93 @@ def objective_specs_from_suite(suite, partition: str = "train") -> list[Objectiv
     return specs
 
 
+def objective_specs_from_oracle_package(package, partition: str = "train") -> list[ObjectiveSpec]:
+    claim_by_id = {str(claim.claim_id): claim for claim in package.claim_graph.claims}
+    validator_by_id = {str(validator.validator_id): validator for validator in package.validator_specs}
+
+    def claim_active_for_task(claim_id: str, oracle_task: Any) -> bool:
+        claim = claim_by_id.get(str(claim_id))
+        if claim is None:
+            return False
+        validators = [
+            validator_by_id[str(validator_id)]
+            for validator_id in oracle_task.validator_ids
+            if str(validator_id) in validator_by_id
+            and str(claim_id) in {str(item) for item in validator_by_id[str(validator_id)].claim_ids}
+        ]
+        if not validators:
+            return False
+        explicit_promotion = any(str(validator.failure_action) in {"reject", "quarantine"} for validator in validators)
+        diagnostic = str(claim.criticality) == "diagnostic" or bool(claim.unverifiable_reason)
+        if diagnostic:
+            return explicit_promotion
+        return any(str(validator.failure_action) != "diagnostic" for validator in validators)
+
+    all_task_claim_ids = {
+        str(claim_id)
+        for task_set in package.task_sets
+        for task in task_set.tasks
+        for claim_id in task.claim_ids
+    }
+    task_records = [
+        task
+        for task_set in package.task_sets
+        if str(task_set.partition) == str(partition)
+        for task in task_set.tasks
+    ]
+    if not task_records and str(partition) != "train":
+        task_records = [
+            task
+            for task_set in package.task_sets
+            if str(task_set.partition) == "train"
+            for task in task_set.tasks
+        ]
+    partition_claim_ids = {str(claim_id) for task in task_records for claim_id in task.claim_ids}
+    active_partition_claim_ids = {
+        str(claim_id)
+        for task in task_records
+        for claim_id in task.claim_ids
+        if claim_active_for_task(str(claim_id), task)
+    }
+    specs: list[ObjectiveSpec] = []
+    seen: set[str] = set()
+    for oracle_task in task_records:
+        task_claim_ids = {str(claim_id) for claim_id in oracle_task.claim_ids}
+        if len(task_claim_ids) != 1:
+            continue
+        task_claim_id = next(iter(task_claim_ids))
+        if not claim_active_for_task(task_claim_id, oracle_task):
+            continue
+        public_task = oracle_task.public_task()
+        name = f"s:{public_task.task_id}"
+        if name in seen:
+            continue
+        seen.add(name)
+        specs.append(ObjectiveSpec(name=name, kind=ObjectiveKind.SINGLE_TASK, task_id=public_task.task_id, family=public_task.family))
+    axis_ids: list[str] = []
+    for axis in getattr(package.evidence_contract, "quality_axes", []) or []:
+        axis_id = str(getattr(axis, "axis_id", "") or "")
+        if axis_id:
+            axis_ids.append(axis_id)
+    if not axis_ids:
+        axis_ids = [str(claim_id) for claim_id in getattr(package.scoring_projection, "axis_weights", {})]
+    if not axis_ids:
+        axis_ids = [claim.claim_id for claim in package.claim_graph.claims]
+    unmapped_axis_ids = sorted(set(axis_ids) - all_task_claim_ids)
+    if unmapped_axis_ids:
+        raise ValueError(
+            "oracle objective axes are not backed by OracleTask.claim_ids: "
+            + ", ".join(unmapped_axis_ids)
+        )
+    for axis_id in sorted(set(axis_ids) & partition_claim_ids & active_partition_claim_ids):
+        name = f"axis:{axis_id}"
+        if name in seen:
+            continue
+        seen.add(name)
+        specs.append(ObjectiveSpec(name=name, kind=ObjectiveKind.GLOBAL, family="oracle"))
+    return specs
+
+
 
 def interface_bitmask(scope: Sequence[str]) -> str:
     active = set(scope)

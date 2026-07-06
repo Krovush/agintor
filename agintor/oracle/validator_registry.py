@@ -29,7 +29,15 @@ class ValidatorFamily:
             return 0.0
         return float(self.applicability(context))
 
-    def make_spec(self, *, validator_id: str, claim_ids: list[str], inputs: dict[str, Any] | None = None, visibility: str | None = None) -> ValidatorSpec:
+    def make_spec(
+        self,
+        *,
+        validator_id: str,
+        claim_ids: list[str],
+        inputs: dict[str, Any] | None = None,
+        visibility: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ValidatorSpec:
         return ValidatorSpec(
             validator_id=validator_id,
             family_id=self.family_id,
@@ -42,6 +50,10 @@ class ValidatorFamily:
             leakage_risk=self.leakage_risk,
             health_tests=list(self.health_tests),
             failure_action=self.default_failure_action,
+            metadata={
+                "input_contract": dict(self.input_contract),
+                **dict(metadata or {}),
+            },
         )
 
     def run_validator(self, spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:

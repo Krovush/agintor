@@ -186,11 +186,42 @@ def _mean_goal_score(scores: dict[str, float], goal_keys: list[str]) -> float:
     return sum(values) / len(values)
 
 
-def _export_candidate_records(engine: EvolutionEngine, goal_keys: list[str]) -> list[ArchiveRecord]:
+def _export_objective_names(engine: EvolutionEngine, goal_keys: list[str]) -> list[str]:
+    if getattr(engine, "oracle_package", None) is not None:
+        active = list(getattr(engine, "_active_objective_ids", lambda: [])())
+        if active:
+            return active
     objective_names: list[str] = []
     for objective_name in [*goal_keys, "sbar:global"]:
         if objective_name not in objective_names:
             objective_names.append(objective_name)
+    return objective_names
+
+
+def _export_validation_score(engine: EvolutionEngine, runtime_dir: Path, objective_names: list[str]) -> float:
+    evaluator = getattr(engine, "evaluate_validation_for_objective", None)
+    if getattr(engine, "oracle_package", None) is not None and objective_names and callable(evaluator):
+        scores: list[float] = []
+        for objective_name in objective_names:
+            validation = evaluator(runtime_dir, objective_name)
+            scores.append(validation.objective_scores.get(objective_name, float("-inf")))
+        return min(scores) if scores else float("-inf")
+    validation_objective = (
+        getattr(engine, "_validation_objective_name", lambda: "sbar:global")()
+        if getattr(engine, "oracle_package", None) is not None
+        else "sbar:global"
+    )
+    if validation_objective not in objective_names and objective_names:
+        validation_objective = objective_names[0]
+    if callable(evaluator):
+        validation = evaluator(runtime_dir, validation_objective)
+    else:
+        validation = engine.evaluator.evaluate_validation(runtime_dir)
+    return validation.objective_scores.get(validation_objective, float("-inf"))
+
+
+def _export_candidate_records(engine: EvolutionEngine, goal_keys: list[str]) -> list[ArchiveRecord]:
+    objective_names = _export_objective_names(engine, goal_keys)
     objective_rank = {name: index for index, name in enumerate(objective_names)}
     deduped: dict[str, ArchiveRecord] = {}
     capability_records = getattr(engine.archive, "archive_records", lambda _kind=None: [])("capability")
@@ -374,8 +405,9 @@ def _score_rows_for_candidates(
     candidates: list[ArchiveRecord],
     goal_keys: list[str],
 ) -> list[dict[str, Any]]:
+    scoring_keys = _export_objective_names(engine, goal_keys)
     goal_scores = {
-        record.entry.runtime_hash: _mean_goal_score(record.entry.scores, goal_keys)
+        record.entry.runtime_hash: _mean_goal_score(record.entry.scores, scoring_keys)
         for record in candidates
     }
     validation_scores: dict[str, float | None] = {}
@@ -384,28 +416,33 @@ def _score_rows_for_candidates(
     grouped_candidates: dict[float, list[ArchiveRecord]] = {}
     for record in candidates:
         grouped_candidates.setdefault(goal_scores[record.entry.runtime_hash], []).append(record)
+    oracle_mode = getattr(engine, "oracle_package", None) is not None
     for goal_score in sorted(grouped_candidates, reverse=True):
         successful_validations = False
         for record in grouped_candidates[goal_score]:
             runtime_hash = record.entry.runtime_hash
             try:
-                validation = engine.evaluator.evaluate_validation(Path(record.runtime_dir))
+                validation_score = _export_validation_score(engine, Path(record.runtime_dir), scoring_keys)
+                validation_scores[runtime_hash] = validation_score
             except Exception as exc:
                 validation_errors[runtime_hash] = str(exc)
                 continue
-            validation_scores[runtime_hash] = validation.objective_scores.get("sbar:global", float("-inf"))
-            successful_validations = True
+            if not oracle_mode or validation_score > 0.0:
+                successful_validations = True
         if successful_validations:
             winning_goal_score = goal_score
             break
     rows: list[dict[str, Any]] = []
     for record in candidates:
         runtime_hash = record.entry.runtime_hash
+        validation_passed = runtime_hash in validation_scores
+        if validation_passed and oracle_mode:
+            validation_passed = (validation_scores.get(runtime_hash) or float("-inf")) > 0.0
         export_eligible = (
             record.archive_kind == "capability"
             and winning_goal_score is not None
             and goal_scores[runtime_hash] == winning_goal_score
-            and runtime_hash in validation_scores
+            and validation_passed
         )
         rows.append(
             {
@@ -418,7 +455,7 @@ def _score_rows_for_candidates(
                 "export_eligible": export_eligible,
                 "archive_kind": record.archive_kind,
                 "promotion_type": str(getattr(record.promotion_type or record.entry.promotion_type, "value", record.promotion_type or record.entry.promotion_type or "")),
-                "train_score": record.entry.scores.get("sbar:global", float("-inf")),
+                "train_score": record.entry.scores.get(scoring_keys[0], float("-inf")) if scoring_keys else record.entry.scores.get("sbar:global", float("-inf")),
                 "mutable_loc": record.entry.mutable_loc,
                 "scope_tag": record.entry.scope_tag,
                 "behavior_bin": list(record.entry.behavior_bin),

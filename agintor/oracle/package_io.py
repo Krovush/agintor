@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..contracts import OraclePackage
-from ..contracts.oracle import oracle_package_hash, oracle_public_view_hash, oracle_sealed_view_hash
+from ..contracts.oracle import oracle_package_hash, oracle_public_view_hash, oracle_sealed_payload_digest, oracle_sealed_view_hash
 from ..utils import ensure_directory, stable_hash
 from .projections import public_oracle_projection, sealed_oracle_projection
 
@@ -38,12 +38,14 @@ def finalize_oracle_package(package: OraclePackage) -> OraclePackage:
     sealed_payload = sealed_oracle_projection(package)
     public_hash = oracle_public_view_hash(package)
     sealed_hash = oracle_sealed_view_hash(package)
+    sealed_payload_hash = oracle_sealed_payload_digest(package)
     package_hash = oracle_package_hash(package, assume_projection_hashes=(public_hash, sealed_hash))
     return package.model_copy(
         update={
             "package_hash": package_hash,
             "public_view_hash": public_hash,
             "sealed_view_hash": sealed_hash,
+            "sealed_payload_digest": sealed_payload_hash,
             "frozen": True,
         },
         deep=True,
@@ -53,9 +55,17 @@ def finalize_oracle_package(package: OraclePackage) -> OraclePackage:
 def write_oracle_package(package: OraclePackage, package_dir: str | Path) -> OraclePackage:
     frozen = finalize_oracle_package(package)
     root = ensure_directory(Path(package_dir))
-    (root / ORACLE_PACKAGE_FILE).write_text(json.dumps(frozen.model_dump(mode="json"), indent=2, sort_keys=True), encoding="utf-8")
+    sealed_payload = sealed_oracle_projection(frozen)
+    sealed_payload.update(
+        {
+            "package_hash": frozen.package_hash,
+            "public_view_hash": frozen.public_view_hash,
+            "sealed_view_hash": frozen.sealed_view_hash,
+        }
+    )
+    (root / ORACLE_PACKAGE_FILE).write_text(json.dumps(sealed_payload, indent=2, sort_keys=True), encoding="utf-8")
     (root / ORACLE_PUBLIC_FILE).write_text(json.dumps(public_oracle_projection(frozen), indent=2, sort_keys=True), encoding="utf-8")
-    (root / ORACLE_SEALED_FILE).write_text(json.dumps(sealed_oracle_projection(frozen), indent=2, sort_keys=True), encoding="utf-8")
+    (root / ORACLE_SEALED_FILE).write_text(json.dumps(sealed_payload, indent=2, sort_keys=True), encoding="utf-8")
     lock = {
         "package_id": frozen.package_id,
         "package_hash": frozen.package_hash,
@@ -70,7 +80,12 @@ def write_oracle_package(package: OraclePackage, package_dir: str | Path) -> Ora
 
 def load_oracle_package(path: str | Path) -> OraclePackage:
     source = Path(path)
-    package_path = source / ORACLE_PACKAGE_FILE if source.is_dir() else source
+    if source.is_dir():
+        package_path = source / ORACLE_SEALED_FILE
+        if not package_path.exists():
+            raise ValueError(f"missing sealed oracle package at {package_path}")
+    else:
+        package_path = source
     return OraclePackage.model_validate(json.loads(package_path.read_text(encoding="utf-8")))
 
 

@@ -95,6 +95,7 @@ class OracleTask(OracleModel):
     partition: Literal["train", "val", "test", "heldout", "confirmatory", "proxy"] = "train"
     public_tags: list[str] = Field(default_factory=list)
     sealed_refs: list[str] = Field(default_factory=list)
+    sealed_payload_digest: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def public_task(self) -> BenchmarkTask:
@@ -236,6 +237,7 @@ class OraclePackage(OracleModel):
     qa_report_ref: str = ""
     public_view_hash: str = ""
     sealed_view_hash: str = ""
+    sealed_payload_digest: str = ""
     frozen: bool = True
     created_at: float = Field(default_factory=now_ts)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -259,6 +261,13 @@ class OraclePackage(OracleModel):
         )
         if critical_uncovered:
             raise ValueError(f"hard claims require validators or explicit abstention: {critical_uncovered}")
+        for task_set in self.task_sets:
+            for task in task_set.tasks:
+                computed_task_digest = oracle_task_sealed_payload_digest(task)
+                if task.sealed_payload_digest and task.sealed_payload_digest != computed_task_digest:
+                    raise ValueError(f"task {task.task_id!r} sealed_payload_digest does not match sealed task payload")
+                if not task.sealed_payload_digest:
+                    task.sealed_payload_digest = computed_task_digest
         computed_public = oracle_public_view_hash(self)
         computed_sealed = oracle_sealed_view_hash(self)
         if self.public_view_hash and self.public_view_hash != computed_public:
@@ -272,6 +281,11 @@ class OraclePackage(OracleModel):
             self.public_view_hash = computed_public
         if not self.sealed_view_hash:
             self.sealed_view_hash = computed_sealed
+        computed_sealed_payload = oracle_sealed_payload_digest(self)
+        if self.sealed_payload_digest and self.sealed_payload_digest != computed_sealed_payload:
+            raise ValueError("sealed_payload_digest does not match nested sealed task payloads")
+        if not self.sealed_payload_digest:
+            self.sealed_payload_digest = computed_sealed_payload
         if not self.package_hash:
             self.package_hash = computed_package
         return self
@@ -331,6 +345,24 @@ def _hash_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_hash_payload(item) for item in value]
     return value
+
+
+def oracle_task_sealed_payload_digest(task: OracleTask) -> str:
+    return stable_hash("agintor.oracle.task.sealed", sealed_benchmark_task_payload(task.benchmark_task))
+
+
+def oracle_sealed_payload_digest(package: OraclePackage | dict[str, Any]) -> str:
+    pkg = package if isinstance(package, OraclePackage) else OraclePackage.model_validate(package)
+    task_digests = [
+        {
+            "task_set_id": task_set.task_set_id,
+            "task_id": task.task_id,
+            "sealed_payload_digest": oracle_task_sealed_payload_digest(task),
+        }
+        for task_set in pkg.task_sets
+        for task in task_set.tasks
+    ]
+    return stable_hash("agintor.oracle.sealed.payloads", task_digests)
 
 
 def oracle_runtime_visible_benchmark_task(task: OracleTask) -> BenchmarkTask:
@@ -417,7 +449,23 @@ def oracle_public_projection(package: OraclePackage | dict[str, Any]) -> dict[st
 
 def oracle_sealed_projection(package: OraclePackage | dict[str, Any]) -> dict[str, Any]:
     pkg = package if isinstance(package, OraclePackage) else OraclePackage.model_validate(package)
-    return pkg.model_dump(mode="json", exclude_none=True, exclude={"package_hash", "public_view_hash", "sealed_view_hash"})
+    payload = pkg.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude={"package_hash", "public_view_hash", "sealed_view_hash", "task_sets"},
+    )
+    payload["sealed_payload_digest"] = oracle_sealed_payload_digest(pkg)
+    payload["task_sets"] = []
+    for task_set in pkg.task_sets:
+        task_set_payload = task_set.model_dump(mode="json", exclude_none=True, exclude={"tasks"})
+        task_set_payload["tasks"] = []
+        for task in task_set.tasks:
+            task_payload = task.model_dump(mode="json", exclude_none=True, exclude={"benchmark_task"})
+            task_payload["benchmark_task"] = sealed_benchmark_task_payload(task.benchmark_task)
+            task_payload["sealed_payload_digest"] = oracle_task_sealed_payload_digest(task)
+            task_set_payload["tasks"].append(task_payload)
+        payload["task_sets"].append(task_set_payload)
+    return payload
 
 
 def oracle_public_view_hash(package: OraclePackage | dict[str, Any]) -> str:
@@ -437,7 +485,7 @@ def oracle_package_hash(package: OraclePackage | dict[str, Any], *, assume_proje
 
 def freeze_oracle_package(package: OraclePackage | dict[str, Any]) -> OraclePackage:
     pkg = package if isinstance(package, OraclePackage) else OraclePackage.model_validate(package)
-    payload = pkg.model_dump(mode="json")
+    payload = oracle_sealed_projection(pkg)
     payload["frozen"] = True
     payload["public_view_hash"] = ""
     payload["sealed_view_hash"] = ""
@@ -486,6 +534,8 @@ __all__ = [
     "oracle_runtime_visible_tasks_by_partition",
     "oracle_runtime_visible_benchmark_task",
     "oracle_sealed_projection",
+    "oracle_sealed_payload_digest",
     "oracle_sealed_view_hash",
+    "oracle_task_sealed_payload_digest",
     "oracle_tasks_by_partition",
 ]

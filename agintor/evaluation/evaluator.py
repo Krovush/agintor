@@ -328,6 +328,14 @@ class RuntimeEvaluator:
         if "statistics" in required:
             statistics_ok = bool(suite_tasks) and (minimum <= 0 or len(distinct_challenges) >= minimum)
             status["statistics"] = "pass" if statistics_ok else "missing"
+        oracle_package = getattr(self, "oracle_package", None)
+        if oracle_package is not None:
+            expected_objectives = self._oracle_expected_objective_ids(run_task_ids=run_task_ids)
+            observed_objectives = {str(name) for name in child_eval.objective_scores}
+            missing_objectives = sorted(expected_objectives - observed_objectives)
+            status["oracle_objective_alignment"] = "pass" if not missing_objectives else "fail"
+            if missing_objectives:
+                status["oracle_objective_alignment_missing"] = ",".join(missing_objectives)
 
         leakage_required = "leakage" in required or bool(self.evidence_contract.leakage_policy)
         leakage_state = "unknown"
@@ -350,7 +358,25 @@ class RuntimeEvaluator:
                 leakage_state = "leaked"
         return status, leakage_state
 
-    def _stage4_decision(self, parent_eval: SuiteEvaluation, child_eval: SuiteEvaluation) -> PromotionDecision:
+    def _oracle_expected_objective_ids(self, *, run_task_ids: set[str] | None = None) -> set[str]:
+        package = getattr(self, "oracle_package", None)
+        if package is None:
+            return set()
+        expected: set[str] = set()
+        for task_set in package.task_sets:
+            for oracle_task in task_set.tasks:
+                public_task = oracle_task.public_task()
+                ids = {str(oracle_task.task_id), str(oracle_task.benchmark_task.task_id), str(public_task.task_id)}
+                if run_task_ids is not None and not (ids & run_task_ids):
+                    continue
+                expected.add(f"s:{public_task.task_id}")
+                for claim_id in oracle_task.claim_ids:
+                    expected.add(f"axis:{claim_id}")
+        return expected
+
+    def _stage4_decision(self, parent_eval: SuiteEvaluation, child_eval: SuiteEvaluation, objective: ObjectiveSpec | None = None) -> PromotionDecision:
+        parent_eval = self._evaluation_for_oracle_objective(parent_eval, objective)
+        child_eval = self._evaluation_for_oracle_objective(child_eval, objective)
         health_floor_status, leakage_status = self._stage4_contract_attestation(child_eval)
         oracle_package = getattr(self, "oracle_package", None)
         if oracle_package is not None:
@@ -366,10 +392,30 @@ class RuntimeEvaluator:
         return self.progress_oracle.decide_evaluations(
             parent_eval,
             child_eval,
-            contract=self.evidence_contract,
+            contract=self._evidence_contract_for_objective(objective),
             health_floor_status=health_floor_status,
             leakage_status=leakage_status,
         )
+
+    def _call_stage4_decision(
+        self,
+        parent_eval: SuiteEvaluation,
+        child_eval: SuiteEvaluation,
+        objective: ObjectiveSpec | None,
+    ) -> PromotionDecision:
+        try:
+            signature = inspect.signature(self._stage4_decision)
+        except (TypeError, ValueError):
+            signature = None
+        accepts_objective = True
+        if signature is not None:
+            accepts_objective = "objective" in signature.parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+        if objective is not None and accepts_objective:
+            return self._stage4_decision(parent_eval, child_eval, objective=objective)
+        return self._stage4_decision(parent_eval, child_eval)
 
     def _axis_id_for_task(self, decision: PromotionDecision, task_id: str) -> str:
         comparison = decision.progress_signal.pairwise_comparisons[0] if decision.progress_signal and decision.progress_signal.pairwise_comparisons else None
@@ -395,6 +441,7 @@ class RuntimeEvaluator:
             checkpoint_ref = str(getattr(run, "latest_checkpoint_ref", None) or getattr(run, "checkpoint_ref", None) or "")
             trace_ref = self._trace_ref(run)
             validator_rows: list[dict[str, Any]] = []
+            claim_results: list[ClaimResult] = []
             claim_rows: list[dict[str, Any]] = []
             oracle_package = getattr(self, "oracle_package", None)
             evaluation_identity = dict(getattr(evaluation, "evaluation_identity", {}) or {})
@@ -403,6 +450,13 @@ class RuntimeEvaluator:
                 validator_results, claim_results = self._oracle_evidence_for_run(run, oracle_task=oracle_task)
                 validator_rows = [result.model_dump(mode="json", exclude_none=True) for result in validator_results]
                 claim_rows = [result.model_dump(mode="json", exclude_none=True) for result in claim_results]
+            oracle_axis_scores = {
+                str(result.claim_id): self._oracle_axis_score_from_claim_result(
+                    result,
+                    authority_floor=self._claim_authority_floor(str(result.claim_id)),
+                )
+                for result in claim_results
+            }
             record_id = stable_hash(
                 "stage4.evidence",
                 role,
@@ -428,8 +482,16 @@ class RuntimeEvaluator:
                 "runtime_spec_digest": str(evaluation_identity.get("runtime_spec_digest", "") or ""),
                 "validator_results": validator_rows,
                 "claim_results": claim_rows,
+                "oracle_axis_scores": oracle_axis_scores,
             }
             digest = stable_hash(digest_payload)
+            axis_scores = self._stage4_axis_scores_for_run(
+                run,
+                decision=decision,
+                record_id=record_id,
+                evidence_digest=digest,
+                claim_results=claim_results,
+            )
             record = EvidenceRecord(
                 record_id=record_id,
                 contract_id=decision.contract_id,
@@ -447,15 +509,7 @@ class RuntimeEvaluator:
                 checkpoint_refs=[checkpoint_ref] if checkpoint_ref else [],
                 trace_refs=[trace_ref] if trace_ref else [],
                 artifact_ref=str(getattr(run, "artifact_ref", "") or ""),
-                axis_scores=[
-                    OutcomeAxisScore(
-                        axis_id=self._axis_id_for_task(decision, str(run.task_id)),
-                        score=float(run.verifier_score),
-                        authority="A4" if not run.hard_invalid else "A0",
-                        evidence_ref=record_id,
-                        evidence_digest=digest,
-                    )
-                ],
+                axis_scores=axis_scores,
                 efficiency_scores={
                     "cost": float(run.cost),
                     "latency": float(run.latency),
@@ -466,6 +520,7 @@ class RuntimeEvaluator:
                     {
                         "role": role,
                         "verifier_score": float(run.verifier_score),
+                        "oracle_axis_scores": oracle_axis_scores,
                         "hard_invalid": bool(run.hard_invalid),
                         "artifact": run.artifact,
                     }
@@ -476,6 +531,61 @@ class RuntimeEvaluator:
             )
             rows.append(record.model_dump(mode="json", exclude_none=True))
         return rows
+
+    def _stage4_axis_scores_for_run(
+        self,
+        run: RunResult,
+        *,
+        decision: PromotionDecision,
+        record_id: str,
+        evidence_digest: str,
+        claim_results: Sequence[ClaimResult],
+    ) -> list[OutcomeAxisScore]:
+        if run.hard_invalid:
+            return [
+                OutcomeAxisScore(
+                    axis_id=self._axis_id_for_task(decision, str(run.task_id)),
+                    score=0.0,
+                    authority="A0",
+                    evidence_ref=record_id,
+                    evidence_digest=evidence_digest,
+                )
+            ]
+        if claim_results:
+            return [
+                OutcomeAxisScore(
+                    axis_id=str(result.claim_id),
+                    score=self._oracle_axis_score_from_claim_result(
+                        result,
+                        authority_floor=self._claim_authority_floor(str(result.claim_id)),
+                    ),
+                    authority=self._claim_result_authority(result),
+                    evidence_ref=record_id,
+                    evidence_digest=evidence_digest,
+                )
+                for result in claim_results
+            ]
+        return [
+            OutcomeAxisScore(
+                axis_id=self._axis_id_for_task(decision, str(run.task_id)),
+                score=float(run.verifier_score),
+                authority="A4" if not run.hard_invalid else "A0",
+                evidence_ref=record_id,
+                evidence_digest=evidence_digest,
+            )
+        ]
+
+    @staticmethod
+    def _claim_result_authority(result: ClaimResult) -> str:
+        if not result.authority_mass:
+            return "A0"
+
+        return max((str(authority) for authority in result.authority_mass), key=RuntimeEvaluator._authority_rank)
+
+    @staticmethod
+    def _authority_rank(authority: str) -> int:
+        text = str(authority)
+        return int(text[1:]) if len(text) == 2 and text.startswith("A") and text[1:].isdigit() else 0
 
     def _write_stage4_ledgers(self, parent_eval: SuiteEvaluation, child_eval: SuiteEvaluation, decision: PromotionDecision) -> PromotionDecision:
         comparison = decision.progress_signal.pairwise_comparisons[0] if decision.progress_signal and decision.progress_signal.pairwise_comparisons else None
@@ -786,8 +896,16 @@ class RuntimeEvaluator:
             return 0.0
         claim_ids = [str(claim_id) for claim_id in oracle_task.claim_ids]
         result_by_claim = {str(result.claim_id): result for result in claim_results}
+        score_by_claim = {
+            claim_id: self._oracle_axis_score_from_claim_result(
+                result,
+                authority_floor=self._claim_authority_floor(claim_id),
+            )
+            for claim_id, result in result_by_claim.items()
+            if claim_id in claim_ids
+        }
         hard_claim_ids = set(getattr(oracle_package.scoring_projection, "hard_claim_ids", []) or []) & set(claim_ids)
-        if any(result_by_claim.get(claim_id) is None or result_by_claim[claim_id].satisfied is not True for claim_id in hard_claim_ids):
+        if any(score_by_claim.get(claim_id, 0.0) < 1.0 for claim_id in hard_claim_ids):
             return 0.0
 
         claim_weights = dict(getattr(oracle_package.scoring_projection, "claim_weights", {}) or {})
@@ -798,15 +916,11 @@ class RuntimeEvaluator:
             if weight <= 0.0:
                 continue
             denominator += weight
-            result = result_by_claim.get(claim_id)
-            numerator += weight * (1.0 if result is not None and result.satisfied is True else 0.0)
+            numerator += weight * score_by_claim.get(claim_id, 0.0)
         if denominator > 0.0:
             return numerator / denominator
 
-        if not validator_results:
-            return 0.0
-        passed = sum(1 for result in validator_results if result.status == "pass")
-        return passed / len(validator_results)
+        return 0.0
 
     def _score_oracle_results(
         self,
@@ -821,8 +935,11 @@ class RuntimeEvaluator:
         rescored: list[RunResult] = []
         for run in runs:
             oracle_task = oracle_map.get(str(run.task_id))
-            if oracle_task is None or run.hard_invalid:
+            if oracle_task is None:
                 rescored.append(run)
+                continue
+            if run.hard_invalid:
+                rescored.append(run.model_copy(update={"verifier_score": 0.0}))
                 continue
             validator_results, claim_results = self._oracle_evidence_for_run(run, oracle_task=oracle_task)
             rescored.append(
@@ -900,9 +1017,232 @@ class RuntimeEvaluator:
             task_metadata=task_metadata,
             evaluation_identity=evaluation_identity,
         )
+        evaluation = self._with_oracle_objective_scores(evaluation)
         if use_cache:
             self.cache[cache_key] = evaluation
         return evaluation
+
+    def _with_oracle_objective_scores(self, evaluation: SuiteEvaluation) -> SuiteEvaluation:
+        package = getattr(self, "oracle_package", None)
+        if package is None:
+            return evaluation
+        task_by_id: dict[str, OracleTask] = {}
+        for task_set in package.task_sets:
+            for oracle_task in task_set.tasks:
+                public_task = oracle_task.public_task()
+                for task_id in {oracle_task.task_id, oracle_task.benchmark_task.task_id, public_task.task_id}:
+                    task_by_id[str(task_id)] = oracle_task
+        axis_scores: dict[str, list[float]] = {}
+        objective_scores = dict(evaluation.objective_scores)
+        for run in evaluation.run_results:
+            task_id = str(run.task_id)
+            oracle_task = task_by_id.get(task_id)
+            if oracle_task is None:
+                continue
+            claim_scores = self._oracle_axis_scores_for_run(run, oracle_task)
+            if claim_scores:
+                for claim_id, score in claim_scores.items():
+                    axis_scores.setdefault(claim_id, []).append(score)
+                continue
+            for claim_id in oracle_task.claim_ids:
+                axis_scores.setdefault(str(claim_id), []).append(0.0)
+        for claim_id, scores in axis_scores.items():
+            objective_scores[f"axis:{claim_id}"] = sum(scores) / max(1, len(scores))
+        return evaluation.model_copy(update={"objective_scores": objective_scores}, deep=True)
+
+    def _objective_scores_for_gate(self, evaluation: SuiteEvaluation, objective: ObjectiveSpec, tasks: Sequence[Any]) -> list[float]:
+        return list(self._objective_score_map_for_gate(evaluation, objective, tasks).values())
+
+    def _objective_score_pairs_for_gate(
+        self,
+        parent_eval: SuiteEvaluation,
+        child_eval: SuiteEvaluation,
+        objective: ObjectiveSpec,
+        tasks: Sequence[Any],
+    ) -> tuple[list[float], list[float]]:
+        parent_scores = self._objective_score_map_for_gate(parent_eval, objective, tasks)
+        child_scores = self._objective_score_map_for_gate(child_eval, objective, tasks)
+        paired_keys = sorted(set(parent_scores) & set(child_scores))
+        return [parent_scores[key] for key in paired_keys], [child_scores[key] for key in paired_keys]
+
+    def _objective_score_map_for_gate(
+        self,
+        evaluation: SuiteEvaluation,
+        objective: ObjectiveSpec,
+        tasks: Sequence[Any],
+    ) -> dict[tuple[str, int], float]:
+        axis_id = self._oracle_axis_id_for_objective(objective)
+        _, objective_task_ids = self._oracle_objective_target(objective)
+        if axis_id:
+            scores = self._oracle_run_score_map_for_axis(evaluation, axis_id, tasks, objective_task_ids=objective_task_ids)
+            if scores:
+                return scores
+            objective_name = f"axis:{axis_id}"
+            if not objective_task_ids and objective_name in evaluation.objective_scores:
+                return {(objective_name, 0): float(evaluation.objective_scores[objective_name])}
+            return {}
+        if getattr(self, "oracle_package", None) is not None and str(getattr(objective, "name", "") or "").startswith("s:"):
+            return {}
+        return {
+            (str(getattr(task, "task_id", task)), 0): float(evaluation.objective_scores.get(f"s:{getattr(task, 'task_id', task)}", 0.0))
+            for task in tasks
+        }
+
+    def _evaluation_for_oracle_objective(self, evaluation: SuiteEvaluation, objective: ObjectiveSpec | None) -> SuiteEvaluation:
+        axis_id, objective_task_ids = self._oracle_objective_target(objective)
+        if not axis_id:
+            if getattr(self, "oracle_package", None) is not None and str(getattr(objective, "name", "") or "").startswith("s:"):
+                return evaluation.model_copy(update={"run_results": []}, deep=True)
+            return evaluation
+        task_by_id = self._oracle_task_by_runtime_task_id()
+        updated_runs: list[RunResult] = []
+        matched_scores: list[float] = []
+        for run in evaluation.run_results:
+            if objective_task_ids and str(run.task_id) not in objective_task_ids:
+                continue
+            oracle_task = task_by_id.get(str(run.task_id))
+            if oracle_task is None or axis_id not in {str(claim_id) for claim_id in oracle_task.claim_ids}:
+                continue
+            score = self._oracle_axis_score_for_run(run, oracle_task, axis_id)
+            if score is None:
+                score = 0.0
+            matched_scores.append(score)
+            updated_runs.append(run.model_copy(update={"verifier_score": score}))
+        objective_scores = dict(evaluation.objective_scores)
+        objective_name = f"axis:{axis_id}"
+        if matched_scores:
+            objective_scores[objective_name] = sum(matched_scores) / len(matched_scores)
+        else:
+            objective_scores.pop(objective_name, None)
+        return evaluation.model_copy(update={"run_results": updated_runs, "objective_scores": objective_scores}, deep=True)
+
+    def _evidence_contract_for_objective(self, objective: ObjectiveSpec | None) -> DomainEvidenceContract | None:
+        contract = self.evidence_contract
+        axis_id = self._oracle_axis_id_for_objective(objective)
+        if contract is None or not axis_id:
+            return contract
+        axes = [axis for axis in contract.quality_axes if self._quality_axis_id(axis) == axis_id]
+        if not axes:
+            return contract
+        return contract.model_copy(update={"quality_axes": axes}, deep=True)
+
+    def _oracle_run_score_map_for_axis(
+        self,
+        evaluation: SuiteEvaluation,
+        axis_id: str,
+        tasks: Sequence[Any],
+        *,
+        objective_task_ids: set[str] | None = None,
+    ) -> dict[tuple[str, int], float]:
+        task_by_id = self._oracle_task_by_runtime_task_id()
+        allowed_task_ids = self._gate_task_id_aliases(tasks)
+        scores: dict[tuple[str, int], float] = {}
+        for run in evaluation.run_results:
+            if str(run.task_id) not in allowed_task_ids:
+                continue
+            if objective_task_ids and str(run.task_id) not in objective_task_ids:
+                continue
+            oracle_task = task_by_id.get(str(run.task_id))
+            if oracle_task is None or axis_id not in {str(claim_id) for claim_id in oracle_task.claim_ids}:
+                continue
+            score = self._oracle_axis_score_for_run(run, oracle_task, axis_id)
+            if score is not None:
+                scores[(str(oracle_task.public_task().task_id), int(run.seed))] = score
+        return scores
+
+    def _gate_task_id_aliases(self, tasks: Sequence[Any]) -> set[str]:
+        task_by_id = self._oracle_task_by_runtime_task_id()
+        task_ids: set[str] = set()
+        for task in tasks:
+            task_id = str(getattr(task, "task_id", task))
+            task_ids.add(task_id)
+            oracle_task = task_by_id.get(task_id)
+            if oracle_task is None:
+                continue
+            public_task = oracle_task.public_task()
+            task_ids.update({str(oracle_task.task_id), str(oracle_task.benchmark_task.task_id), str(public_task.task_id)})
+        return task_ids
+
+    def _oracle_axis_score_for_run(self, run: RunResult, oracle_task: OracleTask, axis_id: str) -> float | None:
+        return self._oracle_axis_scores_for_run(run, oracle_task).get(axis_id)
+
+    def _oracle_axis_id_for_objective(self, objective: ObjectiveSpec | None) -> str:
+        return self._oracle_objective_target(objective)[0]
+
+    def _oracle_objective_target(self, objective: ObjectiveSpec | None) -> tuple[str, set[str]]:
+        if getattr(self, "oracle_package", None) is None or objective is None:
+            return "", set()
+        objective_name = str(getattr(objective, "name", "") or "")
+        if objective_name.startswith("axis:"):
+            return objective_name.split(":", 1)[1], set()
+        if objective_name.startswith("s:") or objective.kind == ObjectiveKind.SINGLE_TASK:
+            task_id = str(objective.task_id or (objective_name.split(":", 1)[1] if objective_name.startswith("s:") else "") or "")
+            oracle_task = self._oracle_task_by_runtime_task_id().get(task_id)
+            if oracle_task is None:
+                return "", set()
+            claim_ids = {str(claim_id) for claim_id in oracle_task.claim_ids}
+            if len(claim_ids) != 1:
+                return "", set()
+            public_task = oracle_task.public_task()
+            return next(iter(claim_ids)), {
+                str(oracle_task.task_id),
+                str(oracle_task.benchmark_task.task_id),
+                str(public_task.task_id),
+            }
+        return "", set()
+
+    @staticmethod
+    def _quality_axis_id(axis: Any) -> str:
+        raw = dict(axis) if isinstance(axis, Mapping) else {}
+        return str(getattr(axis, "axis_id", raw.get("axis_id", "")) or "")
+
+    def _oracle_axis_scores_for_run(self, run: RunResult, oracle_task: OracleTask) -> dict[str, float]:
+        if run.hard_invalid:
+            return {}
+        _, claim_results = self._oracle_evidence_for_run(run, oracle_task=oracle_task)
+        oracle_claim_ids = {str(claim_id) for claim_id in oracle_task.claim_ids}
+        return {
+            str(result.claim_id): self._oracle_axis_score_from_claim_result(
+                result,
+                authority_floor=self._claim_authority_floor(str(result.claim_id)),
+            )
+            for result in claim_results
+            if str(result.claim_id) in oracle_claim_ids
+        }
+
+    def _claim_authority_floor(self, claim_id: str) -> str:
+        floor_rank = 0
+        package = getattr(self, "oracle_package", None)
+        if package is not None:
+            for claim in package.claim_graph.claims:
+                if str(claim.claim_id) == str(claim_id):
+                    floor_rank = max(floor_rank, self._authority_rank(str(claim.minimum_authority)))
+                    break
+        contract = getattr(self, "evidence_contract", None)
+        if contract is None and package is not None:
+            contract = package.evidence_contract
+        if contract is not None:
+            for axis in contract.quality_axes:
+                if self._quality_axis_id(axis) != str(claim_id):
+                    continue
+                raw = dict(axis) if isinstance(axis, Mapping) else {}
+                floor_rank = max(
+                    floor_rank,
+                    self._authority_rank(str(getattr(axis, "minimum_authority", raw.get("minimum_authority", "A0")))),
+                )
+        return f"A{floor_rank}"
+
+    @staticmethod
+    def _oracle_axis_score_from_claim_result(result: ClaimResult, *, authority_floor: str = "A0") -> float:
+        if RuntimeEvaluator._authority_rank(RuntimeEvaluator._claim_result_authority(result)) < RuntimeEvaluator._authority_rank(authority_floor):
+            return 0.0
+        if result.satisfied is True:
+            return 1.0
+        if result.satisfied is False:
+            return 0.0
+        if result.posterior_lower is not None and result.posterior_upper is not None:
+            return max(0.0, min(1.0, (float(result.posterior_lower) + float(result.posterior_upper)) / 2.0))
+        return 0.0
 
     def _apply_patch_uniquely(self, parent_dir: Path, candidate: MutationCandidate) -> Path:
         runtime = self._load_runtime(parent_dir)
@@ -1054,13 +1394,35 @@ class RuntimeEvaluator:
 
     def _objective_subset(self, objective: ObjectiveSpec) -> list[Any]:
         train_tasks = self._partition_tasks("train", allow_train_fallback=True)
+        package = getattr(self, "oracle_package", None)
+        if package is not None:
+            axis_id, objective_task_ids = self._oracle_objective_target(objective)
+            if objective_task_ids:
+                task_by_id = self._oracle_task_by_runtime_task_id("train", allow_train_fallback=True)
+                oracle_task = next((task_by_id[task_id] for task_id in objective_task_ids if task_id in task_by_id), None)
+                if oracle_task is not None:
+                    return [oracle_task.public_task()]
+                return []
+            if axis_id:
+                records = [
+                    oracle_task
+                    for oracle_task in self._oracle_task_records("train", allow_train_fallback=True)
+                    if axis_id in {str(claim_id) for claim_id in oracle_task.claim_ids}
+                ]
+                return [record.public_task() for record in records] or train_tasks[:4]
+            if str(objective.name).startswith("s:"):
+                return []
         if objective.kind == ObjectiveKind.SINGLE_TASK and objective.task_id:
-            target = next((task for task in train_tasks if task.task_id == objective.task_id), self.suite.by_id(objective.task_id))
+            target = next((task for task in train_tasks if task.task_id == objective.task_id), None)
+            if target is None:
+                target = self.suite.by_id(objective.task_id)
             same_family = [task for task in train_tasks if task.family == target.family and task.task_id != target.task_id][:2]
             return [target] + same_family
         if objective.kind in {ObjectiveKind.FAMILY, ObjectiveKind.FAMILY_ROBUST} and objective.family:
             selected = [task for task in train_tasks if task.family == objective.family][:4]
             return selected or self.suite.representative_family_tasks(objective.family, partition="train", limit=4)
+        if package is not None:
+            return train_tasks[:4]
         return [next(task for task in train_tasks if task.family == family) for family in ["top", "mem", "tool", "e2e"]]
 
     def stage3_local_subset(self, parent_dir: Path, child_dir: Path, objective: ObjectiveSpec, epsilon_part: float | None = None) -> EvaluationStageResult:
@@ -1069,8 +1431,7 @@ class RuntimeEvaluator:
         subset = self._objective_subset(objective)
         parent_eval = self.evaluate_runtime(parent_dir, partition="train", seeds=seeds, tasks_override=subset)
         child_eval = self.evaluate_runtime(child_dir, partition="train", seeds=seeds, tasks_override=subset)
-        parent_scores = [parent_eval.objective_scores.get(f"s:{task.task_id}", 0.0) for task in subset]
-        child_scores = [child_eval.objective_scores.get(f"s:{task.task_id}", 0.0) for task in subset]
+        parent_scores, child_scores = self._objective_score_pairs_for_gate(parent_eval, child_eval, objective, subset)
         avg, se, lcb = mean_improvement(child_scores, parent_scores)
         passed = lcb > -epsilon_part and not child_eval.invalid
         return EvaluationStageResult(stage=3, passed=passed, reason="local subset LCB gate", metrics={"delta": avg, "se": se, "lcb": lcb}, suite_evaluation=child_eval)
@@ -1105,17 +1466,20 @@ class RuntimeEvaluator:
             if not child_evaluation_identity:
                 child_evaluation_identity = dict(child_batch.evaluation_identity)
             if child_batch.invalid:
-                decision = self._stage4_decision(parent_eval, child_batch)
-                decision = self._write_stage4_ledgers(parent_eval, child_batch, decision)
+                parent_decision_eval = self._evaluation_for_oracle_objective(parent_eval, objective)
+                child_decision_eval = self._evaluation_for_oracle_objective(child_batch, objective)
+                decision = self._call_stage4_decision(parent_decision_eval, child_decision_eval, objective)
+                decision = self._write_stage4_ledgers(parent_decision_eval, child_decision_eval, decision)
                 return self._stage4_result_from_decision(
                     decision,
                     epsilon_full=epsilon_full,
-                    child_eval=child_batch,
+                    child_eval=child_decision_eval,
                     reason_prefix="full train evaluation invalid",
                 )
             aggregated_runs.extend(child_batch.run_results)
-            parent_scores_accum.extend(parent_eval.objective_scores.get(f"s:{task.task_id}", 0.0) for task in batch)
-            child_scores_accum.extend(child_batch.objective_scores.get(f"s:{task.task_id}", 0.0) for task in batch)
+            parent_batch_scores, child_batch_scores = self._objective_score_pairs_for_gate(parent_eval, child_batch, objective, batch)
+            parent_scores_accum.extend(parent_batch_scores)
+            child_scores_accum.extend(child_batch_scores)
             avg_batch, se_batch, _ = mean_improvement(child_scores_accum, parent_scores_accum)
             if avg_batch + 1.96 * se_batch < -self.delta_rej:
                 try:
@@ -1129,20 +1493,23 @@ class RuntimeEvaluator:
                     task_metadata=task_metadata,
                     evaluation_identity=child_evaluation_identity,
                 )
+                partial_eval = self._with_oracle_objective_scores(partial_eval)
+                parent_decision_eval = self._evaluation_for_oracle_objective(parent_eval, objective)
+                partial_decision_eval = self._evaluation_for_oracle_objective(partial_eval, objective)
                 health_floor_status, leakage_status = self._stage4_contract_attestation(partial_eval)
                 decision = self.progress_oracle.reject_evaluations(
-                    parent_eval,
-                    partial_eval,
-                    contract=self.evidence_contract,
+                    parent_decision_eval,
+                    partial_decision_eval,
+                    contract=self._evidence_contract_for_objective(objective),
                     health_floor_status=health_floor_status,
                     leakage_status=leakage_status,
                     reason_codes=["stage4_early_rejection"],
                 )
-                decision = self._write_stage4_ledgers(parent_eval, partial_eval, decision)
+                decision = self._write_stage4_ledgers(parent_decision_eval, partial_decision_eval, decision)
                 result = self._stage4_result_from_decision(
                     decision,
                     epsilon_full=epsilon_full,
-                    child_eval=partial_eval,
+                    child_eval=partial_decision_eval,
                     reason_prefix="stage4 early rejection",
                 )
                 result.metrics.update({"ucb": avg_batch + 1.96 * se_batch, "delta_rej": self.delta_rej})
@@ -1151,7 +1518,7 @@ class RuntimeEvaluator:
                     passed=False,
                     reason="stage4 early rejection",
                     metrics=result.metrics,
-                    suite_evaluation=partial_eval,
+                    suite_evaluation=partial_decision_eval,
                     progress_signal=result.progress_signal,
                     promotion_decision=result.promotion_decision,
                     promotion_type=result.promotion_type,
@@ -1172,9 +1539,12 @@ class RuntimeEvaluator:
             task_metadata=task_metadata,
             evaluation_identity=child_evaluation_identity,
         )
-        decision = self._stage4_decision(parent_eval, child_eval)
-        decision = self._write_stage4_ledgers(parent_eval, child_eval, decision)
-        return self._stage4_result_from_decision(decision, epsilon_full=epsilon_full, child_eval=child_eval)
+        child_eval = self._with_oracle_objective_scores(child_eval)
+        parent_decision_eval = self._evaluation_for_oracle_objective(parent_eval, objective)
+        child_decision_eval = self._evaluation_for_oracle_objective(child_eval, objective)
+        decision = self._call_stage4_decision(parent_decision_eval, child_decision_eval, objective)
+        decision = self._write_stage4_ledgers(parent_decision_eval, child_decision_eval, decision)
+        return self._stage4_result_from_decision(decision, epsilon_full=epsilon_full, child_eval=child_decision_eval)
 
     def evaluate_validation(self, runtime_dir: Path) -> SuiteEvaluation:
         return self.evaluate_runtime(runtime_dir, partition="val", seeds=self.reference_profile.evaluation.validation_seeds)

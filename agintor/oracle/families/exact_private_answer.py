@@ -9,6 +9,16 @@ from ..validator_registry import ValidatorFamily
 def _run(spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:
     expected = payload.get("private_expected", payload.get("expected"))
     observed = payload.get("artifact", payload.get("observed"))
+    if expected is None:
+        return ValidatorResult(
+            validator_id=spec.validator_id,
+            family_id=spec.family_id,
+            claim_ids=list(spec.claim_ids),
+            status="fail",
+            authority_used="A0",
+            health_status={"private_expected_loaded": False},
+            observations={"matched": False, "expected_present": False, "reason": "missing_private_expected"},
+        )
     passed = observed == expected
     return ValidatorResult(
         validator_id=spec.validator_id,
@@ -22,7 +32,7 @@ def _run(spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:
 
 
 def _applicability(context: dict[str, Any]) -> float:
-    return 0.9 if context.get("private_expected_available") else 0.1
+    return 0.9 if context.get("private_expected_available") else 0.0
 
 
 def family() -> ValidatorFamily:
