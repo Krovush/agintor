@@ -16,6 +16,7 @@ from .benchmarks import *  # noqa: F401,F403
 from .protocol import *  # noqa: F401,F403
 from .verifiers import *  # noqa: F401,F403
 from .evidence import *  # noqa: F401,F403
+from .validation import *  # noqa: F401,F403
 from .oracle import *  # noqa: F401,F403
 from .search import *  # noqa: F401,F403
 from .runtime_spec import ToolSpec as RuntimeToolSpec  # noqa: F401
@@ -31,6 +32,16 @@ for _model in (
     DomainEvidenceContract,
     ChallengeInstance,
     EvidenceRecord,
+    ValidationClaim,
+    ProofObligation,
+    ValidatorHealth,
+    ValidatorReport,
+    ClaimPosterior,
+    EvidenceLedger,
+    ComparisonRecord,
+    ArchitectureSignal,
+    AlphaBudget,
+    ValidationPlan,
     PairedComparison,
     ProgressSignal,
     PromotionDecision,

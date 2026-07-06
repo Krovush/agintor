@@ -104,6 +104,7 @@ class BuiltRuntimeResult:
     runtime_kind: str = "policy_modules"
     runtime_spec_digest: str = ""
     oracle_package_hash: str = ""
+    validation_plan_hash: str = ""
     oracle_package_ref: str = ""
     oracle_public_ref: str = ""
 

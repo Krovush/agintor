@@ -7,13 +7,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..utils import now_ts, stable_hash
 from .benchmarks import BenchmarkTask, sealed_benchmark_task_payload, runtime_visible_benchmark_task
 from .evidence import AuthorityLevel, DomainEvidenceContract, EvidenceRef
+from .validation import ProofObligation, ValidationPlan
 
 
 class OracleModel(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
 
-AuthorityLiteral = Literal["A0", "A1", "A2", "A3", "A4", "A5"]
+AuthorityLiteral = Literal["A0", "A1", "A2", "A3", "A4", "A5", "A6", "M0", "M1", "M2", "M3", "M4", "M5", "M6"]
 ClaimCriticality = Literal["hard", "major", "minor", "diagnostic"]
 ClaimType = Literal["outcome", "state", "process", "safety", "factual", "semantic", "architecture", "cost"]
 ValidatorVisibility = Literal["public", "private", "sealed"]
@@ -60,16 +61,6 @@ class ClaimGraph(OracleModel):
             if missing:
                 raise ValueError(f"claim {claim.claim_id!r} has missing dependencies {missing}")
         return self
-
-
-class ProofObligation(OracleModel):
-    obligation_id: str
-    claim_ids: list[str]
-    description: str = ""
-    required_validator_families: list[str] = Field(default_factory=list)
-    minimum_authority: AuthorityLiteral | str = "A4"
-    failure_action: Literal["reject", "abstain", "quarantine", "diagnostic"] = "abstain"
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ValidatorSpec(OracleModel):
@@ -238,6 +229,8 @@ class OraclePackage(OracleModel):
     public_view_hash: str = ""
     sealed_view_hash: str = ""
     sealed_payload_digest: str = ""
+    validation_plan_hash: str = ""
+    validation_plan: ValidationPlan | None = Field(default=None, exclude=True)
     frozen: bool = True
     created_at: float = Field(default_factory=now_ts)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -316,7 +309,15 @@ class OraclePackageQAReport(OracleModel):
     created_at: float = Field(default_factory=now_ts)
 
 
-_HASH_EXCLUDE_KEYS = {"package_hash", "public_view_hash", "sealed_view_hash", "qa_report_ref", "created_at", "completed_at"}
+_HASH_EXCLUDE_KEYS = {
+    "package_hash",
+    "public_view_hash",
+    "sealed_view_hash",
+    "validation_plan_hash",
+    "qa_report_ref",
+    "created_at",
+    "completed_at",
+}
 
 
 def _strip_private_mapping(value: Any, forbidden_keys: set[str]) -> Any:
@@ -426,7 +427,10 @@ def oracle_public_projection(package: OraclePackage | dict[str, Any]) -> dict[st
         "runtime_spec_digest": pkg.runtime_spec_digest,
         "validation_intent": pkg.validation_intent.model_dump(mode="json", exclude_none=True),
         "claim_graph": pkg.claim_graph.model_dump(mode="json", exclude_none=True),
-        "proof_obligations": [item.model_dump(mode="json", exclude_none=True) for item in pkg.proof_obligations],
+        "proof_obligations": [
+            item.model_dump(mode="json", exclude_none=True, exclude={"validator_ids"})
+            for item in pkg.proof_obligations
+        ],
         "validator_specs": public_validator_specs,
         "task_sets": public_task_sets,
         "fixture_bundle_refs": [
@@ -443,6 +447,7 @@ def oracle_public_projection(package: OraclePackage | dict[str, Any]) -> dict[st
             if key not in {"sealed_fields_forbidden", "runtime_visible_validator_families"}
         },
         "abstention_policy": pkg.abstention_policy.model_dump(mode="json", exclude_none=True),
+        "validation_plan_hash": pkg.validation_plan_hash,
         "frozen": pkg.frozen,
     }
 

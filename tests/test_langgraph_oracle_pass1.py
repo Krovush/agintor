@@ -11,9 +11,12 @@ from agintor.contracts import (
     AxisDelta,
     BenchmarkTask,
     CapabilityExchange,
+    ClaimPosterior,
     ClaimGraph,
+    ClaimResult,
     ClaimSpec,
     DomainEvidenceContract,
+    EvidenceLedger,
     GoalSpec,
     OraclePackage,
     OracleTask,
@@ -27,6 +30,7 @@ from agintor.contracts import (
     SuiteEvaluation,
     TaskScore,
     ValidationIntent,
+    ValidatorResult,
     ValidatorSpec,
     baseline_langgraph_runtime_spec,
 )
@@ -38,9 +42,10 @@ from agintor.evaluation.progress_oracle import ProgressOracle
 from agintor.evaluation.scoring import ScoreCalculator
 from agintor.integrations.tradingagents.compiler import tradingagents_spec_from_goal
 from agintor.oracle.compiler import OracleCompiler
-from agintor.oracle.package_io import load_oracle_package, write_oracle_package
+from agintor.oracle.package_io import assert_package_lock_matches, load_oracle_package, write_oracle_package
 from agintor.oracle.projections import public_oracle_projection
 from agintor.oracle.qa import OracleQARunner
+from agintor.oracle.validator_registry import ValidatorFamily, ValidatorRegistry
 from agintor.providers import LocalDeterministicProvider
 from agintor.runtime.api import load_solve_request, runtime_solve_request_for_user_request
 from agintor.runtime.host import RuntimeHost
@@ -111,11 +116,54 @@ def test_oracle_package_public_projection_and_hash_roundtrip(tmp_path: Path) -> 
     public_text = json.dumps(public_payload, sort_keys=True)
     assert "private_expected" not in public_text
     assert "sealed_validators" not in public_text
+    assert "validator_ids" not in json.dumps(public_payload["proof_obligations"], sort_keys=True)
+    for validator in written.validator_specs:
+        if validator.visibility != "public":
+            assert validator.validator_id not in public_text
     assert all(
         task["benchmark_task"]["verifier_type"] == "oracle_package"
         for task_set in public_payload["task_sets"]
         for task in task_set["tasks"]
     )
+
+
+def test_oracle_package_load_and_lock_recompute_validation_plan_hash(tmp_path: Path) -> None:
+    spec = baseline_langgraph_runtime_spec(runtime_id="runtime.pass1.validation-hash")
+    package_dir = tmp_path / "oracle"
+    package = write_oracle_package(OracleCompiler().compile(_goal(), spec), package_dir)
+
+    sealed_path = package_dir / "sealed.json"
+    sealed_payload = json.loads(sealed_path.read_text(encoding="utf-8"))
+    sealed_payload["validation_plan_hash"] = "tampered-validation-plan-hash"
+    sealed_path.write_text(json.dumps(sealed_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="validation_plan_hash"):
+        load_oracle_package(package_dir)
+
+    package = write_oracle_package(package, package_dir)
+    sealed_payload = json.loads(sealed_path.read_text(encoding="utf-8"))
+    sealed_payload.pop("validation_plan_hash")
+    sealed_path.write_text(json.dumps(sealed_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="validation_plan_hash"):
+        load_oracle_package(package_dir)
+
+    package = write_oracle_package(package, package_dir)
+    sealed_payload = json.loads(sealed_path.read_text(encoding="utf-8"))
+    sealed_payload["validation_plan_hash"] = ""
+    sealed_path.write_text(json.dumps(sealed_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="validation_plan_hash"):
+        load_oracle_package(package_dir)
+
+    package = write_oracle_package(package, package_dir)
+    lock_path = package_dir / "manifest.json"
+    lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock_payload["validation_plan_hash"] = "tampered-validation-plan-hash"
+    lock_path.write_text(json.dumps(lock_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="validation_plan_hash"):
+        assert_package_lock_matches(package, package_dir)
 
 
 def test_inspect_oracle_rejects_sealed_stdout_projection(tmp_path: Path) -> None:
@@ -313,6 +361,563 @@ def test_oracle_evidence_rows_carry_validator_claim_and_spec_identity(tmp_path: 
     assert rows[0]["validator_results"]
     assert rows[0]["claim_results"]
     assert rows[0]["evidence_digest"]
+
+
+def test_stage4_evidence_rows_score_from_ledger_posteriors_not_raw_claim_results() -> None:
+    run = RunResult(
+        runtime_hash="runtime",
+        task_id="oracle.stage4-ledger.posterior-score.train.0",
+        run_id="run.posterior-score",
+        seed=0,
+        artifact={"answer": "ok"},
+        verifier_score=1.0,
+        cost=0.0,
+        latency=0.0,
+        faults=0,
+    )
+    raw_claim = ClaimResult(
+        claim_id="claim.posterior_score",
+        satisfied=True,
+        posterior_lower=1.0,
+        posterior_upper=1.0,
+        authority_mass={"A5": 1.0},
+        coverage=1.0,
+        validator_result_ids=["validator.posterior-score"],
+        evidence_digest="raw-claim-digest",
+    )
+    posterior = ClaimPosterior(
+        claim_id=raw_claim.claim_id,
+        state="abstained",
+        authority_mass={"A3": 1.0},
+        coverage=0.0,
+        residual_mass=1.0,
+        residual_reason="insufficient_authority",
+        validator_report_ids=["report.posterior-score"],
+    )
+    ledger = EvidenceLedger(
+        oracle_package_hash="oracle-package.posterior-score",
+        validation_plan_hash="validation-plan.posterior-score",
+        runtime_hash=run.runtime_hash,
+        task_id=run.task_id,
+        run_id=run.run_id,
+        seed=run.seed,
+        claim_posteriors=[posterior],
+        authority_mass={"A3": 1.0},
+        coverage={posterior.claim_id: 0.0},
+        unverifiable_residual={posterior.claim_id: posterior.residual_reason},
+        audit_status="abstain",
+    )
+    evaluator = RuntimeEvaluator.__new__(RuntimeEvaluator)
+    evaluator.oracle_package = SimpleNamespace(
+        package_hash=ledger.oracle_package_hash,
+        validation_plan_hash=ledger.validation_plan_hash,
+        public_view_hash="public",
+        sealed_view_hash="sealed",
+        scoring_projection=SimpleNamespace(hard_claim_ids=[], claim_weights={}),
+    )
+    evaluator._oracle_task_by_runtime_task_id = lambda *_args, **_kwargs: {
+        run.task_id: SimpleNamespace(claim_ids=[raw_claim.claim_id])
+    }
+    evaluator._oracle_evidence_for_run_with_ledger = lambda _run, oracle_task=None: ([], [raw_claim], ledger)
+    evaluation = SuiteEvaluation(
+        runtime_hash=run.runtime_hash,
+        objective_scores={},
+        task_scores={},
+        family_scores={},
+        run_results=[run],
+    )
+    decision = PromotionDecision(
+        decision_id="decision.posterior-score",
+        decision_type="no_progress",
+        contract_id="contract.posterior-score",
+        parent_runtime_hash="parent",
+        child_runtime_hash=run.runtime_hash,
+        oracle_package_hash=ledger.oracle_package_hash,
+        comparison_ref="comparison.posterior-score",
+        reason_codes=["quality_lcb_not_cleared"],
+    )
+
+    row = evaluator._stage4_evidence_rows(evaluation, role="child", decision=decision)[0]
+
+    assert row["claim_results"][0]["satisfied"] is True
+    assert row["evidence_ledger"]["claim_posteriors"][0]["state"] == "abstained"
+    assert row["verifier_evidence"][0]["oracle_axis_scores"] == {raw_claim.claim_id: 0.0}
+    assert row["axis_scores"][0]["axis_id"] == raw_claim.claim_id
+    assert row["axis_scores"][0]["score"] == 0.0
+    assert row["axis_scores"][0]["authority"] == "A3"
+    assert evaluator._oracle_axis_scores_for_run(
+        run,
+        SimpleNamespace(claim_ids=[raw_claim.claim_id]),
+    ) == {raw_claim.claim_id: 0.0}
+    rescored = evaluator._score_oracle_results([run], partition="train", tasks=[])
+    assert rescored[0].verifier_score == 0.0
+
+
+def _stage4_ledger_package_for_validator(validator: ValidatorSpec) -> OraclePackage:
+    claim = ClaimSpec(
+        claim_id="claim.stage4_ledger",
+        text="Stage 4 ledger claim.",
+        claim_type="outcome",
+        criticality="hard",
+        weight=1.0,
+        minimum_authority="A3",
+    )
+    task = BenchmarkTask(
+        task_id=f"oracle.stage4-ledger.{validator.family_id}.train.0",
+        family="e2e",
+        prompt="Produce an artifact.",
+        task_type="oracle_public_task",
+        expected=None,
+        verifier_type="oracle_package",
+        verification_required=True,
+        metadata={"domain_kind": "validation_backed_runtime", "slice_tags": ["frontier"]},
+    )
+    return OraclePackage(
+        package_id=f"oracle-package.stage4-ledger.{validator.family_id}",
+        goal_id=f"goal.stage4-ledger.{validator.family_id}",
+        validation_intent=ValidationIntent(),
+        claim_graph=ClaimGraph(claims=[claim]),
+        validator_specs=[validator.model_copy(update={"claim_ids": [claim.claim_id]}, deep=True)],
+        task_sets=[
+            OracleTaskSet(
+                task_set_id=f"oracle-taskset.stage4-ledger.{validator.family_id}.train",
+                partition="train",
+                tasks=[
+                    OracleTask(
+                        task_id=task.task_id,
+                        benchmark_task=task,
+                        claim_ids=[claim.claim_id],
+                        validator_ids=[validator.validator_id],
+                    )
+                ],
+            )
+        ],
+        evidence_contract=_contract(),
+    )
+
+
+def test_stage4_evidence_ledger_audit_status_requires_supporting_reports() -> None:
+    abstain_package = _stage4_ledger_package_for_validator(
+        ValidatorSpec(
+            validator_id="validator.schema.abstain",
+            family_id="schema_artifact",
+            inputs={},
+            visibility="sealed",
+        )
+    )
+    abstain_task = abstain_package.task_sets[0].tasks[0]
+
+    _abstain_results, _abstain_claims, abstain_ledger = OracleEvaluationRunner().evaluate_run_with_ledger(
+        abstain_package,
+        {
+            "task_id": abstain_task.task_id,
+            "runtime_hash": "runtime",
+            "seed": 0,
+            "artifact": {"answer": "ok"},
+            "verifier_score": 0.0,
+        },
+    )
+
+    def raising_validator(_spec: ValidatorSpec, _payload: dict[str, object]):
+        raise RuntimeError("validator boom")
+
+    error_validator = ValidatorSpec(
+        validator_id="validator.error",
+        family_id="stage4_error",
+        inputs={},
+        visibility="sealed",
+    )
+    error_package = _stage4_ledger_package_for_validator(error_validator)
+    error_task = error_package.task_sets[0].tasks[0]
+    registry = ValidatorRegistry(
+        [
+            ValidatorFamily(
+                family_id="stage4_error",
+                description="Raises for audit-status regression coverage.",
+                run=raising_validator,
+            )
+        ]
+    )
+
+    _error_results, _error_claims, error_ledger = OracleEvaluationRunner(registry).evaluate_run_with_ledger(
+        error_package,
+        {
+            "task_id": error_task.task_id,
+            "runtime_hash": "runtime",
+            "seed": 0,
+            "artifact": {"answer": "ok"},
+            "verifier_score": 0.0,
+        },
+    )
+    covered_claim = ClaimSpec(
+        claim_id="claim.covered",
+        text="Covered claim.",
+        claim_type="outcome",
+        criticality="hard",
+        weight=1.0,
+        minimum_authority="A3",
+    )
+    residual_claim = ClaimSpec(
+        claim_id="claim.residual",
+        text="Unverified residual claim.",
+        claim_type="process",
+        criticality="major",
+        weight=1.0,
+        minimum_authority="A3",
+    )
+    partial_validator = ValidatorSpec(
+        validator_id="validator.partial.schema",
+        family_id="schema_artifact",
+        claim_ids=[covered_claim.claim_id],
+        inputs={"schema": {"type": "object", "required": ["answer"]}},
+        visibility="sealed",
+    )
+    partial_task = BenchmarkTask(
+        task_id="oracle.stage4-ledger.partial.train.0",
+        family="e2e",
+        prompt="Produce an artifact.",
+        task_type="oracle_public_task",
+        expected=None,
+        verifier_type="oracle_package",
+        verification_required=True,
+        metadata={"domain_kind": "validation_backed_runtime", "slice_tags": ["frontier"]},
+    )
+    partial_package = OraclePackage(
+        package_id="oracle-package.stage4-ledger.partial",
+        goal_id="goal.stage4-ledger.partial",
+        validation_intent=ValidationIntent(),
+        claim_graph=ClaimGraph(claims=[covered_claim, residual_claim]),
+        validator_specs=[partial_validator],
+        task_sets=[
+            OracleTaskSet(
+                task_set_id="oracle-taskset.stage4-ledger.partial.train",
+                partition="train",
+                tasks=[
+                    OracleTask(
+                        task_id=partial_task.task_id,
+                        benchmark_task=partial_task,
+                        claim_ids=[covered_claim.claim_id, residual_claim.claim_id],
+                        validator_ids=[partial_validator.validator_id],
+                    )
+                ],
+            )
+        ],
+        evidence_contract=_contract(),
+    )
+    _partial_results, _partial_claims, partial_ledger = OracleEvaluationRunner().evaluate_run_with_ledger(
+        partial_package,
+        {
+            "task_id": partial_task.task_id,
+            "runtime_hash": "runtime",
+            "seed": 0,
+            "artifact": {"answer": "ok"},
+            "verifier_score": 0.0,
+        },
+    )
+
+    assert abstain_ledger.validator_reports[0].status == "abstain"
+    assert abstain_ledger.validator_reports[0].coverage == 0.0
+    assert abstain_ledger.claim_posteriors[0].state == "abstained"
+    assert abstain_ledger.claim_posteriors[0].authority_mass == {}
+    assert abstain_ledger.claim_posteriors[0].coverage == 0.0
+    assert abstain_ledger.claim_posteriors[0].residual_mass == 1.0
+    assert abstain_ledger.coverage[abstain_ledger.claim_posteriors[0].claim_id] == 0.0
+    assert abstain_ledger.audit_status == "abstain"
+    assert error_ledger.validator_reports[0].status == "error"
+    assert error_ledger.validator_reports[0].coverage == 0.0
+    assert error_ledger.claim_posteriors[0].coverage == 0.0
+    assert error_ledger.claim_posteriors[0].residual_mass == 1.0
+    assert error_ledger.coverage[error_ledger.claim_posteriors[0].claim_id] == 0.0
+    assert error_ledger.audit_status == "fail"
+    partial_posteriors = {posterior.claim_id: posterior for posterior in partial_ledger.claim_posteriors}
+    assert partial_posteriors[covered_claim.claim_id].coverage == 1.0
+    assert partial_posteriors[residual_claim.claim_id].coverage == 0.0
+    assert partial_posteriors[residual_claim.claim_id].residual_reason == "missing_validator_result"
+    assert partial_ledger.unverifiable_residual == {residual_claim.claim_id: "missing_validator_result"}
+    assert partial_ledger.audit_status == "abstain"
+
+
+def test_stage4_evidence_ledger_quarantines_leaky_satisfied_validator_reports() -> None:
+    def leaky_validator(spec: ValidatorSpec, _payload: dict[str, object]) -> ValidatorResult:
+        return ValidatorResult(
+            validator_id=spec.validator_id,
+            family_id=spec.family_id,
+            claim_ids=list(spec.claim_ids),
+            status="pass",
+            authority_used="A4",
+            observations={"leakage": True, "leakage_flags": ["sealed_prompt_leak"]},
+        )
+
+    validator = ValidatorSpec(
+        validator_id="validator.leaky",
+        family_id="stage4_leaky",
+        visibility="sealed",
+    )
+    package = _stage4_ledger_package_for_validator(validator)
+    task = package.task_sets[0].tasks[0]
+    registry = ValidatorRegistry(
+        [
+            ValidatorFamily(
+                family_id="stage4_leaky",
+                description="Returns passing but leaky evidence for quarantine regression coverage.",
+                run=leaky_validator,
+            )
+        ]
+    )
+
+    validator_results, claim_results, ledger = OracleEvaluationRunner(registry).evaluate_run_with_ledger(
+        package,
+        {
+            "task_id": task.task_id,
+            "runtime_hash": "runtime",
+            "seed": 0,
+            "artifact": {"answer": "ok"},
+            "verifier_score": 0.0,
+        },
+    )
+
+    posterior = ledger.claim_posteriors[0]
+    assert validator_results[0].status == "pass"
+    assert claim_results[0].satisfied is True
+    assert ledger.validator_reports[0].leakage_flags == ["sealed_prompt_leak"]
+    assert posterior.state == "quarantined"
+    assert posterior.coverage == 0.0
+    assert posterior.residual_mass == 1.0
+    assert posterior.residual_reason == "leakage_flag"
+    assert ledger.audit_status == "quarantine"
+    assert RuntimeEvaluator._oracle_axis_score_from_claim_posterior(posterior) == 0.0
+
+
+def test_stage4_evidence_ledger_abstains_when_satisfied_claim_lacks_authority_floor() -> None:
+    claim = ClaimSpec(
+        claim_id="claim.under_authority",
+        text="A4 claim covered only by an A3 schema validator.",
+        claim_type="outcome",
+        criticality="hard",
+        weight=1.0,
+        minimum_authority="A4",
+    )
+    validator = ValidatorSpec(
+        validator_id="validator.under_authority.schema",
+        family_id="schema_artifact",
+        claim_ids=[claim.claim_id],
+        inputs={"schema": {"type": "object", "required": ["answer"]}},
+        authority_ceiling="A3",
+        visibility="sealed",
+    )
+    task = BenchmarkTask(
+        task_id="oracle.stage4-ledger.under-authority.train.0",
+        family="e2e",
+        prompt="Produce an artifact.",
+        task_type="oracle_public_task",
+        expected=None,
+        verifier_type="oracle_package",
+        verification_required=True,
+        metadata={"domain_kind": "validation_backed_runtime", "slice_tags": ["frontier"]},
+    )
+    package = OraclePackage(
+        package_id="oracle-package.stage4-ledger.under-authority",
+        goal_id="goal.stage4-ledger.under-authority",
+        validation_intent=ValidationIntent(),
+        claim_graph=ClaimGraph(claims=[claim]),
+        validator_specs=[validator],
+        task_sets=[
+            OracleTaskSet(
+                task_set_id="oracle-taskset.stage4-ledger.under-authority.train",
+                partition="train",
+                tasks=[
+                    OracleTask(
+                        task_id=task.task_id,
+                        benchmark_task=task,
+                        claim_ids=[claim.claim_id],
+                        validator_ids=[validator.validator_id],
+                    )
+                ],
+            )
+        ],
+        evidence_contract=_contract(),
+    )
+
+    validator_results, claim_results, ledger = OracleEvaluationRunner().evaluate_run_with_ledger(
+        package,
+        {
+            "task_id": task.task_id,
+            "runtime_hash": "runtime",
+            "seed": 0,
+            "artifact": {"answer": "ok"},
+            "verifier_score": 0.0,
+        },
+    )
+
+    posterior = ledger.claim_posteriors[0]
+    assert validator_results[0].status == "pass"
+    assert validator_results[0].authority_used == "A3"
+    assert claim_results[0].satisfied is True
+    assert posterior.state == "abstained"
+    assert posterior.authority_mass == {"A3": 1.0}
+    assert posterior.coverage == 0.0
+    assert posterior.residual_mass == 1.0
+    assert posterior.residual_reason == "insufficient_authority"
+    assert ledger.unverifiable_residual == {claim.claim_id: "insufficient_authority"}
+    assert ledger.audit_status == "abstain"
+
+
+def test_stage4_evidence_ledger_clamps_validator_authority_to_spec_ceiling() -> None:
+    claim = ClaimSpec(
+        claim_id="claim.capped_authority",
+        text="A4 claim cannot be satisfied by evidence capped below A4.",
+        claim_type="outcome",
+        criticality="hard",
+        weight=1.0,
+        minimum_authority="A4",
+    )
+
+    def inflated_authority_validator(spec: ValidatorSpec, _payload: dict[str, object]) -> ValidatorResult:
+        return ValidatorResult(
+            validator_id=spec.validator_id,
+            family_id=spec.family_id,
+            claim_ids=list(spec.claim_ids),
+            status="pass",
+            authority_used="A5",
+            observations={"source": "inflated_authority_regression"},
+        )
+
+    validator = ValidatorSpec(
+        validator_id="validator.capped-authority",
+        family_id="stage4_capped_authority",
+        claim_ids=[claim.claim_id],
+        authority_ceiling="A3",
+        visibility="sealed",
+    )
+    task = BenchmarkTask(
+        task_id="oracle.stage4-ledger.capped-authority.train.0",
+        family="e2e",
+        prompt="Produce an artifact.",
+        task_type="oracle_public_task",
+        expected=None,
+        verifier_type="oracle_package",
+        verification_required=True,
+        metadata={"domain_kind": "validation_backed_runtime", "slice_tags": ["frontier"]},
+    )
+    package = OraclePackage(
+        package_id="oracle-package.stage4-ledger.capped-authority",
+        goal_id="goal.stage4-ledger.capped-authority",
+        validation_intent=ValidationIntent(),
+        claim_graph=ClaimGraph(claims=[claim]),
+        validator_specs=[validator],
+        task_sets=[
+            OracleTaskSet(
+                task_set_id="oracle-taskset.stage4-ledger.capped-authority.train",
+                partition="train",
+                tasks=[
+                    OracleTask(
+                        task_id=task.task_id,
+                        benchmark_task=task,
+                        claim_ids=[claim.claim_id],
+                        validator_ids=[validator.validator_id],
+                    )
+                ],
+            )
+        ],
+        evidence_contract=_contract(),
+    )
+    registry = ValidatorRegistry(
+        [
+            ValidatorFamily(
+                family_id="stage4_capped_authority",
+                description="Returns inflated authority for ceiling-clamp regression coverage.",
+                run=inflated_authority_validator,
+            )
+        ]
+    )
+
+    validator_results, claim_results, ledger = OracleEvaluationRunner(registry).evaluate_run_with_ledger(
+        package,
+        {
+            "task_id": task.task_id,
+            "runtime_hash": "runtime",
+            "seed": 0,
+            "artifact": {"answer": "ok"},
+            "verifier_score": 0.0,
+        },
+    )
+
+    posterior = ledger.claim_posteriors[0]
+    assert validator_results[0].status == "pass"
+    assert validator_results[0].authority_used == "A5"
+    assert ledger.validator_reports[0].authority_used == "A5"
+    assert ledger.validator_reports[0].authority_ceiling == "A3"
+    assert claim_results[0].satisfied is True
+    assert claim_results[0].authority_mass == {"A5": 1.0}
+    assert posterior.state == "abstained"
+    assert posterior.authority_mass == {"A3": 1.0}
+    assert posterior.coverage == 0.0
+    assert posterior.residual_reason == "insufficient_authority"
+    posterior_payload = posterior.model_dump(mode="json", exclude_none=True)
+    posterior_payload.pop("evidence_digest")
+    assert posterior.evidence_digest != claim_results[0].evidence_digest
+    assert posterior.__class__.model_validate(posterior_payload).evidence_digest == posterior.evidence_digest
+    assert ledger.authority_mass == {"A3": 1.0}
+    assert ledger.audit_status == "abstain"
+
+
+def test_stage4_evidence_ledger_does_not_pass_without_claim_posteriors() -> None:
+    validator = ValidatorSpec(
+        validator_id="validator.no-claims.schema",
+        family_id="schema_artifact",
+        claim_ids=[],
+        inputs={"schema": {"type": "object", "required": ["answer"]}},
+        visibility="sealed",
+    )
+    task = BenchmarkTask(
+        task_id="oracle.stage4-ledger.no-claims.train.0",
+        family="e2e",
+        prompt="Produce an artifact.",
+        task_type="oracle_public_task",
+        expected=None,
+        verifier_type="oracle_package",
+        verification_required=True,
+        metadata={"domain_kind": "validation_backed_runtime", "slice_tags": ["frontier"]},
+    )
+    package = OraclePackage(
+        package_id="oracle-package.stage4-ledger.no-claims",
+        goal_id="goal.stage4-ledger.no-claims",
+        validation_intent=ValidationIntent(),
+        claim_graph=ClaimGraph(claims=[]),
+        validator_specs=[validator],
+        task_sets=[
+            OracleTaskSet(
+                task_set_id="oracle-taskset.stage4-ledger.no-claims.train",
+                partition="train",
+                tasks=[
+                    OracleTask(
+                        task_id=task.task_id,
+                        benchmark_task=task,
+                        claim_ids=[],
+                        validator_ids=[validator.validator_id],
+                    )
+                ],
+            )
+        ],
+        evidence_contract=_contract(),
+    )
+
+    validator_results, claim_results, ledger = OracleEvaluationRunner().evaluate_run_with_ledger(
+        package,
+        {
+            "task_id": task.task_id,
+            "runtime_hash": "runtime",
+            "seed": 0,
+            "artifact": {"answer": "ok"},
+            "verifier_score": 0.0,
+        },
+    )
+
+    assert validator_results[0].status == "pass"
+    assert claim_results == []
+    assert ledger.validator_reports[0].status == "pass"
+    assert ledger.claim_posteriors == []
+    assert ledger.audit_status == "diagnostic"
 
 
 def _single_exact_oracle_package() -> OraclePackage:

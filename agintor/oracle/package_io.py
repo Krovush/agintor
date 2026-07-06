@@ -6,7 +6,8 @@ from typing import Any, Mapping
 
 from ..contracts import OraclePackage
 from ..contracts.oracle import oracle_package_hash, oracle_public_view_hash, oracle_sealed_payload_digest, oracle_sealed_view_hash
-from ..utils import ensure_directory, stable_hash
+from ..contracts.validation import validation_plan_from_oracle_package, validation_plan_hash
+from ..utils import ensure_directory
 from .projections import public_oracle_projection, sealed_oracle_projection
 
 ORACLE_PACKAGE_FILE = "package.json"
@@ -33,14 +34,30 @@ def compute_oracle_package_hash(package: OraclePackage | Mapping[str, Any]) -> s
     return oracle_package_hash(package)
 
 
+def _bind_validation_plan(package: OraclePackage, *, require_match: bool) -> OraclePackage:
+    plan = validation_plan_from_oracle_package(package)
+    plan_hash = validation_plan_hash(plan)
+    if require_match:
+        persisted_hash = str(package.validation_plan_hash or "").strip()
+        if not persisted_hash:
+            raise ValueError("missing validation_plan_hash in sealed oracle package")
+        if persisted_hash != plan_hash:
+            raise ValueError("validation_plan_hash does not match package validation plan")
+    return package.model_copy(
+        update={
+            "validation_plan_hash": plan_hash,
+            "validation_plan": plan,
+        },
+        deep=True,
+    )
+
+
 def finalize_oracle_package(package: OraclePackage) -> OraclePackage:
-    public_payload = public_oracle_projection(package)
-    sealed_payload = sealed_oracle_projection(package)
     public_hash = oracle_public_view_hash(package)
     sealed_hash = oracle_sealed_view_hash(package)
     sealed_payload_hash = oracle_sealed_payload_digest(package)
     package_hash = oracle_package_hash(package, assume_projection_hashes=(public_hash, sealed_hash))
-    return package.model_copy(
+    frozen = package.model_copy(
         update={
             "package_hash": package_hash,
             "public_view_hash": public_hash,
@@ -50,6 +67,7 @@ def finalize_oracle_package(package: OraclePackage) -> OraclePackage:
         },
         deep=True,
     )
+    return _bind_validation_plan(frozen, require_match=False)
 
 
 def write_oracle_package(package: OraclePackage, package_dir: str | Path) -> OraclePackage:
@@ -61,6 +79,7 @@ def write_oracle_package(package: OraclePackage, package_dir: str | Path) -> Ora
             "package_hash": frozen.package_hash,
             "public_view_hash": frozen.public_view_hash,
             "sealed_view_hash": frozen.sealed_view_hash,
+            "validation_plan_hash": frozen.validation_plan_hash,
         }
     )
     (root / ORACLE_PACKAGE_FILE).write_text(json.dumps(sealed_payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -71,6 +90,7 @@ def write_oracle_package(package: OraclePackage, package_dir: str | Path) -> Ora
         "package_hash": frozen.package_hash,
         "public_view_hash": frozen.public_view_hash,
         "sealed_view_hash": frozen.sealed_view_hash,
+        "validation_plan_hash": frozen.validation_plan_hash,
         "goal_id": frozen.goal_id,
         "runtime_spec_digest": frozen.runtime_spec_digest,
     }
@@ -86,7 +106,8 @@ def load_oracle_package(path: str | Path) -> OraclePackage:
             raise ValueError(f"missing sealed oracle package at {package_path}")
     else:
         package_path = source
-    return OraclePackage.model_validate(json.loads(package_path.read_text(encoding="utf-8")))
+    package = OraclePackage.model_validate(json.loads(package_path.read_text(encoding="utf-8")))
+    return _bind_validation_plan(package, require_match=True)
 
 
 def assert_package_lock_matches(package: OraclePackage, package_dir: str | Path) -> None:
@@ -95,7 +116,7 @@ def assert_package_lock_matches(package: OraclePackage, package_dir: str | Path)
         raise ValueError(f"missing oracle package lockfile at {lock_path}")
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     expected = finalize_oracle_package(package)
-    for key in ("package_hash", "public_view_hash", "sealed_view_hash"):
+    for key in ("package_hash", "public_view_hash", "sealed_view_hash", "validation_plan_hash"):
         if str(lock.get(key, "")) != str(getattr(expected, key)):
             raise ValueError(f"oracle package lock mismatch for {key}")
 

@@ -70,6 +70,7 @@ class RuntimePlan(BaseModel):
     oracle_package_hash: str = ""
     oracle_public_view_hash: str = ""
     oracle_sealed_view_hash: str = ""
+    validation_plan_hash: str = ""
     oracle_package_ref: str = ""
     oracle_public_ref: str = ""
     seed_template: str
@@ -100,6 +101,7 @@ class BuildSummary(BaseModel):
     oracle_package_hash: str = ""
     oracle_public_view_hash: str = ""
     oracle_sealed_view_hash: str = ""
+    validation_plan_hash: str = ""
     oracle_package_ref: str = ""
     oracle_public_ref: str = ""
     history_path: str = ""
@@ -142,6 +144,7 @@ class ExportSummary(BaseModel):
     runtime_plan_spec_digest: str = ""
     oracle_package_hash: str = ""
     oracle_public_view_hash: str = ""
+    validation_plan_hash: str = ""
     source_runtime_dir: str
     source_runtime_hash: str
     runtime_profile_path: str

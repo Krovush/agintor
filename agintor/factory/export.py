@@ -269,6 +269,7 @@ def _write_seed_runtime(
                     **dict(manifest.metadata or {}),
                     "oracle_package_hash": str(getattr(runtime_plan, "oracle_package_hash", "") or ""),
                     "oracle_public_view_hash": str(getattr(runtime_plan, "oracle_public_view_hash", "") or ""),
+                    "validation_plan_hash": str(getattr(runtime_plan, "validation_plan_hash", "") or ""),
                 },
             },
             deep=True,

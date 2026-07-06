@@ -27,6 +27,14 @@ class AuthorityLevel(str, Enum):
     TRACE_OR_ARTIFACT = "A3"
     PRIVATE_ORACLE = "A4"
     HUMAN_AUDITED = "A5"
+    FORMAL_OR_CERTIFIED_PROOF = "A6"
+    PROMOTION_NONE = "M0"
+    PROMOTION_EXPLORATION = "M1"
+    PROMOTION_WEAK_PREFERENCE = "M2"
+    PROMOTION_GROUNDED_SUBSKILL = "M3"
+    PROMOTION_LOCAL_CAPABILITY = "M4"
+    PROMOTION_SEALED_CAPABILITY = "M5"
+    PROMOTION_CERTIFIED_INVARIANT = "M6"
 
 
 class PromotionDecisionType(str, Enum):
@@ -260,8 +268,11 @@ class EvidenceRecord(EvidenceModel):
     runtime_spec_digest: str = ""
     oracle_public_view_hash: str = ""
     oracle_sealed_view_hash: str = ""
+    validation_plan_hash: str = ""
     validator_results: list[dict[str, Any]] = Field(default_factory=list)
     claim_results: list[dict[str, Any]] = Field(default_factory=list)
+    validator_reports: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_ledger: dict[str, Any] = Field(default_factory=dict)
     parent_runtime_hash: str = ""
     run_ref: str = ""
     attempt_ref: str = ""

@@ -21,6 +21,8 @@ from ..contracts import (
     ValidatorSpec,
     oracle_sealed_projection,
     freeze_oracle_package,
+    validation_plan_from_oracle_package,
+    validation_plan_hash,
     validate_runtime_spec_payload,
 )
 from ..contracts.execution import OperationSpec
@@ -134,6 +136,16 @@ class OracleCompiler:
         report = self.qa_runner.run(frozen)
         if self.config.fail_on_qa_error and not report.passed:
             raise ValueError(f"Oracle QA failed: {report.reason_codes}")
+        validation_plan = validation_plan_from_oracle_package(frozen)
+        plan_hash = validation_plan_hash(validation_plan)
+        frozen = frozen.model_copy(
+            update={
+                "validation_plan_hash": plan_hash,
+                "validation_plan": validation_plan,
+            },
+            deep=True,
+        )
+        frozen = freeze_oracle_package(frozen).model_copy(update={"validation_plan": validation_plan}, deep=True)
         return frozen
 
     @staticmethod
@@ -591,8 +603,14 @@ class OracleCompiler:
                 claim_ids=[claim.claim_id],
                 description=f"Validate claim: {claim.text}",
                 required_validator_families=sorted(validator_families_by_claim.get(claim.claim_id, set())),
+                validator_ids=sorted(
+                    validator.validator_id
+                    for validator in validators
+                    if claim.claim_id in validator.claim_ids
+                ),
                 minimum_authority=claim.minimum_authority,
                 failure_action="reject" if claim.criticality == "hard" else "abstain",
+                residual_reason=claim.unverifiable_reason,
             )
             for claim in claims
         ]

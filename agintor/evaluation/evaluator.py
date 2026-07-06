@@ -26,9 +26,11 @@ from ..oracle.package_io import load_oracle_package
 from ..oracle.qa import OracleQARunner
 from ..contracts import (
     BenchmarkTask,
+    ClaimPosterior,
     ClaimResult,
     DomainEvidenceContract,
     EvaluationStageResult,
+    EvidenceLedger,
     EvidenceRecord,
     MutationCandidate,
     ObjectiveKind,
@@ -190,6 +192,7 @@ class RuntimeEvaluator:
             "oracle_package_hash": oracle_package_hash,
             "oracle_public_view_hash": str(getattr(oracle_package, "public_view_hash", "") or ""),
             "oracle_sealed_view_hash": str(getattr(oracle_package, "sealed_view_hash", "") or ""),
+            "validation_plan_hash": str(getattr(oracle_package, "validation_plan_hash", "") or ""),
         }
 
     def _evaluation_units(self, tasks: Sequence[Any]) -> list[list[Any]]:
@@ -389,6 +392,7 @@ class RuntimeEvaluator:
             health_floor_status["oracle_package_qa"] = "pass" if qa_report.passed else "fail"
             health_floor_status["oracle_package_hash"] = oracle_package.package_hash
             health_floor_status["oracle_public_view_hash"] = oracle_package.public_view_hash
+            health_floor_status["validation_plan_hash"] = oracle_package.validation_plan_hash
         return self.progress_oracle.decide_evaluations(
             parent_eval,
             child_eval,
@@ -443,14 +447,24 @@ class RuntimeEvaluator:
             validator_rows: list[dict[str, Any]] = []
             claim_results: list[ClaimResult] = []
             claim_rows: list[dict[str, Any]] = []
+            validation_ledger: EvidenceLedger | None = None
+            validator_report_rows: list[dict[str, Any]] = []
+            evidence_ledger_row: dict[str, Any] = {}
+            claim_posteriors: list[ClaimPosterior] | None = None
             oracle_package = getattr(self, "oracle_package", None)
             evaluation_identity = dict(getattr(evaluation, "evaluation_identity", {}) or {})
             if oracle_package is not None:
                 oracle_task = self._oracle_task_by_runtime_task_id().get(str(run.task_id))
-                validator_results, claim_results = self._oracle_evidence_for_run(run, oracle_task=oracle_task)
+                validator_results, claim_results, validation_ledger = self._oracle_evidence_for_run_with_ledger(run, oracle_task=oracle_task)
                 validator_rows = [result.model_dump(mode="json", exclude_none=True) for result in validator_results]
                 claim_rows = [result.model_dump(mode="json", exclude_none=True) for result in claim_results]
-            oracle_axis_scores = {
+                validator_report_rows = [
+                    report.model_dump(mode="json", exclude_none=True)
+                    for report in validation_ledger.validator_reports
+                ]
+                evidence_ledger_row = validation_ledger.model_dump(mode="json", exclude_none=True)
+                claim_posteriors = list(validation_ledger.claim_posteriors)
+            oracle_axis_scores = self._oracle_axis_scores_from_claim_posteriors(claim_posteriors) if claim_posteriors is not None else {
                 str(result.claim_id): self._oracle_axis_score_from_claim_result(
                     result,
                     authority_floor=self._claim_authority_floor(str(result.claim_id)),
@@ -479,9 +493,12 @@ class RuntimeEvaluator:
                 "hard_invalid": bool(run.hard_invalid),
                 "invalid_reason": str(run.invalid_reason or ""),
                 "oracle_package_hash": str(getattr(oracle_package, "package_hash", "") or ""),
+                "validation_plan_hash": str(getattr(oracle_package, "validation_plan_hash", "") or ""),
                 "runtime_spec_digest": str(evaluation_identity.get("runtime_spec_digest", "") or ""),
                 "validator_results": validator_rows,
                 "claim_results": claim_rows,
+                "validator_reports": validator_report_rows,
+                "evidence_ledger": evidence_ledger_row,
                 "oracle_axis_scores": oracle_axis_scores,
             }
             digest = stable_hash(digest_payload)
@@ -491,6 +508,7 @@ class RuntimeEvaluator:
                 record_id=record_id,
                 evidence_digest=digest,
                 claim_results=claim_results,
+                claim_posteriors=claim_posteriors,
             )
             record = EvidenceRecord(
                 record_id=record_id,
@@ -501,8 +519,11 @@ class RuntimeEvaluator:
                 runtime_spec_digest=str(evaluation_identity.get("runtime_spec_digest", "") or ""),
                 oracle_public_view_hash=str(getattr(oracle_package, "public_view_hash", "") or ""),
                 oracle_sealed_view_hash=str(getattr(oracle_package, "sealed_view_hash", "") or ""),
+                validation_plan_hash=str(getattr(oracle_package, "validation_plan_hash", "") or ""),
                 validator_results=validator_rows,
                 claim_results=claim_rows,
+                validator_reports=validator_report_rows,
+                evidence_ledger=evidence_ledger_row,
                 parent_runtime_hash=decision.parent_runtime_hash,
                 run_ref=self._run_ref(run),
                 attempt_ref=str(getattr(run, "attempt_id", "") or ""),
@@ -540,6 +561,7 @@ class RuntimeEvaluator:
         record_id: str,
         evidence_digest: str,
         claim_results: Sequence[ClaimResult],
+        claim_posteriors: Sequence[ClaimPosterior] | None = None,
     ) -> list[OutcomeAxisScore]:
         if run.hard_invalid:
             return [
@@ -550,6 +572,17 @@ class RuntimeEvaluator:
                     evidence_ref=record_id,
                     evidence_digest=evidence_digest,
                 )
+            ]
+        if claim_posteriors is not None:
+            return [
+                OutcomeAxisScore(
+                    axis_id=str(posterior.claim_id),
+                    score=self._oracle_axis_score_from_claim_posterior(posterior),
+                    authority=self._claim_posterior_authority(posterior),
+                    evidence_ref=record_id,
+                    evidence_digest=evidence_digest,
+                )
+                for posterior in claim_posteriors
             ]
         if claim_results:
             return [
@@ -581,6 +614,32 @@ class RuntimeEvaluator:
             return "A0"
 
         return max((str(authority) for authority in result.authority_mass), key=RuntimeEvaluator._authority_rank)
+
+    @staticmethod
+    def _claim_posterior_authority(posterior: ClaimPosterior) -> str:
+        if not posterior.authority_mass:
+            return "A0"
+        return max((str(authority) for authority in posterior.authority_mass), key=RuntimeEvaluator._authority_rank)
+
+    @staticmethod
+    def _oracle_axis_score_from_claim_posterior(posterior: ClaimPosterior) -> float:
+        if posterior.residual_reason or float(posterior.residual_mass) > 0.0:
+            return 0.0
+        state = str(posterior.state)
+        if state == "satisfied":
+            return 1.0
+        if state in {"failed", "abstained", "quarantined", "unverifiable"}:
+            return 0.0
+        if posterior.posterior_lower is not None and posterior.posterior_upper is not None:
+            return max(0.0, min(1.0, (float(posterior.posterior_lower) + float(posterior.posterior_upper)) / 2.0))
+        return 0.0
+
+    @staticmethod
+    def _oracle_axis_scores_from_claim_posteriors(claim_posteriors: Sequence[ClaimPosterior] | None) -> dict[str, float]:
+        return {
+            str(posterior.claim_id): RuntimeEvaluator._oracle_axis_score_from_claim_posterior(posterior)
+            for posterior in claim_posteriors or []
+        }
 
     @staticmethod
     def _authority_rank(authority: str) -> int:
@@ -869,16 +928,28 @@ class RuntimeEvaluator:
         *,
         oracle_task: OracleTask | None,
     ) -> tuple[list[ValidatorResult], list[ClaimResult]]:
+        validator_results, claim_results, _ledger = self._oracle_evidence_for_run_with_ledger(
+            run,
+            oracle_task=oracle_task,
+        )
+        return validator_results, claim_results
+
+    def _oracle_evidence_for_run_with_ledger(
+        self,
+        run: RunResult,
+        *,
+        oracle_task: OracleTask | None,
+    ) -> tuple[list[ValidatorResult], list[ClaimResult], EvidenceLedger]:
         oracle_package = getattr(self, "oracle_package", None)
         if oracle_package is None:
-            return [], []
+            return [], [], EvidenceLedger(runtime_hash=run.runtime_hash, task_id=run.task_id, run_id=run.run_id, seed=run.seed)
         sealed_payload = SealedEvaluatorPayload(
             package=oracle_package,
             trace_events=self._trace_rows(run),
             workspace_root=str(getattr(run, "run_root", "") or ""),
         ).model_dump(mode="json", exclude_none=True)
         oracle_runner = getattr(self, "oracle_runner", None) or OracleEvaluationRunner()
-        return oracle_runner.evaluate_run(
+        return oracle_runner.evaluate_run_with_ledger(
             oracle_package,
             run,
             oracle_task=oracle_task,
@@ -888,22 +959,29 @@ class RuntimeEvaluator:
     def _oracle_claim_score(
         self,
         oracle_task: OracleTask,
-        validator_results: Sequence[ValidatorResult],
         claim_results: Sequence[ClaimResult],
+        validation_ledger: EvidenceLedger | None = None,
     ) -> float:
         oracle_package = getattr(self, "oracle_package", None)
         if oracle_package is None:
             return 0.0
         claim_ids = [str(claim_id) for claim_id in oracle_task.claim_ids]
-        result_by_claim = {str(result.claim_id): result for result in claim_results}
-        score_by_claim = {
-            claim_id: self._oracle_axis_score_from_claim_result(
-                result,
-                authority_floor=self._claim_authority_floor(claim_id),
-            )
-            for claim_id, result in result_by_claim.items()
-            if claim_id in claim_ids
-        }
+        if validation_ledger is not None:
+            score_by_claim = {
+                str(posterior.claim_id): self._oracle_axis_score_from_claim_posterior(posterior)
+                for posterior in validation_ledger.claim_posteriors
+                if str(posterior.claim_id) in claim_ids
+            }
+        else:
+            result_by_claim = {str(result.claim_id): result for result in claim_results}
+            score_by_claim = {
+                claim_id: self._oracle_axis_score_from_claim_result(
+                    result,
+                    authority_floor=self._claim_authority_floor(claim_id),
+                )
+                for claim_id, result in result_by_claim.items()
+                if claim_id in claim_ids
+            }
         hard_claim_ids = set(getattr(oracle_package.scoring_projection, "hard_claim_ids", []) or []) & set(claim_ids)
         if any(score_by_claim.get(claim_id, 0.0) < 1.0 for claim_id in hard_claim_ids):
             return 0.0
@@ -941,11 +1019,11 @@ class RuntimeEvaluator:
             if run.hard_invalid:
                 rescored.append(run.model_copy(update={"verifier_score": 0.0}))
                 continue
-            validator_results, claim_results = self._oracle_evidence_for_run(run, oracle_task=oracle_task)
+            _validator_results, claim_results, validation_ledger = self._oracle_evidence_for_run_with_ledger(run, oracle_task=oracle_task)
             rescored.append(
                 run.model_copy(
                     update={
-                        "verifier_score": self._oracle_claim_score(oracle_task, validator_results, claim_results),
+                        "verifier_score": self._oracle_claim_score(oracle_task, claim_results, validation_ledger),
                     }
                 )
             )
@@ -1199,15 +1277,12 @@ class RuntimeEvaluator:
     def _oracle_axis_scores_for_run(self, run: RunResult, oracle_task: OracleTask) -> dict[str, float]:
         if run.hard_invalid:
             return {}
-        _, claim_results = self._oracle_evidence_for_run(run, oracle_task=oracle_task)
+        _validator_results, _claim_results, validation_ledger = self._oracle_evidence_for_run_with_ledger(run, oracle_task=oracle_task)
         oracle_claim_ids = {str(claim_id) for claim_id in oracle_task.claim_ids}
         return {
-            str(result.claim_id): self._oracle_axis_score_from_claim_result(
-                result,
-                authority_floor=self._claim_authority_floor(str(result.claim_id)),
-            )
-            for result in claim_results
-            if str(result.claim_id) in oracle_claim_ids
+            str(posterior.claim_id): self._oracle_axis_score_from_claim_posterior(posterior)
+            for posterior in validation_ledger.claim_posteriors
+            if str(posterior.claim_id) in oracle_claim_ids
         }
 
     def _claim_authority_floor(self, claim_id: str) -> str:
