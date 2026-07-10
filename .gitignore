@@ -19,9 +19,15 @@ MiniMax API Key.txt
 /openai_api_traces/
 /TradingAgents/
 /agintor/templates/baseline_runtime/
-/Dev Docs/
+/Dev Docs/**
+!/Dev Docs/FASTEST_PATH_TO_MVP_MASTER_ACTION_PLAN.md
+!/Dev Docs/DEFERRED_ISSUES_LEDGER.md
+!/Dev Docs/LANGGRAPH_ORACLE_PASS1_FINAL_PLAN.md
+!/Dev Docs/REPO_MAP.md
+!/Dev Docs/Archive Only - Zero Authority/
+!/Dev Docs/Archive Only - Zero Authority/**
+!/Dev Docs/Collaboration Prompts/
+!/Dev Docs/Collaboration Prompts/**
+!/Dev Docs/Secret Sauce Research/
+!/Dev Docs/Secret Sauce Research/07_SELF_EVOLVING_AGENTS_PAPER_INTEGRATION_PLAN.md
 /implementation_workstreams/
-/CLAUDE.md
-/AGENTS.md
-/NEXT_FIVE_AGENT_PROMPTS.md
-/refined_next_agent_prompts.txt
