@@ -1,0 +1,59 @@
+{
+  "protocol": {
+    "actors": [
+      {
+        "actor_id": "investigator",
+        "budget_share_bps": 4000,
+        "instruction": "Inspect the scratch repository, reproduce the public failure, and deliver concrete fault-localization findings with evidence for the implementer.",
+        "task_view": [
+          "issue",
+          "public_reproduction",
+          "session_public_carryover",
+          "workspace"
+        ],
+        "tool_ids": [
+          "repo.diff",
+          "repo.public_test",
+          "repo.read",
+          "repo.search"
+        ]
+      },
+      {
+        "actor_id": "implementer",
+        "budget_share_bps": 6000,
+        "instruction": "Use the delivered investigation to implement the complete repository repair, run public checks, and return only the final unified diff.",
+        "task_view": [
+          "issue",
+          "session_public_carryover",
+          "workspace"
+        ],
+        "tool_ids": [
+          "repo.diff",
+          "repo.edit",
+          "repo.public_test",
+          "repo.read",
+          "repo.search"
+        ]
+      }
+    ],
+    "artifact_channels": [
+      {
+        "channel_id": "investigation",
+        "consumer_actor_id": "implementer",
+        "payload_kind": "text",
+        "producer_actor_id": "investigator"
+      }
+    ],
+    "revision": null,
+    "schema_version": "repo-repair-harness-v1",
+    "termination": {
+      "final_actor_id": "implementer"
+    }
+  },
+  "reference": {
+    "capability_epoch": "repo-repair-v1",
+    "resource_path": "templates/harness/repo_repair_v1_two_actor_seed.json",
+    "seed_id": "repo-repair-v1.two-actor",
+    "source_protocol_digest": "973d91a6470f63cede875a10154af5c0887d269415a1310490a20e3fdc4a0b6d"
+  }
+}

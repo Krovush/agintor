@@ -1,0 +1,6 @@
+{
+  "evaluation_contract_source_path": "controlled/evaluator_authority/evaluation_contract.json",
+  "generation_path": "readiness_packets/generated_packet_digest",
+  "operation": "replay",
+  "schema_version": "repo-repair-harness-readiness-entry-request-v1"
+}

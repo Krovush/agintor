@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..authority.roles import assert_sealed_authority
 from ..contracts import OraclePackage
 from ..contracts.oracle import oracle_package_hash, oracle_public_view_hash, oracle_sealed_payload_digest, oracle_sealed_view_hash
 from ..contracts.validation import validation_plan_from_oracle_package, validation_plan_hash
@@ -71,6 +72,7 @@ def finalize_oracle_package(package: OraclePackage) -> OraclePackage:
 
 
 def write_oracle_package(package: OraclePackage, package_dir: str | Path) -> OraclePackage:
+    assert_sealed_authority("write a sealed Oracle package")
     frozen = finalize_oracle_package(package)
     root = ensure_directory(Path(package_dir))
     sealed_payload = sealed_oracle_projection(frozen)
@@ -99,6 +101,7 @@ def write_oracle_package(package: OraclePackage, package_dir: str | Path) -> Ora
 
 
 def load_oracle_package(path: str | Path) -> OraclePackage:
+    assert_sealed_authority("load a sealed Oracle package")
     source = Path(path)
     if source.is_dir():
         package_path = source / ORACLE_SEALED_FILE
@@ -111,6 +114,7 @@ def load_oracle_package(path: str | Path) -> OraclePackage:
 
 
 def assert_package_lock_matches(package: OraclePackage, package_dir: str | Path) -> None:
+    assert_sealed_authority("read a sealed Oracle package lock")
     lock_path = Path(package_dir) / ORACLE_LOCK_FILE
     if not lock_path.exists():
         raise ValueError(f"missing oracle package lockfile at {lock_path}")

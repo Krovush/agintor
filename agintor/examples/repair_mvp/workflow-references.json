@@ -1,0 +1,50 @@
+{
+  "path_reference_requests": [
+    "gate0-dry-run-request.json",
+    "solve-replay-file-request.json",
+    "readiness-replay-request.json"
+  ],
+  "product_generated_controlled_requests": [
+    {
+      "generated_request_path": "controlled/factory/build-runtime-dry-run-request.json",
+      "operation": "factory_build_dry_run",
+      "public_inputs": [
+        "deployment-profile.json",
+        "epoch-public.json",
+        "public-task.json"
+      ]
+    },
+    {
+      "generated_request_path": "controlled/factory/build-runtime-offline-scripted-request.json",
+      "operation": "factory_build_offline_scripted",
+      "public_inputs": [
+        "deployment-profile.json",
+        "epoch-public.json",
+        "public-task.json"
+      ]
+    },
+    {
+      "generated_request_path": "controlled/pilot/pilot-dry-run-request.json",
+      "operation": "pilot_dry_run",
+      "public_inputs": [
+        "epoch-public.json",
+        "public-task.json"
+      ]
+    },
+    {
+      "generated_request_path": "controlled/readiness/readiness-build-request.json",
+      "operation": "readiness_build",
+      "public_inputs": [
+        "epoch-public.json",
+        "public-task.json"
+      ]
+    }
+  ],
+  "public_inputs": [
+    "deployment-profile.json",
+    "epoch-public.json",
+    "public-task.json",
+    "solve-pair-key.json"
+  ],
+  "schema_version": "repo-repair-harness-public-workflow-references-v1"
+}

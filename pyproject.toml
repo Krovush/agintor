@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agintor"
 version = "0.1.0"
-description = "Agintor CLI MVP: bounded evolutionary runtime search for agent topology, memory, tooling, and control"
+description = "Bounded, auditable collaboration-protocol search for Python repository repair"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -18,8 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-hosted = ["openai>=2,<3", "anthropic>=0.84.0"]
-openai = ["openai>=2,<3"]
+hosted = ["openai>=2.45,<3", "anthropic>=0.84.0"]
+openai = ["openai>=2.45,<3"]
 minimax = ["anthropic>=0.84.0"]
 langgraph = ["langgraph>=0.2"]
 inspect = ["inspect-ai>=0.3"]
@@ -27,7 +27,7 @@ tradingagents = []
 dev = ["pytest>=8", "pytest-cov>=4"]
 
 [project.scripts]
-agintor = "agintor.cli:app"
+agintor = "agintor.cli_v1:app"
 
 [tool.setuptools]
 include-package-data = true
@@ -38,17 +38,18 @@ include = ["agintor*"]
 
 [tool.setuptools.package-data]
 agintor = [
-  "templates/baseline_runtime/*",
   "templates/baseline_runtime_langgraph/*",
+  "templates/harness/*.json",
   "templates/prompts/*.json",
   "runtime/sdk/defaults/*.json",
-  "examples/*.json"
+  "examples/*.json",
+  "examples/repair_mvp/*.json"
 ]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-q -p no:cacheprovider --assert=plain -m \"not heavy and not docker and not live_openai\""
-testpaths = ["tests"]
+testpaths = ["tests/mvp"]
 norecursedirs = ["_artifacts"]
 tmp_path_retention_policy = "failed"
 tmp_path_retention_count = 1

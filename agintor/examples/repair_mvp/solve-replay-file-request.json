@@ -1,0 +1,74 @@
+{
+  "execution": {
+    "command_manifest_path": "replay/command-replay.json",
+    "mode": "replay",
+    "provider_manifest_path": "replay/provider-replay.json"
+  },
+  "pair_key": {
+    "environment_id": "environment.sdk.replay",
+    "provider_config_digest": "47c8078a714cd7c44c95998e7750657c4e354f190a61f69cf58d185f4bfef75e",
+    "sampling_replicate": 0,
+    "task_manifest_id": "task.p1.pilot"
+  },
+  "run_artifact_workspace": "runs/repair-001",
+  "run_id": "run.repair-001",
+  "schema_version": "repo-repair-harness-solve-request-v1",
+  "task": {
+    "allowed_capabilities": [
+      "repo.search",
+      "repo.read",
+      "repo.public_test",
+      "repo.edit",
+      "repo.diff"
+    ],
+    "capability_epoch": "repo-repair-v1",
+    "ceilings": {
+      "max_artifact_bytes": 40000,
+      "max_cached_tokens": 0,
+      "max_cache_write_tokens": 0,
+      "max_estimated_cost_usd": 2.0,
+      "max_input_tokens": 30000,
+      "max_known_cost_usd": 1.0,
+      "max_model_calls": 8,
+      "max_output_tokens": 12000,
+      "max_patch_bytes": 20000,
+      "max_retries": 2,
+      "max_tool_calls": 30,
+      "max_tool_output_bytes": 200000,
+      "max_wall_time_ms": 30000,
+      "provider_deadline_ms": 5000
+    },
+    "data_state": "development",
+    "epoch_id": "epoch.p1",
+    "epoch_manifest_digest": "4ff34d0a76ce5c86e60f1cdbe40cf3cf6e83507c10aa9380815c7da6a2427999",
+    "issue": "Repair the public parser regression pilot.",
+    "public_reproduction": [
+      {
+        "argv": [
+          "python",
+          "-m",
+          "pytest",
+          "-q"
+        ],
+        "cwd": ".",
+        "expected_exit_codes": [
+          0
+        ],
+        "step_id": "public-test",
+        "timeout_ms": 10000
+      }
+    ],
+    "runtime_contract_version": "0.1.0",
+    "split_manifest_digest": "875b9380866e9d56e7110b0ee310962c16d9d4ae103f829d62bdffd2cbe7c61d",
+    "task_manifest_digest": "8c9830494a9bab37afb508ef56a0664275e3c25180dd9db557488975bab27851",
+    "task_manifest_id": "task.p1.pilot",
+    "workspace_snapshot": {
+      "digest": "077fd828213f597dc75b4f762486a37f1f03f1bff4ac2b3dbaa2dc80d0dc3375",
+      "format": "directory",
+      "immutable": true,
+      "snapshot_id": "snapshot.p1.pilot",
+      "uri": "public/pilot-snapshot"
+    }
+  },
+  "workspace_id": "workspace.repair-001"
+}

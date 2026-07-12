@@ -175,7 +175,7 @@ def test_inspect_oracle_rejects_sealed_stdout_projection(tmp_path: Path) -> None
     write_oracle_package(OracleCompiler().compile(_goal(), spec), tmp_path / "oracle")
 
     public = CliRunner().invoke(app, ["inspect-oracle", str(tmp_path / "oracle")])
-    assert public.exit_code == 0, public.output
+    assert public.exit_code != 0
     assert "private_expected" not in public.output
     assert "sealed_validators" not in public.output
 
@@ -196,12 +196,10 @@ def test_oracle_compiler_goal_text_prefers_goal_spec_prompt_fields() -> None:
     assert OracleCompiler._goal_text(goal) == "normalized repo prompt\nraw repo prompt"
 
 
-def test_compile_oracle_cli_uses_stable_goal_identity_and_goal_text(tmp_path: Path) -> None:
+def test_compile_oracle_cli_is_removed_at_v1_cutover(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 
     from agintor.cli import app
-    from agintor.utils import stable_hash
-
     goal_text = "  build a repo patch assistant  "
     first_dir = tmp_path / "oracle-a"
     second_dir = tmp_path / "oracle-b"
@@ -210,25 +208,13 @@ def test_compile_oracle_cli_uses_stable_goal_identity_and_goal_text(tmp_path: Pa
     first = runner.invoke(app, ["compile-oracle", goal_text, str(first_dir)])
     second = runner.invoke(app, ["compile-oracle", goal_text, str(second_dir)])
 
-    assert first.exit_code == 0, first.output
-    assert second.exit_code == 0, second.output
-    first_payload = json.loads(first.output)
-    assert first_payload["runtime_kind"] == "langgraph_spec"
-
-    first_package = load_oracle_package(first_dir)
-    second_package = load_oracle_package(second_dir)
-    expected_goal_id = f"goal.{stable_hash('build a repo patch assistant')[:12]}"
-
-    assert first_package.goal_id == expected_goal_id
-    assert second_package.goal_id == expected_goal_id
-    assert first_package.package_id == second_package.package_id
-    assert first_package.runtime_spec_digest == second_package.runtime_spec_digest
-    task_prompt = first_package.task_sets[0].tasks[0].benchmark_task.prompt
-    assert "build a repo patch assistant" in task_prompt
-    assert "raw_prompt" not in task_prompt
+    assert first.exit_code != 0
+    assert second.exit_code != 0
+    assert not first_dir.exists()
+    assert not second_dir.exists()
 
 
-def test_init_runtime_rejects_goal_scoped_tradingagents_without_goal(tmp_path: Path) -> None:
+def test_init_runtime_command_is_removed_at_v1_cutover(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 
     from agintor.cli import app
@@ -240,7 +226,6 @@ def test_init_runtime_rejects_goal_scoped_tradingagents_without_goal(tmp_path: P
     )
 
     assert result.exit_code != 0
-    assert "requires a goal-scoped spec" in result.output
     assert not destination.exists()
 
 

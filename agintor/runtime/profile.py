@@ -251,7 +251,12 @@ def runtime_has_embedded_profile(runtime_dir: str | Path | None) -> bool:
 
 
 def _default_profile_dict() -> dict[str, Any]:
-    path = resources.files(_resource_package()).joinpath("templates", "baseline_runtime", RUNTIME_PROFILE_FILE)
+    path = resources.files(_resource_package()).joinpath(
+        "runtime",
+        "sdk",
+        "defaults",
+        RUNTIME_PROFILE_FILE,
+    )
     return json.loads(path.read_text(encoding="utf-8"))
 
 

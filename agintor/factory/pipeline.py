@@ -327,7 +327,7 @@ def _run_factory_pipeline(
     _write_json(destination_path / RUNTIME_PROFILE_FILE, runtime_plan.runtime_profile)
     if str(runtime_plan.runtime_kind) not in {"langgraph_spec", "tradingagents_langgraph"}:
         _write_json(destination_path / DEPLOYMENT_CONTRACT_FILE, deployment_contract)
-    bundle_runtime_kernel(destination_path, force=True)
+    bundle_runtime_kernel(destination_path, force=True, profile="legacy")
     with _without_bytecode_writes():
         exported_runtime = load_runtime(
             destination_path,

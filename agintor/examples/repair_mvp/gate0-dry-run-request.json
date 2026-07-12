@@ -1,0 +1,59 @@
+{
+  "deployment_profile": {
+    "command_container_policy": {
+      "cpu_count": 1.0,
+      "environment_allowlist": [
+        "LANG",
+        "LC_ALL",
+        "PYTHONHASHSEED",
+        "TZ"
+      ],
+      "image": "python@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "memory_bytes": 536870912,
+      "network": "none",
+      "nofile_limit": 256,
+      "output_bytes": 1000000,
+      "pids_limit": 128,
+      "timeout_s": 30.0,
+      "tmpfs_bytes": 67108864,
+      "user": "65532:65532"
+    },
+    "command_container_policy_digest": "93a108e1e7014b9d82a7c2e60449c2043c02de1cc082172592fc9e566b60642d",
+    "decoding_policy": {
+      "max_output_tokens": 4096,
+      "parallel_tool_calls": false,
+      "service_tier": "default",
+      "store": false,
+      "temperature": 0.0,
+      "text_verbosity": "low",
+      "top_p": 1.0
+    },
+    "decoding_policy_digest": "e3893ede912f627e07be07629020d2ed9d121faf3d67157c3dc2dc1782979b7b",
+    "deployment_id": "scripted.harness.service",
+    "endpoint": {
+      "api_key_env": "SCRIPTED_PROVIDER_API_KEY",
+      "base_url_env": "SCRIPTED_BASE_URL"
+    },
+    "model": "scripted-repair-model",
+    "price_schedule": {
+      "billing_mode": "free",
+      "cache_write_usd_per_million_tokens": 0.0,
+      "cached_input_usd_per_million_tokens": 0.0,
+      "input_usd_per_million_tokens": 0.0,
+      "output_usd_per_million_tokens": 0.0,
+      "provider_policy_justification": "scripted factory service fixture has no provider billing"
+    },
+    "price_schedule_digest": "2c029fe316764600f88f8e9724c2c9bf355131f5d672d9df3363053d36196273",
+    "prompt_cache_policy": {
+      "maximum_breakpoints": 1,
+      "minimum_prefix_tokens": 1024,
+      "mode": "disabled"
+    },
+    "provider": "scripted",
+    "provider_config_digest": "59db1bd0d893d9b923471253924aa536c02e117e2ba830af1fb407c578310187",
+    "runtime_kind": "harness"
+  },
+  "manifest_destination": "controlled_development_and_evaluator_evidence/gate0/preregistration.json",
+  "provider_evidence_destination": "controlled_development_and_evaluator_evidence/gate0/provider_results.jsonl",
+  "schema_version": "repo-repair-harness-cli-gate0-dry-run-request-v1"
+}

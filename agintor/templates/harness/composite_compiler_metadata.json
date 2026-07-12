@@ -1,0 +1,28 @@
+{
+  "canonical_seed": {
+    "capability_epoch": "repo-repair-v1",
+    "resource_path": "templates/harness/repo_repair_v1_two_actor_seed.json",
+    "seed_id": "repo-repair-v1.two-actor",
+    "source_protocol_digest": "973d91a6470f63cede875a10154af5c0887d269415a1310490a20e3fdc4a0b6d"
+  },
+  "compiler_id": "agintor.composite_compiler",
+  "compiler_version": "1",
+  "composite_plan_schema_version": "repo-repair-composite-plan-v1",
+  "harness_contract_id": "agintor.harness_protocol",
+  "harness_schema_version": "repo-repair-harness-v1",
+  "required_kernel_capabilities": [
+    "actor_context",
+    "immutable_artifacts",
+    "aggregate_budget_ledger",
+    "public_verification",
+    "bounded_revision",
+    "explicit_termination"
+  ],
+  "trusted_tool_ids": [
+    "repo.search",
+    "repo.read",
+    "repo.public_test",
+    "repo.edit",
+    "repo.diff"
+  ]
+}

@@ -3,6 +3,12 @@ from __future__ import annotations
 from importlib import import_module
 
 from ...core.versioning import RUNTIME_CONTRACT_VERSION
+from .harness_manifest import (
+    HARNESS_BUNDLE_PROFILE,
+    HARNESS_KERNEL_CAPABILITY_FLAGS,
+    LEGACY_BUNDLE_PROFILE,
+    HarnessKernelManifest,
+)
 
 KERNEL_BUNDLE_DIR = "runtime_sdk"
 KERNEL_MANIFEST_FILE = "kernel_manifest.json"
@@ -23,6 +29,7 @@ _BUNDLE_EXPORTS = {
     "bundle_runtime_kernel",
     "kernel_manifest_path",
     "preview_kernel_manifest",
+    "validate_kernel_bundle",
 }
 
 
@@ -36,6 +43,10 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "HARNESS_BUNDLE_PROFILE",
+    "HARNESS_KERNEL_CAPABILITY_FLAGS",
+    "LEGACY_BUNDLE_PROFILE",
+    "HarnessKernelManifest",
     "KERNEL_BUNDLE_DIR",
     "KERNEL_CAPABILITY_FLAGS",
     "KERNEL_MANIFEST_FILE",
@@ -44,4 +55,5 @@ __all__ = [
     "bundle_runtime_kernel",
     "kernel_manifest_path",
     "preview_kernel_manifest",
+    "validate_kernel_bundle",
 ]

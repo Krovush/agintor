@@ -1,0 +1,6 @@
+{
+  "environment_id": "environment.sdk.replay",
+  "provider_config_digest": "47c8078a714cd7c44c95998e7750657c4e354f190a61f69cf58d185f4bfef75e",
+  "sampling_replicate": 0,
+  "task_manifest_id": "task.p1.pilot"
+}

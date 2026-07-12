@@ -4,7 +4,12 @@ from typing import Any
 
 from ...contracts import ValidatorResult, ValidatorSpec
 from ...contracts.evidence import RuntimeEvidenceManifest
+from ...evaluation.runners.repo_patch_backends import (
+    IsolatedRepoPatchCommandBackend,
+    TrustedLocalRepoPatchCommandBackend,
+)
 from ...evaluation.runners.repo_patch_runner import RepoPatchEvaluatorRunner, RepoPatchFixture
+from ...isolation.commands import DockerCommandBackend, IsolatedCommandPolicy
 from ..validator_registry import ValidatorFamily
 
 
@@ -13,6 +18,7 @@ _ARTIFACT_FLAG_KEYS = {
     "public_tests_passed",
     "hidden_tests_passed",
     "tampered_tests",
+    "clean_copy_snapshot_unchanged",
     "evaluator_receipt",
     "repo_patch_result",
 }
@@ -79,12 +85,41 @@ def _artifact_keys(artifact: Any) -> list[str]:
 def _runner_receipt(spec: ValidatorSpec, artifact: Any, payload: dict[str, Any]) -> dict[str, Any]:
     fixture = RepoPatchFixture.from_spec_inputs(spec.inputs)
     if fixture is not None:
-        result = RepoPatchEvaluatorRunner().run(candidate_artifact=artifact, fixture=fixture)
+        runner = _configured_evaluator_runner(spec.inputs)
+        if runner is None:
+            return {}
+        result = runner.run(candidate_artifact=artifact, fixture=fixture)
         return result.model_dump(mode="json", exclude_none=True)
     receipt = payload.get("repo_patch_result") or {}
     if isinstance(receipt, dict) and receipt.get("runner_digest"):
         return dict(receipt)
     return {}
+
+
+def _configured_evaluator_runner(inputs: dict[str, Any]) -> RepoPatchEvaluatorRunner | None:
+    raw_config = inputs.get("evaluator_command_backend")
+    if not isinstance(raw_config, dict):
+        return None
+    kind = str(raw_config.get("kind", "") or "").strip()
+    if kind == "trusted_local_for_offline_tests":
+        return RepoPatchEvaluatorRunner(TrustedLocalRepoPatchCommandBackend())
+    if kind != "isolated_v1":
+        return None
+    raw_policy = raw_config.get("policy")
+    if not isinstance(raw_policy, dict):
+        return None
+    try:
+        policy = IsolatedCommandPolicy.model_validate(raw_policy)
+        command_backend = DockerCommandBackend(policy)
+        backend = IsolatedRepoPatchCommandBackend(
+            command_backend,
+            environment_identity={"command_policy": policy.model_dump(mode="json")},
+            python_argv=tuple(raw_config.get("python_argv", ("python",))),
+            git_argv=tuple(raw_config.get("git_argv", ("git",))),
+        )
+    except (TypeError, ValueError):
+        return None
+    return RepoPatchEvaluatorRunner(backend)
 
 
 def _malformed_receipt_bool_fields(receipt: dict[str, Any]) -> list[str]:
@@ -94,6 +129,14 @@ def _malformed_receipt_bool_fields(receipt: dict[str, Any]) -> list[str]:
             malformed.append(key)
     if receipt.get("hidden_tests_passed") is not None and type(receipt.get("hidden_tests_passed")) is not bool:
         malformed.append("hidden_tests_passed")
+    for key in (
+        "source_snapshot_unchanged",
+        "scratch_snapshot_matched",
+        "fixture_identity_matched",
+        "clean_copy_snapshot_unchanged",
+    ):
+        if key in receipt and type(receipt.get(key)) is not bool:
+            malformed.append(key)
     return malformed
 
 
@@ -220,15 +263,21 @@ def _run(spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:
         )
     applied = bool(receipt.get("applied", False))
     tampered_tests = bool(receipt.get("tampered_tests", False))
+    source_unchanged = bool(receipt.get("source_snapshot_unchanged", True))
+    scratch_matched = bool(receipt.get("scratch_snapshot_matched", True))
+    fixture_identity_matched = bool(receipt.get("fixture_identity_matched", True))
+    clean_copy_unchanged = bool(receipt.get("clean_copy_snapshot_unchanged", True))
+    evaluator_integrity = source_unchanged and scratch_matched and fixture_identity_matched and clean_copy_unchanged
     public_passed = receipt.get("public_tests_passed", applied)
     sealed_commands_ran = hidden_passed is not None
     passed = bool(
         applied
         and public_passed
         and not tampered_tests
+        and evaluator_integrity
         and (hidden_passed is True if sealed_commands_ran else True)
     )
-    status = "quarantine" if tampered_tests else "pass" if passed else "fail"
+    status = "quarantine" if tampered_tests or not evaluator_integrity else "pass" if passed else "fail"
     return ValidatorResult(
         validator_id=spec.validator_id,
         family_id=spec.family_id,
@@ -240,6 +289,10 @@ def _run(spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:
             "patch_applied": applied,
             "test_tamper_scan": not tampered_tests,
             "fixture_digest_bound": True,
+            "source_snapshot_unchanged": source_unchanged,
+            "scratch_snapshot_matched": scratch_matched,
+            "fixture_identity_matched": fixture_identity_matched,
+            "clean_copy_snapshot_unchanged": clean_copy_unchanged,
         },
         observations={
             "applied": applied,
@@ -247,6 +300,14 @@ def _run(spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:
             "hidden_tests_passed": hidden_passed,
             "tampered_tests": tampered_tests,
             "tampered_paths": list(receipt.get("tampered_paths", []) or []),
+            "source_snapshot_unchanged": source_unchanged,
+            "scratch_snapshot_matched": scratch_matched,
+            "fixture_identity_matched": fixture_identity_matched,
+            "clean_copy_snapshot_unchanged": clean_copy_unchanged,
+            "patched_clean_digest": str(receipt.get("patched_clean_digest", "") or ""),
+            "workspace_drift_evidence": list(receipt.get("workspace_drift_evidence", []) or []),
+            "execution_backend_id": str(receipt.get("execution_backend_id", "") or ""),
+            "execution_backend_digest": str(receipt.get("execution_backend_digest", "") or ""),
             "runner_digest": str(receipt.get("runner_digest", "") or ""),
             "manifest_id": manifest.manifest_id,
             "command_digests": {
@@ -260,6 +321,7 @@ def _run(spec: ValidatorSpec, payload: dict[str, Any]) -> ValidatorResult:
             ],
             "environment_digest": str(receipt.get("environment_digest", "") or ""),
             "fixture_digest": str(receipt.get("fixture_digest", "") or ""),
+            "evaluation_contract_digest": str(receipt.get("evaluation_contract_digest", "") or ""),
         },
     )
 

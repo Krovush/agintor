@@ -9,7 +9,6 @@ from ..factory.goals import (
     build_success_criteria_bundle,
     canonical_goal_prompt,
 )
-from ..runtime.project import baseline_template_dir
 from ..providers import ModelProvider
 from ..runtime.profile import (
     HostedProviderProfile,
@@ -37,8 +36,6 @@ from ..contracts import (
 from ..utils import stable_hash
 from ..core.versioning import RUNTIME_CONTRACT_VERSION
 
-
-from .export import _load_template_manifest
 
 def _goal_task_id(goal_input: GoalSpec | str) -> str:
     goal_text = goal_input.normalized_goal if isinstance(goal_input, GoalSpec) else canonical_goal_prompt(goal_input)
@@ -392,7 +389,7 @@ def _build_verifier_bundle(plan: BenchmarkPlan, suite: BenchmarkSuite) -> Verifi
 
 
 def _build_deployment_contract(goal_spec: GoalSpec, profile: RuntimeProfile) -> DeploymentContract:
-    kernel_manifest = preview_kernel_manifest()
+    kernel_manifest = preview_kernel_manifest(profile="legacy")
     notes = list(goal_spec.assumptions)
     if profile.runtime_provider.api_key_file_env:
         notes.append(
@@ -451,7 +448,21 @@ def _build_runtime_plan(
     agintor_provider: str,
     runtime_backend: str,
 ) -> RuntimePlan:
-    manifest = _load_template_manifest()
+    runtime_kind = str(goal_spec.constraints.get("runtime_kind", "policy_modules") or "policy_modules")
+    mutable_files: list[str] = []
+    immutable_manifest: list[str] = []
+    seed_template = ""
+    if runtime_kind == "policy_modules":
+        # The disposable policy-module runtime is the only path whose seed is a
+        # directory template.  Spec/harness planning must not touch that legacy
+        # source before their runtime-kind-specific compiler builds a seed.
+        from ..runtime.project import baseline_template_dir
+        from .export import _load_template_manifest
+
+        manifest = _load_template_manifest()
+        mutable_files = list(manifest.mutable_files)
+        immutable_manifest = list(manifest.immutable_manifest)
+        seed_template = str(baseline_template_dir())
     deployment_contract = _build_deployment_contract(goal_spec, profile)
     provider_plan = ProviderPlan(
         plan_id=f"providers.{stable_hash(goal_spec.goal_id, agintor_provider, profile.runtime_provider.name)[:12]}",
@@ -468,10 +479,10 @@ def _build_runtime_plan(
         plan_id=f"runtime.{stable_hash(goal_spec.goal_id, benchmark_plan.plan_id)[:12]}",
         goal_id=goal_spec.goal_id,
         runtime_contract_version=RUNTIME_CONTRACT_VERSION,
-        runtime_kind=str(goal_spec.constraints.get("runtime_kind", "policy_modules") or "policy_modules"),
-        seed_template=str(baseline_template_dir()),
-        mutable_files=list(manifest.mutable_files),
-        immutable_manifest=list(manifest.immutable_manifest),
+        runtime_kind=runtime_kind,
+        seed_template=seed_template,
+        mutable_files=mutable_files,
+        immutable_manifest=immutable_manifest,
         runtime_profile=runtime_profile_payload(profile),
         provider_plan=provider_plan,
         tooling_scope=_tooling_scope_from_suite(suite),

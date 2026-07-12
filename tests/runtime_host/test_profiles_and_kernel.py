@@ -189,7 +189,7 @@ def test_task_runtime_facade_is_exported_in_bundled_kernel(tmp_path: Path):
     from agintor.runtime.kernel.facade import TaskRuntime as HostTaskRuntime
 
     runtime_dir = tmp_path / "runtime"
-    manifest = bundle_runtime_kernel(runtime_dir, force=True)
+    manifest = bundle_runtime_kernel(runtime_dir, force=True, profile="legacy")
     sdk_path = str((runtime_dir / "runtime_sdk").resolve())
 
     assert HostTaskRuntime.__name__ == "TaskRuntime"
@@ -222,7 +222,7 @@ def test_task_runtime_facade_is_exported_in_bundled_kernel(tmp_path: Path):
 
 
 def test_runtime_kernel_bundle_excludes_host_factory_search_learning_evaluation_and_template_python(tmp_path: Path):
-    preview = preview_kernel_manifest()
+    preview = preview_kernel_manifest(profile="legacy")
     runtime_dir = project.init_runtime(tmp_path / "runtime")
     bundled_manifest = json.loads(
         (runtime_dir / "runtime_sdk" / "kernel_manifest.json").read_text(encoding="utf-8")
@@ -247,8 +247,10 @@ def test_generated_template_python_does_not_affect_preview_or_bundled_manifest(
     copied_root = _copy_package_source_for_manifest_test(tmp_path)
     monkeypatch.setattr(runtime_bundle, "_package_root", lambda: copied_root)
 
-    preview_before = preview_kernel_manifest()
-    bundled_before = bundle_runtime_kernel(tmp_path / "runtime-before", force=True)
+    preview_before = preview_kernel_manifest(profile="legacy")
+    bundled_before = bundle_runtime_kernel(
+        tmp_path / "runtime-before", force=True, profile="legacy"
+    )
 
     generated_template = copied_root / "templates" / "baseline_runtime" / "_generated_policy_shadow.py"
     generated_template.write_text("GENERATED_DIRTY_SENTINEL = 'ignore me'\n", encoding="utf-8")
@@ -259,8 +261,10 @@ def test_generated_template_python_does_not_affect_preview_or_bundled_manifest(
         encoding="utf-8",
     )
 
-    preview_after = preview_kernel_manifest()
-    bundled_after = bundle_runtime_kernel(tmp_path / "runtime-after", force=True)
+    preview_after = preview_kernel_manifest(profile="legacy")
+    bundled_after = bundle_runtime_kernel(
+        tmp_path / "runtime-after", force=True, profile="legacy"
+    )
 
     assert _forbidden_bundle_files(preview_after.files) == []
     assert _forbidden_bundle_files(bundled_after.files) == []

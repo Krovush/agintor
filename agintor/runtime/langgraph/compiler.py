@@ -31,7 +31,7 @@ class RuntimeSpecCompiler:
         self._write_generated_app(destination)
         self._write_manifest(spec, destination)
         self._write_deployment_contract(spec, destination)
-        bundle_runtime_kernel(destination, force=True)
+        bundle_runtime_kernel(destination, force=True, profile="legacy")
         return destination
 
     @staticmethod

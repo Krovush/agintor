@@ -63,6 +63,24 @@ def _command(name: str, expression: str) -> RepoPatchCommand:
     )
 
 
+def _mutating_command(name: str) -> RepoPatchCommand:
+    return RepoPatchCommand(
+        name=name,
+        command=[
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path\n"
+                "path = Path('src/app.py')\n"
+                "text = path.read_text(encoding='utf-8')\n"
+                "assert 'VALUE = 2' in text, text\n"
+                "path.write_text('VALUE = 9\\n', encoding='utf-8')\n"
+            ),
+        ],
+        timeout_s=10.0,
+    )
+
+
 def _fixture(repo: Path) -> tuple[RepoPatchFixture, dict[str, Any]]:
     public = _command("public", "'VALUE = 2' in text")
     hidden = _command("hidden", "text.strip() == 'VALUE = 2'")
@@ -81,6 +99,7 @@ def _fixture(repo: Path) -> tuple[RepoPatchFixture, dict[str, Any]]:
         "public_test_command_digest": command_suite_digest([public]),
         "hidden_tests_digest": command_suite_digest([hidden]),
         "qa_known_good_artifact": _patch_artifact(),
+        "evaluator_command_backend": {"kind": "trusted_local_for_offline_tests"},
     }
     return fixture, inputs
 
@@ -101,6 +120,7 @@ def _public_only_fixture(repo: Path) -> tuple[RepoPatchFixture, dict[str, Any]]:
         "repo_snapshot_digest": repo_snapshot_digest(repo),
         "public_test_command_digest": command_suite_digest([public]),
         "qa_known_good_artifact": _patch_artifact(),
+        "evaluator_command_backend": {"kind": "trusted_local_for_offline_tests"},
     }
     return fixture, inputs
 
@@ -210,7 +230,7 @@ def test_repo_patch_runner_applies_patch_in_clean_copy_and_keeps_snapshot_unchan
     fixture, _inputs = _fixture(repo)
     original_digest = repo_snapshot_digest(repo)
 
-    result = RepoPatchEvaluatorRunner().run(candidate_artifact=_patch_artifact(), fixture=fixture)
+    result = RepoPatchEvaluatorRunner.trusted_local().run(candidate_artifact=_patch_artifact(), fixture=fixture)
 
     assert result.applied is True
     assert result.public_tests_passed is True
@@ -231,7 +251,7 @@ def test_repo_patch_runner_treats_absent_public_phase_as_neutral_for_sealed_only
         protected_paths=["tests"],
     )
 
-    result = RepoPatchEvaluatorRunner().run(candidate_artifact=_patch_artifact(), fixture=fixture)
+    result = RepoPatchEvaluatorRunner.trusted_local().run(candidate_artifact=_patch_artifact(), fixture=fixture)
 
     assert result.status == "pass"
     assert result.applied is True
@@ -370,7 +390,7 @@ def test_repo_patch_runner_normalizes_runtime_updated_files_absolute_diff_paths(
         ]
     }
 
-    result = RepoPatchEvaluatorRunner().run(candidate_artifact=artifact, fixture=fixture)
+    result = RepoPatchEvaluatorRunner.trusted_local().run(candidate_artifact=artifact, fixture=fixture)
 
     assert result.status == "pass"
     assert result.applied is True
@@ -531,6 +551,46 @@ def test_repo_patch_test_tampering_quarantines_runner_evidence(tmp_path: Path) -
     assert results[0].status == "quarantine"
     assert results[0].observations["tampered_tests"] is True
     assert results[0].observations["tampered_paths"] == ["tests"]
+    assert claims[0].satisfied is False
+
+
+def test_repo_patch_test_induced_source_drift_quarantines_runner_evidence(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _write_fixture(repo)
+    public = _mutating_command("public-mutates-src")
+    hidden = _command("hidden", "text.strip() == 'VALUE = 2'")
+    inputs = {
+        "repo_snapshot_path": str(repo),
+        "public_test_commands": [public.model_dump(mode="json")],
+        "sealed_test_commands": [hidden.model_dump(mode="json")],
+        "protected_paths": ["tests"],
+        "repo_snapshot_digest": repo_snapshot_digest(repo),
+        "public_test_command_digest": command_suite_digest([public]),
+        "hidden_tests_digest": command_suite_digest([hidden]),
+        "evaluator_command_backend": {"kind": "trusted_local_for_offline_tests"},
+    }
+    package = _package(inputs)
+    task_id = package.task_sets[0].tasks[0].task_id
+
+    results, claims = OracleEvaluationRunner().evaluate_run(
+        package,
+        {
+            "task_id": task_id,
+            "runtime_hash": "runtime",
+            "artifact": _patch_artifact(),
+            "runtime_evidence_manifest": _manifest(task_id),
+        },
+    )
+
+    assert results[0].status == "quarantine"
+    assert results[0].observations["tampered_tests"] is True
+    assert results[0].observations["clean_copy_snapshot_unchanged"] is False
+    assert results[0].observations["patched_clean_digest"]
+    drift = results[0].observations["workspace_drift_evidence"]
+    assert drift[-1]["phase"] == "public_check"
+    assert drift[-1]["matched"] is False
     assert claims[0].satisfied is False
 
 
@@ -851,7 +911,7 @@ def test_repo_patch_runner_controlled_environment_blocks_unhashed_ambient_env(tm
     monkeypatch.setenv("AGINTOR_AMBIENT_REPO_PATCH", "would-fail-if-inherited")
     after_digest = environment_digest(fixture)
 
-    result = RepoPatchEvaluatorRunner().run(candidate_artifact=_patch_artifact(), fixture=fixture)
+    result = RepoPatchEvaluatorRunner.trusted_local().run(candidate_artifact=_patch_artifact(), fixture=fixture)
 
     assert result.status == "pass"
     assert result.environment_digest == after_digest == before_digest

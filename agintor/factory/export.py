@@ -296,7 +296,7 @@ def _write_seed_runtime(
     _write_json(seed_runtime_dir / RUNTIME_PROFILE_FILE, runtime_plan.runtime_profile)
     if not spec_backed:
         _write_json(seed_runtime_dir / DEPLOYMENT_CONTRACT_FILE, runtime_plan.deployment_contract)
-    bundle_runtime_kernel(seed_runtime_dir, force=True)
+    bundle_runtime_kernel(seed_runtime_dir, force=True, profile="legacy")
     if runtime_profile is not None:
         with _without_bytecode_writes():
             load_runtime(

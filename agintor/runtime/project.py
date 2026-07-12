@@ -27,7 +27,7 @@ def _refresh_deployment_contract(runtime_dir: Path) -> None:
     contract_path = runtime_dir / "deployment_contract.json"
     payload = json.loads(contract_path.read_text(encoding="utf-8"))
     runtime_profile = load_runtime_profile(runtime_dir)
-    kernel_manifest = preview_kernel_manifest()
+    kernel_manifest = preview_kernel_manifest(profile="legacy")
     required_env_names = []
     required_env_any_of: list[list[str]] = []
     api_key_env = str(runtime_profile.runtime_provider.api_key_env or "").strip()
@@ -99,7 +99,7 @@ def init_runtime(destination: str | Path, force: bool = False) -> Path:
     template_root = resources.files("agintor").joinpath("templates", "baseline_runtime")
     with resources.as_file(template_root) as template_dir:
         shutil.copytree(template_dir, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
-    bundle_runtime_kernel(dest, force=True)
+    bundle_runtime_kernel(dest, force=True, profile="legacy")
     _refresh_runtime_manifest(dest)
     _refresh_deployment_contract(dest)
     return dest

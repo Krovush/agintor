@@ -1,0 +1,72 @@
+{
+  "capability_epoch": "repo-repair-v1",
+  "deployment": {
+    "decoding_policy_digest": "8f75701bf3fc76b6dbdcdb31dc5f7ef6f02f7e83a7ecc4f83f861328c0426248",
+    "deployment_id": "deployment.p1",
+    "model": "offline-model",
+    "price_schedule_digest": "047e47d1afee99b05c555254046c5bc6e3c0a16eea78053952b6653115ec3512",
+    "provider": "offline-provider",
+    "provider_config_digest": "47c8078a714cd7c44c95998e7750657c4e354f190a61f69cf58d185f4bfef75e"
+  },
+  "development_split_digest": "875b9380866e9d56e7110b0ee310962c16d9d4ae103f829d62bdffd2cbe7c61d",
+  "epoch_id": "epoch.p1",
+  "epoch_manifest_digest": "4ff34d0a76ce5c86e60f1cdbe40cf3cf6e83507c10aa9380815c7da6a2427999",
+  "mutation_surface": [
+    "actors[*].task_view",
+    "actors[*].instruction",
+    "actors[*].tool_ids",
+    "actors[*].budget_share_bps",
+    "artifact_channels",
+    "revision",
+    "termination.final_actor_id"
+  ],
+  "per_run_ceilings": {
+    "max_artifact_bytes": 40000,
+    "max_cached_tokens": 0,
+    "max_cache_write_tokens": 0,
+    "max_estimated_cost_usd": 2.0,
+    "max_input_tokens": 30000,
+    "max_known_cost_usd": 1.0,
+    "max_model_calls": 8,
+    "max_output_tokens": 12000,
+    "max_patch_bytes": 20000,
+    "max_retries": 2,
+    "max_tool_calls": 30,
+    "max_tool_output_bytes": 200000,
+    "max_wall_time_ms": 30000,
+    "provider_deadline_ms": 5000
+  },
+  "runtime_contract_version": "0.1.0",
+  "trusted_tools": [
+    {
+      "implementation_digest": "d1976af91b2e24f376fb0c7f62180bfbb58df1276ae334f49b64c7fa71518140",
+      "network_access": false,
+      "policy_digest": "c75dd56866a30a2b18bc98e7cdeb97fe0da4ca1ebf3d18fbf20a37c046694d0f",
+      "tool_id": "repo.search"
+    },
+    {
+      "implementation_digest": "e7a2bc75c01a0e0e82bed3a6d1a3b6d9e46f3d134a7c970701ced29131e3f56b",
+      "network_access": false,
+      "policy_digest": "3c8aa2e7ac4f1072954491ac1ca4b445c2410c36e059031b046c8dd870216149",
+      "tool_id": "repo.read"
+    },
+    {
+      "implementation_digest": "7c3f3fad177bf238454e10a43e4e6b4931bed53abe5d0519924ebedc979ab52f",
+      "network_access": false,
+      "policy_digest": "2a2f9f61f9d74a62670be58e8cac3fd713bc208c1a479ee8d8458c37d4c88c46",
+      "tool_id": "repo.public_test"
+    },
+    {
+      "implementation_digest": "09cea4d270c2d824c74f47a5c00fb3895351c3f6626304abdd9e90ee9abe1cd9",
+      "network_access": false,
+      "policy_digest": "48ef4e477f252e28a62c08b6eaa782fef3b838db7727cb214944ddf1d7c5e22b",
+      "tool_id": "repo.edit"
+    },
+    {
+      "implementation_digest": "54e3717dec19347358a461df76523db1cad34e4338d0afa12c03c9f85fa129f4",
+      "network_access": false,
+      "policy_digest": "6c5fb1a68b1c5f42224ef316f5218d763e4b3aead8b2d418ebc6be87253e8cdd",
+      "tool_id": "repo.diff"
+    }
+  ]
+}

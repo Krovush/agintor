@@ -1,0 +1,58 @@
+{
+  "command_container_policy": {
+    "cpu_count": 1.0,
+    "environment_allowlist": [
+      "LANG",
+      "LC_ALL",
+      "PYTHONHASHSEED",
+      "TZ"
+    ],
+    "image": "docker.io/library/python@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf",
+    "memory_bytes": 536870912,
+    "network": "none",
+    "nofile_limit": 256,
+    "output_bytes": 1000000,
+    "pids_limit": 128,
+    "timeout_s": 30.0,
+    "tmpfs_bytes": 67108864,
+    "user": "65532:65532"
+  },
+  "command_container_policy_digest": "d42fd009e71ebc0990d81af93d90f2e55dcf9613a2c404bd1d665b206a79485b",
+  "decoding_policy": {
+    "max_output_tokens": 256,
+    "parallel_tool_calls": false,
+    "reasoning_effort": "none",
+    "service_tier": "default",
+    "store": false,
+    "temperature": 0.0,
+    "text_verbosity": "low",
+    "top_p": 1.0
+  },
+  "decoding_policy_digest": "eb4d8a9ddad6c20c2535d67c06eb7d6ef908fe13adeee0ecccff46068dac1704",
+  "deployment_id": "openai.gpt-5.6-luna.none.standard.v1",
+  "endpoint": {
+    "api_key_env": "OPENAI_API_KEY",
+    "api_key_file_env": "AGINTOR_OPENAI_KEY_FILE",
+    "base_url": "https://api.openai.com/v1"
+  },
+  "model": "gpt-5.6-luna",
+  "price_schedule": {
+    "billing_mode": "paid",
+    "cache_write_usd_per_million_tokens": 1.25,
+    "cached_input_usd_per_million_tokens": 0.1,
+    "input_usd_per_million_tokens": 1.0,
+    "output_usd_per_million_tokens": 6.0
+  },
+  "price_schedule_digest": "2738cc1ec0b7ddc1ae4e7268a086e8df46881e4c637b67f891a013fc425924d7",
+  "prompt_cache_policy": {
+    "breakpoint": "static_prefix",
+    "maximum_breakpoints": 1,
+    "minimum_prefix_tokens": 1024,
+    "mode": "explicit",
+    "prompt_cache_key": "agintor:repo-repair-v1:luna-none",
+    "ttl": "30m"
+  },
+  "provider": "openai",
+  "provider_config_digest": "bb475b324100438d5686099cc7b7557b1ac5d0f511ae83eedf71e48fa33e89b5",
+  "runtime_kind": "harness"
+}

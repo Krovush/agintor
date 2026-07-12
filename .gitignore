@@ -5,6 +5,21 @@
 !.python-version
 
 /agintor.egg-info/
+/*.egg-info/
+/build/
+/dist/
+/demo/
+/demo_*/
+/wheelhouse/
+/wheels/
+/*.whl
+/*.tar.gz
+/generated_workspaces/
+/generated-workspaces/
+/workspaces/
+/run_artifacts/
+/harness_workspaces/
+/runtime_workspaces/
 /tests/_artifacts/
 /tests/_artifacts/**
 /tests/_artifacts/run_*/
@@ -19,15 +34,5 @@ MiniMax API Key.txt
 /openai_api_traces/
 /TradingAgents/
 /agintor/templates/baseline_runtime/
-/Dev Docs/**
-!/Dev Docs/FASTEST_PATH_TO_MVP_MASTER_ACTION_PLAN.md
-!/Dev Docs/DEFERRED_ISSUES_LEDGER.md
-!/Dev Docs/LANGGRAPH_ORACLE_PASS1_FINAL_PLAN.md
-!/Dev Docs/REPO_MAP.md
-!/Dev Docs/Archive Only - Zero Authority/
-!/Dev Docs/Archive Only - Zero Authority/**
-!/Dev Docs/Collaboration Prompts/
-!/Dev Docs/Collaboration Prompts/**
-!/Dev Docs/Secret Sauce Research/
-!/Dev Docs/Secret Sauce Research/07_SELF_EVOLVING_AGENTS_PAPER_INTEGRATION_PLAN.md
+/Dev Docs/
 /implementation_workstreams/
